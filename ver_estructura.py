@@ -1,15 +1,27 @@
+from dotenv import load_dotenv
+
+from config import settings
 from database.connection import DatabaseManager
 
-def ver_columnas():
-    print("--- INSPECCIONANDO BASE DE DATOS 'ALGEBRA' ---")
-    
-    # 1. Conectar
+load_dotenv()
+
+
+def ver_columnas(db_name: str | None = None):
+    print("--- INSPECCIONANDO BASE DE DATOS ---")
+
+    objetivo = db_name or settings.DB_NAME
+
     try:
-        db = DatabaseManager()
-        conn = db.get_connection("matematica") # Asegúrate que tu BD se llama 'Algebra' o 'matematicas'
+        db = DatabaseManager(
+            user=settings.DB_USER,
+            password=settings.DB_PASSWORD,
+            host=settings.DB_HOST,
+            port=settings.DB_PORT,
+            sslmode=settings.DB_SSLMODE,
+        )
+        conn = db.get_connection(objetivo)
         cur = conn.cursor()
-        
-        # 2. Preguntar a PostgreSQL las columnas de la tabla 'problemas'
+
         sql = """
             SELECT column_name, data_type, udt_name
             FROM information_schema.columns
@@ -18,22 +30,23 @@ def ver_columnas():
         """
         cur.execute(sql)
         filas = cur.fetchall()
-        
-        print(f"\nTABLA: problemas ({len(filas)} columnas found)\n")
+
+        print(f"\nTABLA: problemas ({len(filas)} columnas encontradas)\n")
         print(f"{'NOMBRE COLUMNA':<25} | {'TIPO DATO':<15} | {'TIPO REAL'}")
         print("-" * 60)
-        
+
         col_names = []
         for nombre, tipo, real in filas:
             print(f"{nombre:<25} | {tipo:<15} | {real}")
             col_names.append(nombre)
-            
+
         conn.close()
         return col_names
 
     except Exception as e:
         print(f"Error conectando: {e}")
         return []
+
 
 if __name__ == "__main__":
     ver_columnas()

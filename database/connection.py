@@ -1,11 +1,25 @@
 import psycopg2
+from dotenv import load_dotenv
+
+from config import settings
+
+load_dotenv()
+
 
 class DatabaseManager:
-    def __init__(self, user="postgres", password="postgres", host="localhost", port="5433"):
-        self.user = user
-        self.password = password 
-        self.host = host
-        self.port = port
+    def __init__(
+        self,
+        user: str | None = None,
+        password: str | None = None,
+        host: str | None = None,
+        port: int | None = None,
+        sslmode: str | None = None,
+    ):
+        self.user = user or settings.DB_USER
+        self.password = password or settings.DB_PASSWORD
+        self.host = host or settings.DB_HOST
+        self.port = port or settings.DB_PORT
+        self.sslmode = sslmode or settings.DB_SSLMODE
         self.connection = None
 
     # --- CAMBIO IMPORTANTE: Ahora se llama listar_bases_datos ---
@@ -21,18 +35,19 @@ class DatabaseManager:
                 password=self.password,
                 host=self.host,
                 port=self.port,
-                options="-c client_encoding=utf8"
+                sslmode=self.sslmode,
+                options="-c client_encoding=utf8",
             )
             conn.autocommit = True
             cur = conn.cursor()
-            
+
             cur.execute("SELECT datname FROM pg_database WHERE datistemplate = false;")
             dbs = [row[0] for row in cur.fetchall()]
-            
+
             cur.close()
             conn.close()
             return dbs
-            
+
         except Exception as e:
             print(f"⚠️ Error listando BDs: {repr(e)}")
             return []
@@ -48,7 +63,8 @@ class DatabaseManager:
                 password=self.password,
                 host=self.host,
                 port=self.port,
-                options="-c client_encoding=utf8"
+                sslmode=self.sslmode,
+                options="-c client_encoding=utf8",
             )
             return conn
         except Exception as e:
