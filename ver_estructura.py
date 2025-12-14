@@ -1,9 +1,9 @@
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
+
+load_dotenv(find_dotenv())
 
 from config import settings
 from database.connection import DatabaseManager
-
-load_dotenv()
 
 
 def ver_columnas(db_name: str | None = None):
