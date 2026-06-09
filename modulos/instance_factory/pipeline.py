@@ -396,6 +396,28 @@ class InstancePdfPipelineService:
             ]
         )
 
+    @staticmethod
+    def _int_sort_value(value: Any, default: int = 10**9) -> int:
+        try:
+            number = int(value)
+        except Exception:
+            return default
+        return number if number >= 0 else default
+
+    @classmethod
+    def _crop_payload_sort_key(cls, crop_id: str, payload: dict[str, Any]) -> tuple[int, int, int, int, int, str]:
+        bbox = payload.get("bbox_px") or []
+        y1 = cls._int_sort_value(bbox[1] if isinstance(bbox, (list, tuple)) and len(bbox) > 1 else None)
+        x1 = cls._int_sort_value(bbox[0] if isinstance(bbox, (list, tuple)) and len(bbox) > 0 else None)
+        return (
+            cls._int_sort_value(payload.get("source_page_number")),
+            cls._int_sort_value(payload.get("source_order")),
+            cls._int_sort_value(payload.get("box_index") or payload.get("page_problem_index") or payload.get("problem_index")),
+            y1,
+            x1,
+            str(crop_id or ""),
+        )
+
     def _invalidate_downstream_for_page_boxes_change(
         self,
         page: ProblemPageRecord,
@@ -586,8 +608,8 @@ class InstancePdfPipelineService:
             project_name=self.context.project_name,
             pdf_path=self.context.pdf_path,
         )
-        out: list[StagingProblemRecord] = []
-        for crop_id in sorted(crop_ids):
+        crop_payloads: list[tuple[tuple[int, int, int, int, int, str], str, Path, dict[str, Any]]] = []
+        for crop_id in crop_ids:
             record_path = Path(target) / "records" / f"{crop_id}.json"
             if not record_path.exists():
                 continue
@@ -595,6 +617,10 @@ class InstancePdfPipelineService:
                 crop_payload = json.loads(record_path.read_text(encoding="utf-8"))
             except Exception:
                 crop_payload = {}
+            crop_payloads.append((self._crop_payload_sort_key(crop_id, crop_payload), crop_id, record_path, crop_payload))
+
+        out: list[StagingProblemRecord] = []
+        for _sort_key, crop_id, record_path, crop_payload in sorted(crop_payloads, key=lambda item: item[0]):
             crop_rel = str(crop_payload.get("crop_image_rel") or "").strip()
             crop_path = Path(target) / crop_rel if crop_rel else Path("")
             existing = self.staging.get_record(crop_id)
@@ -606,6 +632,10 @@ class InstancePdfPipelineService:
                 "pdf_path": crop_payload.get("source_pdf_path") or self.context.pdf_path,
                 "page_number": crop_payload.get("source_page_number"),
                 "page_image": crop_payload.get("source_page_image"),
+                "source_order": crop_payload.get("source_order"),
+                "box_index": crop_payload.get("box_index"),
+                "page_problem_index": crop_payload.get("page_problem_index"),
+                "problem_index": crop_payload.get("problem_index"),
                 "bbox_px": crop_payload.get("bbox_px") or [],
                 "crop_id": crop_id,
                 "crop_path": str(crop_path),
@@ -888,6 +918,13 @@ class InstancePdfPipelineService:
                 raise RuntimeError(
                     "Falta HF_TRAINED_OCR_BASE_URL. Configura la URL /v1 del endpoint dedicado "
                     "del modelo OCR entrenado o usa temporalmente HF_BASE_URL con esa misma URL."
+                )
+            if "router.huggingface.co" in endpoint.lower():
+                raise RuntimeError(
+                    "HF_TRAINED_OCR_BASE_URL esta apuntando al router de Hugging Face Inference Providers. "
+                    "Para el modelo OCR entrenado usa la URL /v1 del endpoint dedicado "
+                    "(por ejemplo https://...endpoints.huggingface.cloud/v1) o genera un HF_TOKEN "
+                    "fine-grained con permiso 'Make calls to Inference Providers' si decides usar el router."
                 )
 
     def normalize_existing_ocr(

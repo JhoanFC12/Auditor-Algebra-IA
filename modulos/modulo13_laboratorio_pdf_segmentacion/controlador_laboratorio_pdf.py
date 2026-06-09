@@ -338,12 +338,24 @@ class PdfProblemGoldenController:
         images_dir.mkdir(parents=True, exist_ok=True)
         source_prefix = f"{safe_name(name, max_len=48)}__"
         active_ids: set[str] = set()
-        for row in rows:
+        ordered_crop_ids: list[str] = []
+        source_order = 0
+
+        def page_sort_key(row: ProblemPageRecord) -> tuple[int, str]:
+            try:
+                page_number = int(row.page_number or 0)
+            except Exception:
+                page_number = 0
+            return (page_number, str(row.record_id or ""))
+
+        for row in sorted(rows or [], key=page_sort_key):
             with Image.open(row.image_path) as image:
                 for index, box in enumerate(row.boxes, start=1):
+                    source_order += 1
                     crop_id = compact_id(source_prefix, row.record_id, f"problem_{index:02d}", prefix="crop", max_len=72)
                     session_source_label = compact_id(source_prefix, row.record_id, f"problem_{index:02d}", prefix="problem", max_len=62)
                     active_ids.add(crop_id)
+                    ordered_crop_ids.append(crop_id)
                     crop_path = images_dir / f"{crop_id}.png"
                     crop_path.parent.mkdir(parents=True, exist_ok=True)
                     image.crop(box).save(crop_path, format="PNG")
@@ -369,6 +381,10 @@ class PdfProblemGoldenController:
                         "source_pdf_path": str(pdf_path or row.pdf_path or ""),
                         "source_page_number": row.page_number,
                         "source_page_image": str(row.image_path),
+                        "source_order": source_order,
+                        "box_index": index,
+                        "page_problem_index": index,
+                        "problem_index": source_order,
                         "bbox_px": list(box),
                         "crop_image_rel": str(crop_path.relative_to(target)).replace("\\", "/"),
                         "layout_mode": row.layout_mode,
@@ -391,7 +407,7 @@ class PdfProblemGoldenController:
                 image_path.unlink()
         self._rewrite_problem_crops_live_manifest(target)
         if return_crop_ids:
-            return target, sorted(active_ids)
+            return target, ordered_crop_ids
         return target
 
     def sync_problem_crops_to_transcriptor_session(

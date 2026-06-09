@@ -307,8 +307,31 @@ class InstanceStagingStore:
                 rows.append((path, record))
         return rows
 
+    @staticmethod
+    def _int_sort_value(value: Any, default: int = 10**9) -> int:
+        try:
+            number = int(value)
+        except Exception:
+            return default
+        return number if number >= 0 else default
+
+    @classmethod
+    def _record_sort_key(cls, record: StagingProblemRecord) -> tuple[int, int, int, int, int, str]:
+        source = dict(record.source or {})
+        bbox = source.get("bbox_px") or []
+        y1 = cls._int_sort_value(bbox[1] if isinstance(bbox, (list, tuple)) and len(bbox) > 1 else None)
+        x1 = cls._int_sort_value(bbox[0] if isinstance(bbox, (list, tuple)) and len(bbox) > 0 else None)
+        return (
+            cls._int_sort_value(source.get("page_number") or source.get("source_page_number")),
+            cls._int_sort_value(source.get("source_order")),
+            cls._int_sort_value(source.get("box_index") or source.get("page_problem_index") or source.get("problem_index")),
+            y1,
+            x1,
+            str(record.record_id or record.crop_id or ""),
+        )
+
     def load_records(self) -> list[StagingProblemRecord]:
-        return [record for _path, record in self._load_record_entries()]
+        return sorted((record for _path, record in self._load_record_entries()), key=self._record_sort_key)
 
     def _deduplicate_record_entries(
         self,
@@ -359,7 +382,8 @@ class InstanceStagingStore:
                 except FileNotFoundError:
                     pass
 
-        return self.load_records() if duplicate_paths else [record for _path, record in entries], {
+        rows = self.load_records() if duplicate_paths else sorted((record for _path, record in entries), key=self._record_sort_key)
+        return rows, {
             "duplicate_identity_keys_before_repair": sorted(duplicate_identities),
             "duplicate_records_repaired": repaired,
         }

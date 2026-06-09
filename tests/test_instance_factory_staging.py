@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from modulos.instance_factory.model_inventory import build_model_inventory_manifest, resolve_model_defaults
 from modulos.instance_factory.models import InstancePipelineContext, PipelineStep, StageStatus, StagingProblemRecord
@@ -201,6 +202,37 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertEqual(store.get_record("crop_002").normalized["numero"], "99")
             self.assertEqual(store.get_record("crop_002").normalized["enunciado_latex"], "preservar")
 
+    def test_trained_ocr_rejects_hf_router_as_dedicated_endpoint(self) -> None:
+        try:
+            from modulos.instance_factory.pipeline import InstancePdfPipelineService
+            from modulos.modulo0_transcriptor.scan_pipeline.extractor import TRAINED_OCR_VISION_MODEL
+        except Exception as exc:  # pragma: no cover - optional detector/OCR dependencies.
+            self.skipTest(f"pipeline deps unavailable: {exc}")
+
+        env_snapshot = {
+            key: os.environ.get(key)
+            for key in ("HF_TOKEN", "HUGGINGFACEHUB_API_TOKEN", "HF_TRAINED_OCR_BASE_URL")
+        }
+        try:
+            os.environ["HF_TOKEN"] = "hf_test_token"
+            os.environ.pop("HUGGINGFACEHUB_API_TOKEN", None)
+            os.environ["HF_TRAINED_OCR_BASE_URL"] = "https://router.huggingface.co/v1"
+            service = InstancePdfPipelineService(InstancePipelineContext(book_code="ALG01", instance_type="s01"))
+
+            with patch("importlib.util.find_spec", return_value=object()):
+                with self.assertRaisesRegex(RuntimeError, "router de Hugging Face Inference Providers"):
+                    service._validate_ocr_runtime(
+                        provider="hf",
+                        model=TRAINED_OCR_VISION_MODEL,
+                        trained_model=TRAINED_OCR_VISION_MODEL,
+                    )
+        finally:
+            for key, value in env_snapshot.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
     def test_review_update_can_mark_record_ready_without_inserting_problems(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = InstancePipelineContext(book_code="GEO", instance_type="s03")
@@ -272,6 +304,38 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(manifest["records_total"], 1)
             self.assertEqual(manifest["metadata"]["duplicate_identity_total"], 0)
+
+    def test_staging_records_are_loaded_in_page_and_box_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s04", pdf_path="E:/Banco/libro.pdf")
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="z_page_2",
+                        crop_id="z_page_2",
+                        crop_path=str(Path(tmp) / "z.png"),
+                        source={"page_number": 2, "source_order": 3, "box_index": 1, "bbox_px": [10, 10, 40, 40]},
+                    ),
+                    StagingProblemRecord(
+                        record_id="a_page_1_second",
+                        crop_id="a_page_1_second",
+                        crop_path=str(Path(tmp) / "a.png"),
+                        source={"page_number": 1, "source_order": 2, "box_index": 2, "bbox_px": [10, 60, 40, 90]},
+                    ),
+                    StagingProblemRecord(
+                        record_id="m_page_1_first",
+                        crop_id="m_page_1_first",
+                        crop_path=str(Path(tmp) / "m.png"),
+                        source={"page_number": 1, "source_order": 1, "box_index": 1, "bbox_px": [10, 10, 40, 40]},
+                    ),
+                ]
+            )
+
+            self.assertEqual(
+                [record.record_id for record in store.load_records()],
+                ["m_page_1_first", "a_page_1_second", "z_page_2"],
+            )
 
     def test_manifest_repair_removes_legacy_duplicate_identity_records_preserving_review_training(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -658,6 +722,54 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertEqual(loaded.step_status(PipelineStep.SEGMENTATION), StageStatus.PENDING)
             self.assertEqual(loaded.audit["downstream_state"]["status"], "invalidated")
             self.assertEqual(loaded.trace["downstream_invalidations"][-1]["reason"], "crop_source_changed")
+
+    def test_materialization_uses_crop_payload_order_not_crop_id_order(self) -> None:
+        try:
+            from modulos.instance_factory.pipeline import InstancePdfPipelineService
+        except Exception as exc:  # pragma: no cover - optional detector/OCR dependencies.
+            self.skipTest(f"pipeline deps unavailable: {exc}")
+
+        class FakeGolden:
+            def __init__(self, root: Path) -> None:
+                self.root = root
+
+            def materialize_problem_crops_for_downstream(self, *_args, **_kwargs):
+                target = self.root / "problem_crops_live"
+                records = target / "records"
+                images = target / "images"
+                records.mkdir(parents=True, exist_ok=True)
+                images.mkdir(parents=True, exist_ok=True)
+                payloads = [
+                    ("z_crop", 2, 3, 1, [10, 10, 40, 40]),
+                    ("a_crop", 1, 2, 2, [10, 60, 40, 90]),
+                    ("m_crop", 1, 1, 1, [10, 10, 40, 40]),
+                ]
+                for crop_id, page, source_order, box_index, bbox in payloads:
+                    (images / f"{crop_id}.png").write_bytes(b"png")
+                    payload = {
+                        "schema_version": "problem_crop_live_v1",
+                        "crop_id": crop_id,
+                        "source_pdf_path": "E:/Banco/libro.pdf",
+                        "source_page_number": page,
+                        "source_order": source_order,
+                        "box_index": box_index,
+                        "bbox_px": bbox,
+                        "crop_image_rel": f"images/{crop_id}.png",
+                        "source_record_id": f"page_{page:04d}",
+                    }
+                    (records / f"{crop_id}.json").write_text(json.dumps(payload), encoding="utf-8")
+                return target, ["z_crop", "a_crop", "m_crop"]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s05", pdf_path="E:/Banco/libro.pdf")
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            service = InstancePdfPipelineService(context, golden_controller=FakeGolden(Path(tmp)), staging_store=store)
+
+            records = service.materialize_crops_to_staging(rows=[])
+
+            self.assertEqual([record.record_id for record in records], ["m_crop", "a_crop", "z_crop"])
+            self.assertEqual([record.record_id for record in store.load_records()], ["m_crop", "a_crop", "z_crop"])
+            self.assertEqual(store.get_record("m_crop").source["source_order"], 1)
 
     def test_pipeline_dashboard_overviews_expose_stage_state(self) -> None:
         try:

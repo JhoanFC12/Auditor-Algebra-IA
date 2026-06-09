@@ -55,6 +55,20 @@ class HfEndpointResolutionTests(unittest.TestCase):
             "https://router.example/v1",
         )
 
+    def test_hf_inference_provider_403_gets_friendly_message(self) -> None:
+        os.environ["HF_BASE_URL"] = "https://router.huggingface.co/v1/"
+        extractor = ScanExtractor(provider="hf", model="other/model")
+        err = Exception(
+            "Error code: 403 - {'error': 'This authentication method does not have "
+            "sufficient permissions to call Inference Providers on behalf of user Jhoan12'}"
+        )
+
+        message = extractor._friendly_hf_runtime_error(err, model="other/model")
+
+        self.assertIn("Hugging Face 403", message)
+        self.assertIn("Make calls to Inference Providers", message)
+        self.assertIn("router.huggingface.co/v1", message)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -68,7 +68,11 @@ class LibraryWebRuntime:
                 "No se puede iniciar Biblioteca sin el controlador real: falta instalar psycopg2."
             ) from _BOOK_PROGRESS_IMPORT_ERROR
         self.controller = controller or BookProgressController()
-        self.library_api = LibraryWebApi(controller=self.controller, file_url_resolver=self._register_library_file)
+        self.library_api = LibraryWebApi(
+            controller=self.controller,
+            runtime_factory=self._create_factory_runtime,
+            file_url_resolver=self._register_library_file,
+        )
         self.default_db_name = str(default_db_name or "").strip()
         self.static_root = Path(__file__).with_name("web")
         self.cache_root = Path(tempfile.mkdtemp(prefix="pdf_library_web_"))
@@ -78,6 +82,11 @@ class LibraryWebRuntime:
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self.url = ""
+
+    def _create_factory_runtime(self, context: InstancePipelineContext) -> FactoryWebRuntime:
+        runtime = FactoryWebRuntime(context, library_api=self.library_api)
+        self._factory_runtimes.append(runtime)
+        return runtime
 
     def start(self) -> str:
         if self._server is not None and self.url:
@@ -103,12 +112,20 @@ class LibraryWebRuntime:
         return self.url
 
     def stop(self) -> None:
-        for runtime in list(self._factory_runtimes):
+        stopped: set[int] = set()
+        for runtime in [*list(self._factory_runtimes), *list(getattr(self.library_api, "_factory_runtimes", []))]:
+            key = id(runtime)
+            if key in stopped:
+                continue
+            stopped.add(key)
             try:
                 runtime.stop()
             except Exception:
                 pass
         self._factory_runtimes.clear()
+        api_runtimes = getattr(self.library_api, "_factory_runtimes", None)
+        if isinstance(api_runtimes, list):
+            api_runtimes.clear()
         if self._server is None:
             return
         self._server.shutdown()
@@ -129,7 +146,7 @@ class LibraryWebRuntime:
                 result = self._dispatch_api(method, path, query, payload)
                 self._send_json(handler, result)
                 return
-            if path.startswith("/api/") and self._factory_runtimes:
+            if path.startswith("/api/") and self._active_factory_runtime() is not None:
                 payload = self._read_json(handler) if method == "POST" else {}
                 result = self._dispatch_factory_api(method, path, query, payload)
                 if isinstance(result, _FilePayload):
@@ -202,10 +219,18 @@ class LibraryWebRuntime:
         query: dict[str, list[str]],
         payload: dict[str, Any],
     ) -> Any:
-        runtime = self._factory_runtimes[-1] if self._factory_runtimes else None
+        runtime = self._active_factory_runtime()
         if runtime is None:
             raise FileNotFoundError(f"Ruta API no encontrada: {method} {path}")
         return runtime._dispatch_api(method, path, query, payload)
+
+    def _active_factory_runtime(self) -> Any | None:
+        api_runtimes = getattr(self.library_api, "_factory_runtimes", [])
+        if api_runtimes:
+            return api_runtimes[-1]
+        if self._factory_runtimes:
+            return self._factory_runtimes[-1]
+        return None
 
     def _snapshot(self, db_name: str = "") -> dict[str, Any]:
         dbs = list(self.controller.listar_bases_datos())

@@ -325,6 +325,48 @@ class LibraryWebApiTests(unittest.TestCase):
         finally:
             runtime.stop()
 
+    def test_library_runtime_proxies_factory_api_created_by_library_api(self) -> None:
+        class ProxyFactory:
+            def __init__(self, context: InstancePipelineContext) -> None:
+                self.context = context
+                self.calls = []
+
+            def start(self) -> str:
+                return "http://127.0.0.1:9999/factory/"
+
+            def _dispatch_api(self, method, path, query, payload):
+                self.calls.append((method, path, dict(query), dict(payload)))
+                return {"schema_version": "proxied_factory_v1", "path": path, "raw_ocr": payload.get("raw_ocr", "")}
+
+            def stop(self) -> None:
+                return None
+
+        proxies = []
+
+        def runtime_factory(context: InstancePipelineContext):
+            proxy = ProxyFactory(context)
+            proxies.append(proxy)
+            return proxy
+
+        runtime = LibraryWebRuntime(controller=_FakeController())
+        runtime.library_api = LibraryWebApi(controller=runtime.controller, runtime_factory=runtime_factory, open_url=lambda _u, _t: None)
+        try:
+            base = runtime.start()
+            opened = _post_json(
+                base,
+                "api/library/instances/11/factory",
+                {"db_name": "demo_db", "book_id": 1, "open": False},
+            )
+            self.assertEqual(opened["schema_version"], "library_instance_factory_prepared_v1")
+            payload = _post_json(base, "api/ocr/raw", {"record_id": "crop_001", "raw_ocr": "texto"})
+
+            self.assertEqual(payload["schema_version"], "proxied_factory_v1")
+            self.assertEqual(payload["path"], "/api/ocr/raw")
+            self.assertEqual(proxies[0].calls[0][0:2], ("POST", "/api/ocr/raw"))
+            self.assertEqual(proxies[0].calls[0][3]["raw_ocr"], "texto")
+        finally:
+            runtime.stop()
+
 
 if __name__ == "__main__":
     unittest.main()

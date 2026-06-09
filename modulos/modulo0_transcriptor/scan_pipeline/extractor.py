@@ -1431,6 +1431,36 @@ class ScanExtractor:
         base_url = self._resolve_hf_base_url_for_model(model or self._resolve_model())
         return OpenAI(base_url=base_url, api_key=token, timeout=self.timeout_s)
 
+    def _friendly_hf_runtime_error(self, exc: Exception, *, model: str) -> str:
+        if self.provider != "hf":
+            return ""
+        raw = str(exc or "")
+        lowered = raw.lower()
+        if "inference providers" not in lowered and "403" not in lowered:
+            return ""
+        if "permission" not in lowered and "forbidden" not in lowered and "403" not in lowered:
+            return ""
+        try:
+            base_url = self._resolve_hf_base_url_for_model(model)
+        except Exception:
+            base_url = ""
+        if str(model or "").strip() == TRAINED_OCR_VISION_MODEL:
+            endpoint_hint = (
+                "Configura HF_TRAINED_OCR_BASE_URL con la URL /v1 del endpoint dedicado "
+                "del OCR entrenado; no uses https://router.huggingface.co/v1 para este modelo "
+                "salvo que tu token tenga permisos de Inference Providers."
+            )
+        else:
+            endpoint_hint = (
+                "Activa en tu token fine-grained el permiso 'Make calls to Inference Providers' "
+                "o usa un endpoint dedicado compatible con OpenAI."
+            )
+        location = f" Base actual: {base_url}." if base_url else ""
+        return (
+            "Hugging Face 403: el HF_TOKEN actual no tiene permisos suficientes para llamar "
+            f"Inference Providers en nombre de la cuenta del modelo ({model}). {endpoint_hint}{location}"
+        )
+
     def _get_openai_client(self) -> Any:
         if OpenAI is None:
             raise RuntimeError("La libreria openai no esta disponible.")
@@ -1524,7 +1554,16 @@ class ScanExtractor:
                 fallback.pop("seed", None)
                 changed = True
             if changed:
-                return self._call_vision_chat(client, fallback)
+                try:
+                    return self._call_vision_chat(client, fallback)
+                except Exception as retry_exc:
+                    friendly = self._friendly_hf_runtime_error(retry_exc, model=model)
+                    if friendly:
+                        raise RuntimeError(friendly) from retry_exc
+                    raise
+            friendly = self._friendly_hf_runtime_error(exc, model=model)
+            if friendly:
+                raise RuntimeError(friendly) from exc
             raise
 
     def _ocr_local(self, image_path: Path, *, lang: str = "spa+eng") -> str:

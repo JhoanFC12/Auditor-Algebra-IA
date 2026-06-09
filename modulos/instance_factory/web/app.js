@@ -103,10 +103,18 @@ async function api(path, options = {}) {
   return payload;
 }
 
+function applyFactorySnapshot(payload) {
+  const snapshot = payload?.snapshot || payload;
+  if (snapshot && typeof snapshot === "object" && snapshot.schema_version === "pdf_factory_web_snapshot_v1") {
+    state.snapshot = snapshot;
+  }
+  return state.snapshot;
+}
+
 async function refresh(message = "") {
   if (state.view === "library") return loadLibrary(message || "Biblioteca actualizada.");
   setBusy("Actualizando...");
-  state.snapshot = await loadFactorySnapshot();
+  applyFactorySnapshot(await loadFactorySnapshot());
   restoreFactoryUiState({ preserveCurrentStage: true });
   render();
   setStatus(message || "Listo para trabajar.");
@@ -398,6 +406,22 @@ function recordLabelById(recordId) {
   return recordOptionLabel(record, Math.max(0, index));
 }
 
+function recordErrorComment(record) {
+  if (!record) return "";
+  const direct = (record.errors || [])
+    .map((item) => String(item || "").trim())
+    .find(Boolean);
+  if (direct) return direct;
+  const steps = record.steps || {};
+  for (const key of Object.keys(steps)) {
+    const step = steps[key] || {};
+    if (normalizeStatus(step.status || "") !== "error") continue;
+    const detail = String(step.detail || step.message || "").trim();
+    return detail || `Error en ${key}`;
+  }
+  return "";
+}
+
 function inferredStartNumberForRecord(record) {
   const source = record?.source || {};
   const candidates = [
@@ -448,13 +472,13 @@ function normalizeLibraryBooks(payload) {
   const rawBooks = Array.isArray(payload) ? payload : (payload.books || payload.items || []);
   return rawBooks.map((book, index) => {
     const id = String(book.id || book.book_id || book.code || book.book_code || `book_${index + 1}`);
-    const instances = (book.instances || book.instance_list || []).map((instance, instanceIndex) => ({
+    const instances = naturalSortInstances((book.instances || book.instance_list || []).map((instance, instanceIndex) => ({
       ...instance,
       id: String(instance.id || instance.instance_id || instance.code || `${id}_instance_${instanceIndex + 1}`),
       title: instance.title || instance.name || instance.tipo || instance.instance_type || `Instancia ${instanceIndex + 1}`,
       status: normalizeStatus(instance.status || instance.review_status || inferInstanceStatus(instance)),
       summary: instance.summary || instance.metrics || instance.indicators || {},
-    }));
+    })));
     return {
       ...book,
       id,
@@ -937,19 +961,48 @@ async function openFactoryForInstance(instanceId) {
     await refresh("Fabrica directa.");
     return;
   }
-  await runAction("Abriendo Fabrica...", async () => {
-    const result = await api(`/api/library/instances/${encodeURIComponent(instance.id)}/factory`, {
-      method: "POST",
-      body: {
-        db_name: state.library.selectedDb || "",
-        book_id: instance.book.id,
-        open: false,
-      },
-    });
-    if (result.url) {
-      const opened = window.open(result.url, "_blank", "noopener");
-      if (!opened) window.location.href = result.url;
+  state.library.screen = "book";
+  state.library.selectedBookId = instance.book.id;
+  state.library.selectedInstanceId = instance.id;
+  state.library.showBookForm = false;
+  state.library.showInstanceForm = false;
+  renderLibraryContent();
+  let popup = null;
+  try {
+    popup = window.open("about:blank", "_blank");
+    if (popup) {
+      popup.opener = null;
+      popup.document.title = `Fabrica PDF - ${instance.title}`;
+      popup.document.body.innerHTML = "<p style=\"font-family: system-ui; padding: 20px;\">Preparando Fabrica PDF...</p>";
     }
+  } catch (_) {
+    popup = null;
+  }
+  await runAction("Abriendo Fabrica...", async () => {
+    let result;
+    try {
+      result = await api(`/api/library/instances/${encodeURIComponent(instance.id)}/factory`, {
+        method: "POST",
+        body: {
+          db_name: state.library.selectedDb || "",
+          book_id: instance.book.id,
+          open: false,
+        },
+      });
+    } catch (err) {
+      try { if (popup && !popup.closed) popup.close(); } catch (_) {}
+      throw err;
+    }
+    if (result.url) {
+      if (popup && !popup.closed) {
+        popup.location.href = result.url;
+      } else {
+        renderLibraryContent();
+        return `Popup bloqueado. Abre la Fabrica en una nueva ventana: ${result.url}`;
+      }
+    }
+    renderLibraryContent();
+    return `Fabrica abierta en una ventana nueva para ${instance.title}.`;
   }, `Fabrica abierta para ${instance.title}.`);
 }
 
@@ -2060,6 +2113,7 @@ function renderOcrStage() {
   setInspector(record ? {
     "Imagen": `${records.length ? currentRecordIndex + 1 : 0} de ${records.length}`,
     "Registro": record.record_id,
+    ...(recordErrorComment(record) ? { "Error": recordErrorComment(record) } : {}),
     "OCR crudo": record.raw_ocr ? `si (${String(record.raw_ocr).length} caracteres)` : "no",
     "Lecturas OCR": (record.structured_items_web || []).length,
     "Segmentos graficos": (record.figure_segments_web || []).length,
@@ -2072,6 +2126,7 @@ function renderOcrRecord(record) {
   const totalRecords = records.length;
   const items = record.structured_items_web || [];
   const segments = record.figure_segments_web || [];
+  const errorComment = recordErrorComment(record);
   syncFigureSegments(record, segments);
   const selectedIndex = Math.max(0, Math.min(items.length - 1, Number(state.selectedOcrIndex || 0)));
   const selectedPayload = items.length ? selectedOcrPayload(record, selectedIndex) : {};
@@ -2117,7 +2172,11 @@ function renderOcrRecord(record) {
         ${renderRawOcrPanel(record)}
         <dl class="meta-list record-meta-compact">
           <div><dt>Registro</dt><dd>${escapeHtml(record.record_id)}</dd></div>
-          <div><dt>Estado</dt><dd>${escapeHtml(record.status_label || record.status || "-")}</dd></div>
+          <div class="${errorComment ? "meta-error-card" : ""}">
+            <dt>Estado</dt>
+            <dd>${escapeHtml(record.status_label || record.status || "-")}</dd>
+            ${errorComment ? `<p class="meta-error-comment"><strong>Error:</strong> ${escapeHtml(errorComment)}</p>` : ""}
+          </div>
           <div><dt>Entrenamiento</dt><dd>${(record.training_examples || []).length} correccion(es)</dd></div>
         </dl>
       </div>
@@ -2478,18 +2537,26 @@ async function saveRawOcr(record) {
   if (!record?.record_id) return;
   const raw = $("rawOcrEditor")?.value || "";
   await runAction("Guardando OCR crudo revisado...", async () => {
-    state.snapshot = await api("/api/ocr/raw", {
+    const payload = await api("/api/ocr/raw", {
       method: "POST",
       body: {
         record_id: record.record_id,
         raw_ocr: raw,
       },
     });
+    applyFactorySnapshot(payload);
+    const updated = findRecordById(record.record_id, state.snapshot?.records || []);
+    if (updated) {
+      updated.raw_ocr = raw;
+      updated.structured_ocr = {};
+      updated.normalized = {};
+    }
     state.stage = "ocr";
     state.selectedRecordId = record.record_id;
     state.reviewDraft = null;
     persistFactoryUiState();
     render();
+    return "OCR crudo guardado en pantalla y en staging. El paso 5 normalizara desde este texto.";
   }, "OCR crudo guardado. El paso 5 normalizara desde este texto.");
 }
 
@@ -3145,8 +3212,38 @@ function filteredBooks(applyStatus = true) {
 }
 
 function filteredInstances(instances) {
-  if (state.library.status === "all") return instances || [];
-  return (instances || []).filter((item) => normalizeStatus(item.status) === state.library.status);
+  const rows = naturalSortInstances(instances || []);
+  if (state.library.status === "all") return rows;
+  return rows.filter((item) => normalizeStatus(item.status) === state.library.status);
+}
+
+function naturalSortInstances(instances) {
+  return [...(instances || [])].sort((a, b) => {
+    const keyA = instanceNaturalSortKey(a);
+    const keyB = instanceNaturalSortKey(b);
+    for (let index = 0; index < Math.max(keyA.length, keyB.length); index += 1) {
+      const left = keyA[index];
+      const right = keyB[index];
+      if (left === right) continue;
+      if (typeof left === "number" && typeof right === "number") return left - right;
+      if (typeof left === "number") return -1;
+      if (typeof right === "number") return 1;
+      return String(left || "").localeCompare(String(right || ""), "es", { sensitivity: "base" });
+    }
+    return String(a?.id || "").localeCompare(String(b?.id || ""), "es", { numeric: true, sensitivity: "base" });
+  });
+}
+
+function instanceNaturalSortKey(instance) {
+  const label = String(instance?.title || instance?.tipo || instance?.instance_type || instance?.code || instance?.id || "").toLowerCase();
+  const tokens = [];
+  const pattern = /(\d+)|([a-záéíóúñ]+)|([^a-záéíóúñ\d]+)/gi;
+  let match;
+  while ((match = pattern.exec(label)) !== null) {
+    if (match[1]) tokens.push(Number(match[1]));
+    else if (match[2]) tokens.push(match[2]);
+  }
+  return tokens.length ? tokens : [label];
 }
 
 function selectedLibraryBook() {
