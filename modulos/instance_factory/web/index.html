@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Biblioteca | Fabrica PDF</title>
+  <script>
+    (function () {
+      try {
+        var stored = localStorage.getItem("pdfFactoryTheme");
+        var prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+        document.documentElement.dataset.theme = stored === "dark" || stored === "light" ? stored : (prefersDark ? "dark" : "light");
+      } catch (_) {
+        document.documentElement.dataset.theme = "light";
+      }
+    })();
+  </script>
+  <link rel="stylesheet" href="/styles.css" />
+  <script>
+    window.MathJax = {
+      tex: { inlineMath: [['$', '$']], displayMath: [['$$', '$$']] },
+      startup: { typeset: false }
+    };
+  </script>
+  <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand-block">
+        <p class="eyebrow">Fabrica PDF -> Staging</p>
+        <h1 id="title">Cargando interfaz...</h1>
+        <p id="subtitle" class="context-line">Preparando contexto de trabajo.</p>
+        <div class="policy-strip" aria-label="Politicas del flujo">
+          <span>Staging primero</span>
+          <span>Revision humana</span>
+          <span>BD bloqueada</span>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button id="themeToggle" class="ghost theme-toggle" type="button">Modo oscuro</button>
+        <button id="libraryBtn" class="ghost" type="button">Biblioteca</button>
+        <button id="refreshBtn" class="ghost" type="button">Actualizar</button>
+        <button id="folderBtn" class="ghost hidden" type="button">Carpeta staging</button>
+      </div>
+    </header>
+
+    <main id="workspace" class="workspace">
+      <aside class="timeline-card" aria-label="Linea de proceso">
+        <div class="timeline-heading">
+          <span class="section-label">Proceso</span>
+          <strong>De PDF a staging</strong>
+        </div>
+        <nav class="timeline" id="timeline"></nav>
+      </aside>
+      <section class="stage-panel" aria-label="Etapa actual">
+        <div id="stageHost"></div>
+      </section>
+      <aside class="inspector" aria-label="Resumen e inspector">
+        <div class="panel">
+          <h2>Resumen</h2>
+          <div id="metrics" class="metrics"></div>
+        </div>
+        <div class="panel">
+          <h2>Inspector</h2>
+          <div id="inspector" class="inspector-body muted">Selecciona una etapa o problema para ver el contexto util.</div>
+        </div>
+      </aside>
+    </main>
+
+    <footer class="bottombar">
+      <div class="status-area">
+        <span class="status-dot" aria-hidden="true"></span>
+        <strong id="statusText">Preparando interfaz...</strong>
+        <span id="busyText" class="muted"></span>
+      </div>
+      <div class="bottom-action">
+        <span id="actionHint" class="muted">La accion principal cambia con la etapa.</span>
+        <button id="primaryAction" class="primary" type="button">Continuar</button>
+      </div>
+    </footer>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+{
+  "created_at": "2026-06-07T21:00:00",
+  "purpose": "Detector de graficos internos high-recall: entrenamiento con muestras positivas revisadas",
+  "dataset_local_path": "E:/Github/Auditor-IA/.cache/transcriptor_runs/datasets/graph_detector_20260607_205943",
+  "dataset_repo_id": "Jhoan12/graph-detector-geom-positive-golden-v2",
+  "model_repo_id": "Jhoan12/graph-detector-yolov8n-geom-positive-v2",
+  "base_model": "yolov8n.pt",
+  "class_name": "grafico_problema",
+  "epochs": 80,
+  "batch": 16,
+  "imgsz": 1024,
+  "flavor": "l4x1",
+  "timeout_seconds": 14400,
+  "job_name": "graph_detector_positive_v2",
+  "hf_job_id": "6a262296ece949d7b3dcb45e",
+  "next_steps": [
+    "Verificar job con huggingface_hub/HfApi o hf jobs inspect 6a262296ece949d7b3dcb45e",
+    "Descargar weights/best.pt desde Jhoan12/graph-detector-yolov8n-geom-positive-v2",
+    "Configurar YOLO_FIGURE_MODEL y/o YOLO_SEGMENT_MODEL si la prueba mejora la deteccion"
+  ]
+}

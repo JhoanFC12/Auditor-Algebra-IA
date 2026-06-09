@@ -1,0 +1,14 @@
+{
+  "created_at": "2026-06-07T18:27:59",
+  "purpose": "Merge OCR Geometria rules v4 LoRA into full vision model",
+  "base_model": "Qwen/Qwen2.5-VL-3B-Instruct",
+  "adapter_model": "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-rules-lora-v4",
+  "merged_model": "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-rules-merged-v4",
+  "hf_job_id": "6a25fe56ece949d7b3dcb396",
+  "flavor": "a10g-small",
+  "timeout_seconds": 7200,
+  "next_steps": [
+    ".\\.venv\\Scripts\\python.exe tools\\create_ocr_reasoning_endpoint.py --name math-ocr-geometry-rules-v4 --repository Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-rules-merged-v4 --timeout 180",
+    ".\\.venv\\Scripts\\python.exe tools\\activate_trained_ocr_model.py --env-file .env.local --model Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-rules-merged-v4 --endpoint-url <URL_DEL_ENDPOINT>/v1 --endpoint-name math-ocr-geometry-rules-v4"
+  ]
+}

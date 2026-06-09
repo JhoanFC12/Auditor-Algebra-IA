@@ -38,12 +38,14 @@ class AuditorController:
         estado = (estado_filtro or "").strip()
         if not estado or estado == "Todos":
             return "", []
-        if estado == "Pendiente Revision":
-            return "(estado_consistencia IS NULL OR estado_consistencia = 'Pendiente Revision')", []
-        if estado in {"Bien Planteado", "Mal Planteado"}:
-            return "estado_consistencia = %s", [estado]
+        if estado in {"Pendiente Revision", "Sin revisar"}:
+            return "(consistencia_matematica IS NULL OR consistencia_matematica = 'Sin revisar')", []
+        if estado in {"Bien Planteado", "Consistente"}:
+            return "consistencia_matematica = %s", ["Consistente"]
+        if estado in {"Mal Planteado", "Inconsistente"}:
+            return "consistencia_matematica = %s", ["Inconsistente"]
         # Default seguro
-        return "(estado_consistencia IS NULL OR estado_consistencia = 'Pendiente Revision')", []
+        return "(consistencia_matematica IS NULL OR consistencia_matematica = 'Sin revisar')", []
 
     def listar_archivos_origen(
         self,
@@ -148,7 +150,7 @@ class AuditorController:
                 CREATE TABLE IF NOT EXISTS problemas (
                     id SERIAL PRIMARY KEY,
                     enunciado_latex TEXT NOT NULL,
-                    estado_consistencia VARCHAR(50) DEFAULT 'Pendiente Revision'
+                    consistencia_matematica VARCHAR(30) NOT NULL DEFAULT 'Sin revisar'
                 );
                 """
             )
@@ -175,6 +177,12 @@ class AuditorController:
             # Asegurar columnas finales
             self._ensure_column(cur, "problemas", "razon_inconsistencia", "TEXT")
             self._ensure_column(cur, "problemas", "respuesta_correcta", "VARCHAR(10)")
+            self._ensure_column(
+                cur,
+                "problemas",
+                "consistencia_matematica",
+                "VARCHAR(30) NOT NULL DEFAULT 'Sin revisar'",
+            )
 
             # Eliminar definitivamente columnas legacy, preservando datos si ya existen las nuevas
             self._copy_and_drop_legacy_column(
@@ -191,7 +199,7 @@ class AuditorController:
             self._ensure_column_type_int(cur, table="problemas", column="nivel_dificultad")
             self._ensure_column_type_int(cur, table="problemas", column="tema_id")
             self._ensure_column_type_varchar(cur, table="problemas", column="respuesta_correcta", size=10)
-            self._ensure_column_type_varchar(cur, table="problemas", column="estado_consistencia", size=50)
+            self._ensure_column_type_varchar(cur, table="problemas", column="consistencia_matematica", size=30)
 
             # Limpiar valores fuera de rango/invalidos antes de constraints
             self._sanitize_problemas(cur)
@@ -200,8 +208,8 @@ class AuditorController:
             self._ensure_constraint(
                 cur,
                 table="problemas",
-                name="ck_problemas_estado_consistencia",
-                expr="(estado_consistencia IS NULL) OR (estado_consistencia IN ('Pendiente Revision','Bien Planteado','Mal Planteado'))",
+                name="ck_problemas_consistencia_matematica",
+                expr="consistencia_matematica IN ('Sin revisar','Consistente','Inconsistente')",
             )
             self._ensure_constraint(
                 cur,
@@ -353,14 +361,13 @@ class AuditorController:
         )
 
     def _sanitize_problemas(self, cur) -> None:
-        # estado_consistencia: forzar a valores permitidos
-        if self._column_exists(cur, "problemas", "estado_consistencia"):
+        if self._column_exists(cur, "problemas", "consistencia_matematica"):
             cur.execute(
                 """
                 UPDATE problemas
-                SET estado_consistencia = 'Pendiente Revision'
-                WHERE estado_consistencia IS NULL
-                   OR estado_consistencia NOT IN ('Pendiente Revision','Bien Planteado','Mal Planteado');
+                SET consistencia_matematica = 'Sin revisar'
+                WHERE consistencia_matematica IS NULL
+                   OR consistencia_matematica NOT IN ('Sin revisar','Consistente','Inconsistente');
                 """
             )
         # nivel_dificultad: fuera de rango -> NULL
@@ -579,7 +586,7 @@ class AuditorController:
 
         estado = (resultado.estado or "").strip() or "Pendiente Revision"
         if estado not in {"Pendiente Revision", "Bien Planteado", "Mal Planteado"}:
-            raise ValueError("estado_consistencia inválido")
+            raise ValueError("consistencia_matematica invalida")
 
         respuesta = (resultado.respuesta_correcta or "").strip().upper()
         if respuesta:
@@ -638,7 +645,7 @@ class AuditorController:
         cur.execute(
             """
             UPDATE problemas SET
-                estado_consistencia = %s,
+                consistencia_matematica = %s,
                 razon_inconsistencia = %s,
                 tema_id = %s,
                 respuesta_correcta = %s,
@@ -729,7 +736,7 @@ class AuditorController:
 
         estado = (resultado.estado or "").strip() or "Pendiente Revision"
         if estado not in {"Pendiente Revision", "Bien Planteado", "Mal Planteado"}:
-            errors.append("estado_consistencia inválido.")
+            errors.append("consistencia_matematica invalida.")
 
         respuesta = (resultado.respuesta_correcta or "").strip().upper()
         if respuesta:
@@ -793,7 +800,7 @@ class AuditorController:
 
     def reset_campos_auditoria(self, db_name: str) -> tuple[int, str]:
         """
-        Vacia columnas de auditoría y deja `estado_consistencia` en 'Pendiente Revision'
+        Vacia columnas de auditoria y deja `consistencia_matematica` en 'Sin revisar'
         para todos los registros.
         """
 
@@ -811,8 +818,8 @@ class AuditorController:
             cols = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
 
             sets: List[str] = []
-            if "estado_consistencia" in cols:
-                sets.append("estado_consistencia = 'Pendiente Revision'")
+            if "consistencia_matematica" in cols:
+                sets.append("consistencia_matematica = 'Sin revisar'")
             if "nivel_dificultad" in cols:
                 sets.append("nivel_dificultad = NULL")
             if "razon_inconsistencia" in cols:

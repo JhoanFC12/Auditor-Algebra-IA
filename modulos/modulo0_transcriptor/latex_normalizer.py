@@ -10,6 +10,8 @@ SEP_OPT = "\u00e6"
 
 TAG_TOKEN_RE = re.compile(r"(\[\[[^\]]+\]\])")
 UNESCAPED_DOLLAR_RE = re.compile(r"(?<!\\)\$")
+DOUBLE_ESCAPED_ACCENT_RE = re.compile(r"\\{2,}(?:['~\"]\{?[A-Za-z]\}?|textquestiondown\{\}|textexclamdown\{\})")
+_TEXT_STYLE_MACRO_RE = re.compile(r"\\(?:text|textit|textbf|emph)\{([^{}]*)\}")
 MATH_HINT_RE = re.compile(
     r"(=|<|>|\\frac|\\dfrac|\\sqrt|\\angle|\\pi|\\theta|\\alpha|\\beta|\\gamma|\\delta|"
     r"\\leq|\\geq|\\neq|\\approx|\\times|\\div|[\dA-Za-z]\s*[\+\-\*/\^]\s*[\dA-Za-z])"
@@ -77,6 +79,48 @@ TEXT_SPECIAL_MAP = {
     "^": r"\textasciicircum{}",
 }
 
+MOJIBAKE_SPANISH_MAP = {
+    "Ã¡": "á",
+    "Ã©": "é",
+    "Ã­": "í",
+    "Ã³": "ó",
+    "Ãº": "ú",
+    "Ã": "Á",
+    "Ã‰": "É",
+    "Ã": "Í",
+    "Ã“": "Ó",
+    "Ãš": "Ú",
+    "Ã±": "ñ",
+    "Ã‘": "Ñ",
+    "Ã¼": "ü",
+    "Ãœ": "Ü",
+    "Â¿": "¿",
+    "Â¡": "¡",
+}
+
+LATEX_ACCENT_TO_UNICODE = {
+    "'": {
+        "a": "á",
+        "e": "é",
+        "i": "í",
+        "o": "ó",
+        "u": "ú",
+        "A": "Á",
+        "E": "É",
+        "I": "Í",
+        "O": "Ó",
+        "U": "Ú",
+    },
+    "~": {
+        "n": "ñ",
+        "N": "Ñ",
+    },
+    '"': {
+        "u": "ü",
+        "U": "Ü",
+    },
+}
+
 
 @dataclass
 class LatexNormalizeResult:
@@ -105,6 +149,52 @@ def _decode_scan_escapes(text: str) -> str:
     for src, dst in replacements.items():
         out = out.replace(src, dst)
     return out
+
+
+def _fix_spanish_mojibake(text: str) -> Tuple[str, bool]:
+    out = str(text or "")
+    changed = False
+    for src, dst in MOJIBAKE_SPANISH_MAP.items():
+        if src in out:
+            out = out.replace(src, dst)
+            changed = True
+    return (out, changed)
+
+
+def _replace_accent_command(match: re.Match, accent: str) -> str:
+    letter = match.group(1)
+    return LATEX_ACCENT_TO_UNICODE[accent].get(letter, match.group(0))
+
+
+def _canonicalize_latex_accent_escapes(text: str) -> Tuple[str, bool]:
+    out = str(text or "")
+    changed = False
+
+    if DOUBLE_ESCAPED_ACCENT_RE.search(out):
+        changed = True
+
+    original = out
+    out = re.sub(r"\\+textquestiondown\{\}", "¿", out)
+    out = re.sub(r"\\+textexclamdown\{\}", "¡", out)
+    out = re.sub(r"\\+'\{?([AaEeIiOoUu])\}?", lambda m: _replace_accent_command(m, "'"), out)
+    out = re.sub(r"\\+~\{?([Nn])\}?", lambda m: _replace_accent_command(m, "~"), out)
+    out = re.sub(r'\\+"\{?([Uu])\}?', lambda m: _replace_accent_command(m, '"'), out)
+    return (out, changed or (out != original))
+
+
+def _canonicalize_spanish_accents(text: str) -> Tuple[str, List[str]]:
+    out = str(text or "")
+    warnings: List[str] = []
+
+    out, had_mojibake = _fix_spanish_mojibake(out)
+    if had_mojibake:
+        warnings.append("accent_mojibake_fixed")
+
+    out, changed_accent_escape = _canonicalize_latex_accent_escapes(out)
+    if DOUBLE_ESCAPED_ACCENT_RE.search(str(text or "")):
+        warnings.append("accent_escape_canonicalized")
+
+    return (out, sorted(set(warnings)))
 
 
 def _balance_dollars(text: str) -> Tuple[str, bool]:
@@ -159,6 +249,7 @@ def _replace_unicode_math(text: str) -> str:
 
 def _normalize_math_fragment(text: str) -> str:
     out = _decode_scan_escapes(text)
+    out, _ = _canonicalize_spanish_accents(out)
     out = out.replace(SEP_LINE, " ").replace(SEP_OPT, " ")
     out = out.replace("$", " ")
     out = _replace_unicode_math(out)
@@ -168,7 +259,8 @@ def _normalize_math_fragment(text: str) -> str:
 
 def _escape_text_chunk(text: str) -> str:
     out_parts: List[str] = []
-    for ch in str(text or ""):
+    source, _ = _canonicalize_spanish_accents(str(text or ""))
+    for ch in source:
         if ch in SPANISH_TEXT_MAP:
             out_parts.append(SPANISH_TEXT_MAP[ch])
             continue
@@ -177,6 +269,28 @@ def _escape_text_chunk(text: str) -> str:
             continue
         out_parts.append(ch)
     return "".join(out_parts)
+
+
+def _unwrap_text_style_macros(text: str) -> str:
+    out = str(text or "")
+    while True:
+        updated = _TEXT_STYLE_MACRO_RE.sub(
+            lambda match: _canonicalize_spanish_accents(match.group(1) or "")[0],
+            out,
+        )
+        if updated == out:
+            break
+        out = updated
+    return out
+
+
+def _strip_presentation_math_wrappers_for_display(text: str) -> str:
+    out = str(text or "")
+    out = re.sub(r"\\left\s*([\(\)\[\]\{\}\|])", r"\1", out)
+    out = re.sub(r"\\right\s*([\(\)\[\]\{\}\|])", r"\1", out)
+    out = re.sub(r"\\left\s*\.", "", out)
+    out = re.sub(r"\\right\s*\.", "", out)
+    return out
 
 
 def _escape_plain_text_keep_tags(text: str) -> str:
@@ -207,12 +321,178 @@ def _should_wrap_math_like(plain: str) -> bool:
     return True
 
 
-def _wrap_common_math_fragments(text: str) -> str:
+def _restore_angle_word_in_plain_text(text: str) -> Tuple[str, bool]:
     out = str(text or "")
+    changed = False
+
+    replacements = (
+        (
+            re.compile(
+                r"\b(un|el|del|al|este|esta|ese|esa|aquel|aquella|mismo|misma|mismos|mismas|otro|otra|otros|otras|cada)\s+\\angle\b",
+                flags=re.IGNORECASE,
+            ),
+            lambda m: f"{m.group(1)} ángulo",
+        ),
+        (
+            re.compile(r"(?<![A-Za-z])\\angle(?=\s*[,;:\.\)]|\s*$)"),
+            lambda _m: "ángulo",
+        ),
+    )
+
+    for pattern, repl in replacements:
+        updated = pattern.sub(repl, out)
+        if updated != out:
+            out = updated
+            changed = True
+
+    return (out, changed)
+
+
+def _wrap_bare_exponent_fragments(text: str) -> Tuple[str, bool]:
+    out = str(text or "")
+    changed = False
+
+    def wrap(match: re.Match) -> str:
+        nonlocal changed
+        body = _normalize_math_fragment(match.group(1))
+        if not body:
+            return match.group(0)
+        changed = True
+        return f"${body}$"
+
+    out = re.sub(
+        r"(?<![\\A-Za-z0-9\{])((?:[A-Za-z]|\d+(?:[.,]\d+)?)(?:\^\{[^{}]+\}|\^[A-Za-z0-9]))(?![A-Za-z0-9\}])",
+        wrap,
+        out,
+    )
+    return (out, changed)
+
+
+def _consume_balanced_group(text: str, start: int) -> Tuple[str, int] | None:
+    raw = str(text or "")
+    if start >= len(raw) or raw[start] != "{":
+        return None
+
+    depth = 0
+    i = start
+    while i < len(raw):
+        ch = raw[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return (raw[start : i + 1], i + 1)
+        i += 1
+    return None
+
+
+def _wrap_structured_math_commands(text: str) -> str:
+    raw = str(text or "")
+    out: List[str] = []
+    i = 0
+    command_group_counts = {
+        "frac": 2,
+        "dfrac": 2,
+        "sqrt": 1,
+        "overline": 1,
+        "bar": 1,
+        "vec": 1,
+        "overrightarrow": 1,
+    }
+
+    while i < len(raw):
+        if raw[i] != "\\":
+            out.append(raw[i])
+            i += 1
+            continue
+
+        matched = False
+        for command, group_count in command_group_counts.items():
+            token = "\\" + command
+            if not raw.startswith(token, i):
+                continue
+
+            cursor = i + len(token)
+            pieces = [token]
+            while cursor < len(raw) and raw[cursor].isspace():
+                pieces.append(raw[cursor])
+                cursor += 1
+            if command == "sqrt" and cursor < len(raw) and raw[cursor] == "[":
+                end_optional = raw.find("]", cursor + 1)
+                if end_optional > cursor:
+                    pieces.append(raw[cursor : end_optional + 1])
+                    cursor = end_optional + 1
+                    while cursor < len(raw) and raw[cursor].isspace():
+                        pieces.append(raw[cursor])
+                        cursor += 1
+
+            groups: List[str] = []
+            next_cursor = cursor
+            for _ in range(group_count):
+                group = _consume_balanced_group(raw, next_cursor)
+                if group is None:
+                    groups = []
+                    break
+                group_text, next_cursor = group
+                groups.append(group_text)
+                pieces.append(group_text)
+                while next_cursor < len(raw) and raw[next_cursor].isspace():
+                    pieces.append(raw[next_cursor])
+                    next_cursor += 1
+
+            if not groups or len(groups) != group_count:
+                continue
+
+            body = _normalize_math_fragment("".join(pieces).strip())
+            if body:
+                out.append(f"${body}$")
+                i = next_cursor
+                matched = True
+                break
+
+        if matched:
+            continue
+
+        out.append(raw[i])
+        i += 1
+
+    return "".join(out)
+
+
+def _merge_adjacent_math_segments(text: str) -> str:
+    out = str(text or "")
+    while True:
+        updated = re.sub(
+            r"\$([^$]+)\$\s*([=+\-*/])\s*\$([^$]+)\$",
+            lambda m: f"${m.group(1).strip()} {m.group(2)} {m.group(3).strip()}$",
+            out,
+        )
+        if updated == out:
+            break
+        out = updated
+    return out
+
+
+def _wrap_common_math_fragments(text: str) -> Tuple[str, bool]:
+    out = str(text or "")
+    wrapped_bare_exponent = False
 
     def wrap(match: re.Match) -> str:
         body = _normalize_math_fragment(match.group(1))
         return f"${body}$" if body else ""
+
+    def apply_plain_segments(value: str, transform) -> str:
+        rebuilt: List[str] = []
+        for is_math, chunk in _split_math_segments(value):
+            if is_math:
+                rebuilt.append(f"${chunk}$")
+            else:
+                rebuilt.append(transform(chunk))
+        return "".join(rebuilt)
 
     # m\angle ABC = 30^\circ
     out = re.sub(
@@ -225,13 +505,42 @@ def _wrap_common_math_fragments(text: str) -> str:
     out = re.sub(r"(\\angle\s*[A-Z]{1,3})", wrap, out)
     # 30^\circ or x^\circ
     out = re.sub(r"((?:\d+(?:[.,]\d+)?|[A-Za-z])\s*\^\\circ)", wrap, out)
-    # x+2=5, AB=CD, etc.
+    # \left( ... \right) expressions are already LaTeX math, even without $...$.
     out = re.sub(
-        r"((?:\\?[A-Za-z0-9]+)(?:\s*[=+\-*/]\s*(?:\\?[A-Za-z0-9\^\(\)]+))+)",
+        r"(\\left\s*(?:[()\[\]{}|.]|\\[A-Za-z]+)\s*.*?\\right\s*(?:[()\[\]{}|.]|\\[A-Za-z]+))",
         wrap,
         out,
     )
-    return re.sub(r"\s+", " ", out).strip()
+    # Combinatorial / indexed symbols such as C_{36}^{n-1}.
+    out = apply_plain_segments(
+        out,
+        lambda plain: re.sub(
+            r"((?:\d+\s*)?[A-Za-z](?:_\{[^{}]+\}|_[A-Za-z0-9]+)(?:\^\{[^{}]+\}|\^[A-Za-z0-9]+)?)",
+            wrap,
+            plain,
+        ),
+    )
+    out = apply_plain_segments(out, _wrap_structured_math_commands)
+    out = _merge_adjacent_math_segments(out)
+
+    rebuilt: List[str] = []
+    for is_math, part in _split_math_segments(out):
+        if is_math:
+            rebuilt.append(f"${part}$" if part else "")
+            continue
+
+        plain = re.sub(
+            r"(?<![\{\\])((?:\\?[A-Za-z0-9]+)(?:\s*[=+\-*/]\s*(?:\\?[A-Za-z0-9\^\(\)]+))+)(?!\})",
+            wrap,
+            part,
+        )
+        plain, chunk_wrapped_bare_exponent = _wrap_bare_exponent_fragments(plain)
+        wrapped_bare_exponent = wrapped_bare_exponent or chunk_wrapped_bare_exponent
+        rebuilt.append(plain)
+
+    out = "".join(rebuilt)
+    out = _merge_adjacent_math_segments(out)
+    return (re.sub(r"\s+", " ", out).strip(), wrapped_bare_exponent)
 
 
 def _escape_text_preserving_math(text: str) -> str:
@@ -259,12 +568,15 @@ def collect_unknown_symbols(text: str) -> List[str]:
 
 def _normalize_text_with_math(text: str, *, wrap_math_like: bool) -> LatexNormalizeResult:
     source = _decode_scan_escapes(text)
+    source, accent_warnings = _canonicalize_spanish_accents(source)
     source = source.replace("$$", "$")
     source = re.sub(r"\${3,}", "$", source)
     source, had_unbalanced_dollars = _balance_dollars(source)
 
     parts = _split_math_segments(source)
     out: List[str] = []
+    wrapped_bare_exponent = False
+    restored_angle_word = False
     for is_math, chunk in parts:
         if is_math:
             body = _normalize_math_fragment(chunk)
@@ -273,25 +585,34 @@ def _normalize_text_with_math(text: str, *, wrap_math_like: bool) -> LatexNormal
             continue
 
         plain = _replace_unicode_math(chunk)
+        plain = _unwrap_text_style_macros(plain)
         plain = plain.replace(SEP_OPT, " ")
         plain = re.sub(r"\s+", " ", plain).strip()
         if not plain:
             continue
+
+        plain, chunk_restored_angle_word = _restore_angle_word_in_plain_text(plain)
+        restored_angle_word = restored_angle_word or chunk_restored_angle_word
 
         if wrap_math_like and _should_wrap_math_like(plain):
             body = _normalize_math_fragment(plain)
             out.append(f"${body}$" if body else "")
             continue
 
-        plain = _wrap_common_math_fragments(plain)
+        plain, chunk_wrapped_bare_exponent = _wrap_common_math_fragments(plain)
+        wrapped_bare_exponent = wrapped_bare_exponent or chunk_wrapped_bare_exponent
         out.append(_escape_text_preserving_math(plain))
 
     normalized = " ".join([piece.strip() for piece in out if piece.strip()]).strip()
     normalized = re.sub(r"\s+", " ", normalized).strip()
     unknown = collect_unknown_symbols(normalized)
-    warnings: List[str] = []
+    warnings: List[str] = list(accent_warnings)
     if had_unbalanced_dollars:
         warnings.append("unbalanced_math_delimiters")
+    if restored_angle_word:
+        warnings.append("angle_word_restored")
+    if wrapped_bare_exponent:
+        warnings.append("bare_exponent_wrapped")
     if unknown:
         warnings.append("unknown_symbols")
     return LatexNormalizeResult(
@@ -304,7 +625,42 @@ def _normalize_text_with_math(text: str, *, wrap_math_like: bool) -> LatexNormal
 
 def normalize_plain_text_pdflatex(text: str) -> str:
     raw = _replace_unicode_math(_decode_scan_escapes(text))
+    raw, _ = _canonicalize_spanish_accents(raw)
     return _escape_plain_text_keep_tags(raw)
+
+
+def normalize_scan_json_display_text(text: str) -> str:
+    source = _decode_scan_escapes(text)
+    source, _ = _canonicalize_spanish_accents(source)
+    source = source.replace("$$", "$")
+    source = re.sub(r"\${3,}", "$", source)
+    source, _ = _balance_dollars(source)
+    source = _unwrap_text_style_macros(source)
+    source = _strip_presentation_math_wrappers_for_display(source)
+
+    parts = _split_math_segments(source)
+    out: List[str] = []
+    for is_math, chunk in parts:
+        if is_math:
+            chunk = _unwrap_text_style_macros(chunk)
+            chunk = _strip_presentation_math_wrappers_for_display(chunk)
+            body = _normalize_math_fragment(chunk)
+            if body:
+                out.append(f"${body}$")
+            continue
+
+        plain = _replace_unicode_math(chunk)
+        plain = _unwrap_text_style_macros(plain)
+        plain = _strip_presentation_math_wrappers_for_display(plain)
+        plain = plain.replace(SEP_OPT, " ")
+        plain = re.sub(r"\s+", " ", plain).strip()
+        if not plain:
+            continue
+        plain, _ = _restore_angle_word_in_plain_text(plain)
+        out.append(plain)
+
+    normalized = " ".join(piece.strip() for piece in out if piece.strip()).strip()
+    return re.sub(r"\s+", " ", normalized).strip()
 
 
 def normalize_statement(text: str, *, mode: str = "pdflatex_strict") -> LatexNormalizeResult:
@@ -365,6 +721,7 @@ def normalize_statement(text: str, *, mode: str = "pdflatex_strict") -> LatexNor
 def normalize_option(text: str, *, mode: str = "pdflatex_strict") -> LatexNormalizeResult:
     _ = mode
     source = _decode_scan_escapes(text)
+    source, accent_warnings = _canonicalize_spanish_accents(source)
     source = source.replace(SEP_LINE, " ").replace(SEP_OPT, " ")
     source = re.sub(r"\s+", " ", source).strip()
 
@@ -378,7 +735,7 @@ def normalize_option(text: str, *, mode: str = "pdflatex_strict") -> LatexNormal
         norm_inner = "..."
     out = f"${norm_inner}$"
     unknown = collect_unknown_symbols(out)
-    warnings: List[str] = []
+    warnings: List[str] = list(accent_warnings)
     if unknown:
         warnings.append("unknown_symbols")
     return LatexNormalizeResult(
@@ -392,6 +749,7 @@ def normalize_option(text: str, *, mode: str = "pdflatex_strict") -> LatexNormal
 def normalize_scan_item_text(text: str, *, mode: str = "pdflatex_strict") -> LatexNormalizeResult:
     _ = mode
     source = _decode_scan_escapes(text)
+    source, accent_warnings = _canonicalize_spanish_accents(source)
     source = source.replace("$$", "$")
     source = re.sub(r"\${3,}", "$", source)
 
@@ -423,16 +781,14 @@ def normalize_scan_item_text(text: str, *, mode: str = "pdflatex_strict") -> Lat
         out_chunks.append("".join(rebuilt_parts))
 
     source = "".join(out_chunks)
-    source = re.sub(
-        rf"{re.escape(SEP_LINE)}\s*(\$[^$]+\$)\s*{re.escape(SEP_LINE)}",
-        r" \1 ",
-        source,
-    )
+    # Preserve item separators around inline math. The transcriptor uses
+    # `£...£` as a structural wrapper, so collapsing `£$...$£` into `$...$`
+    # breaks the persisted/output format across save/load cycles.
     source = re.sub(r"\s+", " ", source).strip()
     source, unbalanced_tail = _balance_dollars(source)
     had_unbalanced = had_unbalanced or unbalanced_tail
     unknown = collect_unknown_symbols(source)
-    warnings: List[str] = []
+    warnings: List[str] = list(accent_warnings)
     if had_unbalanced:
         warnings.append("unbalanced_math_delimiters")
     if unknown:

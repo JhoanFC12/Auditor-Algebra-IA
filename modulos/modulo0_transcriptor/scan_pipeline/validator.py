@@ -5,6 +5,7 @@ from typing import Any, Dict, Iterable, List
 
 from ..latex_normalizer import collect_unknown_symbols
 from .schema import OPTION_LABELS, SCAN_SCHEMA, ScanItem
+from .statement_cleanup import statement_contains_option_markers
 from .tokens import SEP_LINE, SEP_OPT
 
 
@@ -18,6 +19,7 @@ _OPTION_PATTERN_RE = re.compile(
 MATH_UNICODE_RE = re.compile(r"[\u00b0\u2220\u22a5\u2225\u00d7\u00f7\u2264\u2265\u2260\u2248\u221e\u03b1-\u03c9]")
 TAG_RE = re.compile(r"\[\[[^\]]+\]\]")
 ESCAPABLE_OUTSIDE_MATH_RE = re.compile(r"(?<!\\)[#%&_~^]")
+ESCAPED_POWER_RE = re.compile(r"(?:[A-Za-z0-9]\\textasciicircum\{\}(?:[A-Za-z0-9]|\{)|\\textasciicircum\{\}(?:[A-Za-z0-9]|\{))")
 
 
 def _safe_text(value: Any) -> str:
@@ -91,13 +93,22 @@ def validate_item_json(item: Any) -> List[str]:
         errors.append("statement_vacio")
     if "\n" in statement or "\r" in statement:
         errors.append("statement_multilinea")
+    if statement and statement_contains_option_markers(statement):
+        errors.append("statement_contiene_opciones")
 
     has_figure = bool(data.get("has_figure", False))
     figure_tag = _safe_text(data.get("figure_tag"))
+    image_binding_raw = data.get("image_binding", {})
+    image_binding = image_binding_raw if isinstance(image_binding_raw, dict) else {}
+    binding_status = _safe_text(image_binding.get("status", "")).lower()
     if has_figure and not re.fullmatch(r"img-\d+", figure_tag):
         errors.append("figure_tag_invalido")
     if (not has_figure) and figure_tag:
         errors.append("figure_tag_debe_estar_vacio")
+    if has_figure and binding_status not in {"confirmed", "manual_confirmed"}:
+        errors.append("image_binding_inconsistente")
+    if binding_status in {"confirmed", "manual_confirmed"} and not has_figure:
+        errors.append("has_figure_debe_ser_derivado")
 
     options = data.get("options")
     if not isinstance(options, dict):
@@ -131,6 +142,8 @@ def validate_rendered_item(rendered: str, *, item: ScanItem | None = None) -> Li
         errors.append("math_delimiters_desbalanceados")
     if _contains_unescaped_special_outside_math(txt):
         errors.append("latex_special_sin_escape")
+    if ESCAPED_POWER_RE.search(txt):
+        errors.append("potencia_fuera_de_modo_math")
     if collect_unknown_symbols(txt):
         errors.append("simbolos_unicode_no_mapeados")
 

@@ -1,0 +1,43 @@
+# Python / venv
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+venv/
+.venv/
+.venv_pre_repair_*/
+venv_broken_*/
+
+# Local runtime/cache artifacts
+.cache/
+.tmp*/
+figuras_recortadas/
+tmp_debug/
+*.log
+*_log.txt
+.db_profile_state.json
+
+# Generated document/export smoke artifacts
+/_mod7_tex_*.docx
+/Practica__ids_problemas.json
+/S1-Teor*_de_Exponentes*
+
+# Environment files (keep template only)
+.env
+.env.*
+!.env.example
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Build / dist
+build/
+dist/

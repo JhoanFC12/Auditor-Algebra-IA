@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import hashlib
@@ -12,27 +12,72 @@ import time
 import traceback
 import tkinter as tk
 import webbrowser
+from io import BytesIO
 from pathlib import Path
 from datetime import datetime
 import tempfile
 import unicodedata
 import uuid
 from tkinter import filedialog, messagebox, simpledialog, ttk
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from openai import OpenAI
 
 from .controlador_transcriptor import TranscriptorController
+from .domain.continuation_rules import (
+    normalize_small_number_outlier,
+    should_absorb_direct_item_into_pending,
+    should_merge_fragmented_item_into_previous,
+)
+from .domain.image_binding import (
+    IMAGE_BINDING_STATUS_CONFIRMED,
+    IMAGE_BINDING_STATUS_MANUAL_CONFIRMED,
+    IMAGE_BINDING_STATUS_NEEDS_REVIEW,
+    IMAGE_BINDING_STATUS_NONE,
+    ImageBinding,
+    image_binding_preview_status,
+)
+from .domain.model_output_parser import (
+    extract_chat_text as parse_chat_text,
+    extract_formatted_item as parse_formatted_item,
+    extract_reasoning_payload as parse_reasoning_payload,
+    extract_reasoning_payload_loose as parse_reasoning_payload_loose,
+    sanitize_reasoning_payload as parse_sanitize_reasoning_payload,
+)
 from .latex_normalizer import (
     normalize_option as normalize_latex_option,
     normalize_scan_item_text as normalize_latex_scan_item_text,
     normalize_statement as normalize_latex_statement,
 )
+from .persistence.session_store import SessionStore
+from .scan_pipeline.image_role import ImageEvidence, collect_new_item_numbers, extract_numbered_headers, resolve_image_role
 from .scan_pipeline.key_classifier import classify_key_image, classify_key_text
+from .scan_pipeline.ocr_ensemble import (
+    DEFAULT_HF_OCR_ENSEMBLE_MODELS,
+    analyze_ocr_candidate,
+    is_ocr_candidate_recoverable,
+    is_ocr_candidate_valid,
+    renumber_items_continuously,
+    resolve_hf_ocr_ensemble_models,
+    select_best_ocr_candidate,
+    should_accept_ocr_candidate_fast,
+    should_continue_numbering_for_items,
+    should_escalate_from_primary_candidate,
+)
+from .scan_pipeline.extractor import (
+    ScanExtractor,
+    _merge_structured_items_with_local_ocr,
+    canonicalize_faithful_ocr_text,
+)
 from .scan_pipeline.pipeline import ScanPipeline
-from .scan_pipeline.prompts import build_extract_prompt
+from .scan_pipeline.prompts import build_faithful_ocr_prompt, build_faithful_ocr_prompt_compact
+from .scan_pipeline.statement_cleanup import merge_statement_fragments
+from .session_schema import enrich_session_payload_with_structure
 from .segmentador_v2 import SegmentadorProblemasV2, SegmentoProblemaV2
+from .state import TranscriptorSessionState
+from .workflow.transcriptor_workflow import TranscriptorWorkflow
 from utils.env_validation import validate_scan_provider_env
+from utils.project_layout import infer_workspace_from_session_path, normalize_instance_name, project_dirs, remap_legacy_drive_path
 from utils.preview_window import PreviewWindow
 from utils.styles import apply_openai_theme
 
@@ -99,55 +144,34 @@ TAG_MODE_MANUAL = "Manual"
 TAG_MODE_AUTO = "Auto (IA)"
 TAG_MODE_MIXED = "Mixto (manual + IA)"
 
-# Flujo fijo de proveedor (HuggingFace), con selector de modelos HF.
-FIXED_PROVIDER = PROVIDER_HF
-DEFAULT_HF_VISION_MODEL = "Qwen/Qwen2.5-VL-72B-Instruct"
-DEFAULT_HF_FORMAT_MODEL = "Qwen/QwQ-32B"
+def _resolve_default_provider_label() -> str:
+    raw = (os.getenv("SCAN_PROVIDER", "") or os.getenv("OCR_PROVIDER", "")).strip().lower()
+    if raw in {"openai", "chatgpt"}:
+        return PROVIDER_OPENAI
+    if raw in {"ocr", "tesseract", "local"}:
+        return PROVIDER_OCR
+    if raw in {"hf", "huggingface"}:
+        return PROVIDER_HF
+    return PROVIDER_HF
+
+
+FIXED_PROVIDER = _resolve_default_provider_label()
+TRAINED_OCR_VISION_MODEL = "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-rules-merged-v4"
+DEFAULT_HF_VISION_MODEL = TRAINED_OCR_VISION_MODEL
+DEFAULT_OPENAI_VISION_MODEL = TRAINED_OCR_VISION_MODEL
+DEFAULT_OPENAI_FORMAT_MODEL = TRAINED_OCR_VISION_MODEL
+DEFAULT_HF_FORMAT_MODEL = TRAINED_OCR_VISION_MODEL
 FIXED_TAG_MODE = TAG_MODE_MANUAL
 HF_BASE_URL_DEFAULT = "https://router.huggingface.co/v1"
 
-OPENAI_MODELS = [
-    "gpt-4o-mini",
-    "gpt-4.1-mini",
-    "gpt-4o",
-    "o4-mini",
-]
-OPENAI_FORMAT_MODELS = [
-    "gpt-4.1-mini",
-    "gpt-4o-mini",
-    "gpt-4o",
-    "o4-mini",
-]
+OPENAI_MODELS = []
+OPENAI_FORMAT_MODELS = []
 HF_MODELS = [
-    "Qwen/Qwen2.5-VL-7B-Instruct",
-    "Qwen/Qwen2.5-VL-72B-Instruct",
-    "Qwen/Qwen2.5-VL-32B-Instruct",
-    "Qwen/Qwen2.5-VL-3B-Instruct",
-    "zai-org/GLM-4.5V",
-    "zai-org/GLM-4.5V-FP8",
-    "google/gemma-3-27b-it",
-    "meta-llama/Llama-3.2-11B-Vision-Instruct",
+    TRAINED_OCR_VISION_MODEL,
 ]
-HF_VISION_PROBE_MODELS = list(HF_MODELS)
+HF_VISION_PROBE_MODELS: List[str] = []
 HF_FORMAT_MODELS = [
-    "Qwen/QwQ-32B",
-    "Qwen/Qwen3-32B",
-    "Qwen/Qwen3-30B-A3B",
-    "Qwen/Qwen3-8B",
-    "Qwen/Qwen3-4B",
-    "Qwen/Qwen2.5-Math-72B-Instruct",
-    "Qwen/Qwen2.5-Math-7B-Instruct",
-    "Qwen/Qwen2.5-Math-1.5B-Instruct",
-    "Qwen/Qwen2-Math-72B-Instruct",
-    "Qwen/Qwen2-Math-7B-Instruct",
-    "Qwen/Qwen2-Math-1.5B-Instruct",
-    "Qwen/Qwen2.5-72B-Instruct",
-    "Qwen/Qwen2.5-32B-Instruct",
-    "deepseek-ai/DeepSeek-R1",
-    "deepseek-ai/DeepSeek-V3",
-    "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
-    "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
-    "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+    TRAINED_OCR_VISION_MODEL,
 ]
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
@@ -170,6 +194,7 @@ TAG_CURSO_RE = re.compile(r"\[\[\s*curso\s*=\s*([^\]]+?)\s*\]\]", re.IGNORECASE)
 TAG_TEMA_RE = re.compile(r"\[\[\s*tema\s*=\s*([^\]]+?)\s*\]\]", re.IGNORECASE)
 TAG_SUBTEMA_RE = re.compile(r"\[\[\s*subtema\s*=\s*([^\]]+?)\s*\]\]", re.IGNORECASE)
 TAG_CLAVE_RE = re.compile(r"\[\[\s*clave\s*=\s*([^\]]+?)\s*\]\]", re.IGNORECASE)
+TAG_ESTADO_RE = re.compile(r"\[\[\s*estado\s*=\s*([^\]]+?)\s*\]\]", re.IGNORECASE)
 TAG_SOLUCION_RE = re.compile(r"\[\[\s*solucion(?:ario)?\s*=\s*([^\]]+?)\s*\]\]", re.IGNORECASE)
 ORPHAN_OPTIONS_PREFIX = "[[orphan_options]]"
 ITEM_BLOCK_RE = re.compile(
@@ -231,7 +256,18 @@ UNICODE_GREEK_TO_LATEX = {
 
 
 class TranscriptorWindow(tk.Toplevel):
-    def __init__(self, parent):
+    def __init__(
+        self,
+        parent,
+        *,
+        initial_db_name: str = "",
+        initial_book_code: str = "",
+        initial_instance_type: str = "",
+        initial_pdf_path: str = "",
+        linked_session_path: str = "",
+        initial_solutions_dir: str = "",
+        initial_project_name: str = "",
+    ):
         super().__init__(parent)
         self.title("Modulo 0 - Transcripcion (Imagen -> LaTeX)")
         self.geometry("1120x720")
@@ -239,17 +275,33 @@ class TranscriptorWindow(tk.Toplevel):
         self._fit_initial_window()
 
         self.controller = TranscriptorController()
+        self.session_store = SessionStore()
+        self.state = TranscriptorSessionState()
+        self.workflow = TranscriptorWorkflow(
+            controller=self.controller,
+            session_store=self.session_store,
+        )
 
         self.db_name_var = tk.StringVar(value="")
         self.provider_var = tk.StringVar(value=FIXED_PROVIDER)
-        hf_model_default = (os.getenv("HF_MODEL", "") or "").strip()
-        if hf_model_default not in HF_MODELS:
-            hf_model_default = DEFAULT_HF_VISION_MODEL
-        hf_format_default = (os.getenv("HF_FORMAT_MODEL", "") or "").strip()
-        if hf_format_default not in HF_FORMAT_MODELS:
-            hf_format_default = DEFAULT_HF_FORMAT_MODEL
-        self.model_var = tk.StringVar(value=hf_model_default)
-        self.format_model_var = tk.StringVar(value=hf_format_default)
+        if FIXED_PROVIDER == PROVIDER_OPENAI:
+            vision_default = (os.getenv("OPENAI_SCAN_MODEL", "") or "").strip()
+            if not vision_default:
+                vision_default = DEFAULT_OPENAI_VISION_MODEL
+            format_default = (os.getenv("OPENAI_FORMAT_MODEL", "") or "").strip()
+            if not format_default:
+                format_default = DEFAULT_OPENAI_FORMAT_MODEL
+        elif FIXED_PROVIDER == PROVIDER_OCR:
+            vision_default = "ocr-local"
+            format_default = DEFAULT_OPENAI_FORMAT_MODEL
+        else:
+            vision_default = TRAINED_OCR_VISION_MODEL
+            format_default = (os.getenv("HF_FORMAT_MODEL", "") or "").strip()
+            if format_default not in HF_FORMAT_MODELS:
+                format_default = DEFAULT_HF_FORMAT_MODEL
+        self.model_var = tk.StringVar(value=vision_default)
+        self.format_model_var = tk.StringVar(value=format_default)
+        self.flow_subtitle_var = tk.StringVar(value="")
         self.timeout_var = tk.IntVar(value=180)
         self.retries_var = tk.IntVar(value=2)
         self.skip_done_var = tk.BooleanVar(value=False)
@@ -264,6 +316,9 @@ class TranscriptorWindow(tk.Toplevel):
         self.ocr_exclude_box_var = tk.BooleanVar(value=False)
         self.tag_mode_var = tk.StringVar(value=FIXED_TAG_MODE)
         self.project_name_var = tk.StringVar(value="Proyecto")
+        self.book_code_var = tk.StringVar(value="")
+        self.instance_type_var = tk.StringVar(value="")
+        self.pdf_path_var = tk.StringVar(value="")
         self.curso_var = tk.StringVar(value="")
         self.tema_var = tk.StringVar(value="")
         self.subtema_var = tk.StringVar(value="")
@@ -281,8 +336,11 @@ class TranscriptorWindow(tk.Toplevel):
 
         self._file_map: Dict[str, Path] = {}
         self._items: List[Tuple[str, str, List[str]]] = []  # (archivo_origen, item, imagenes)
+        self._solution_path_by_item_num: Dict[int, List[List[str]]] = {}
         self._transcribed_by_label: Dict[str, str] = {}
         self._ocr_raw_first_by_label: Dict[str, str] = {}
+        self._ocr_candidate_cache_by_label: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self._ocr_structured_by_label: Dict[str, str] = {}
         self._geometry_pass_by_label: Dict[str, str] = {}
         self._geometry_pass_payload_by_label: Dict[str, Dict[str, Any]] = {}
         self._ocr_merge_applied_by_label: Dict[str, str] = {}
@@ -290,11 +348,13 @@ class TranscriptorWindow(tk.Toplevel):
         self._direct_item_diagnostics_by_label: Dict[str, List[Dict[str, Any]]] = {}
         self._yolo_figure_suggestions_by_source: Dict[str, Dict[str, Any]] = {}
         self._segment_item_bindings_by_source: Dict[str, Dict[int, Dict[str, Any]]] = {}
-        self._vision_direct_prompt_version = "vision_direct_v1"
+        self._vision_direct_prompt_version = "vision_direct_v2"
         self._bbox_detector_version = "bbox_detector_v1"
         self._yolo_detector = None
         self._yolo_detector_path = ""
         self._preview_images: Dict[str, str] = {}
+        self._preview_item_image_statuses: Dict[int, str] = {}
+        self._item_image_binding_hints: Dict[str, Dict[str, Any]] = {}
         self._missing_marker_warned: Set[str] = set()
         self._corrected_item_numbers: Set[int] = set()
         self._log_buffer: List[str] = []
@@ -305,17 +365,29 @@ class TranscriptorWindow(tk.Toplevel):
         self._progress_total_images = 0
         self._progress_done_images = 0
         self._progress_detected_items = 0
+        self._estado_db_cache_key: Optional[Tuple[str, str, str, Tuple[int, ...]]] = None
+        self._estado_db_cache_map: Dict[int, str] = {}
         self._runs_dir = Path.cwd() / ".cache" / "transcriptor_runs"
         self._runs_dir.mkdir(parents=True, exist_ok=True)
         self._sessions_dir = self._runs_dir / "sessions"
         self._sessions_dir.mkdir(parents=True, exist_ok=True)
         self._session_file_path: Optional[Path] = None
         self._session_last_dir: Path = self._sessions_dir
+        self._linked_session_bootstrap_status = "none"
+        self._linked_solutions_dir = str(initial_solutions_dir or "").strip()
         self._datasets_dir = self._runs_dir / "datasets"
         self._datasets_dir.mkdir(parents=True, exist_ok=True)
-        self._segmentador_v2 = SegmentadorProblemasV2(self._runs_dir / "v2_segments")
+        self._segmentador_v2 = SegmentadorProblemasV2(self._runs_dir / "segments")
         self._segmentacion_v2_overrides: Dict[str, List[Tuple[int, int, int, int]]] = {}
+        self._segmentacion_v2_runtime_cache: Dict[str, List[SegmentoProblemaV2]] = {}
+        self._segmentacion_v2_pending_persist: Dict[str, Path] = {}
+        self._segment_editor_v2_window: Optional[tk.Toplevel] = None
+        self._segment_editor_preview_cache: Dict[str, Dict[str, Any]] = {}
+        self._segment_editor_preview_cache_order: List[str] = []
+        self._segment_editor_preview_cache_limit = 24
+        self._segmentacion_v2_prefetch_active = False
         self._segmentation_v2_used_segments: Dict[str, Set[int]] = {}
+        self._segment_detection_audit_by_source: Dict[str, Dict[str, Any]] = {}
         self._figure_boxes_by_source: Dict[str, List[Dict[str, Any]]] = {}
         # Legacy mirror of the primary manual figure box for backward compatibility.
         self._ocr_exclusion_boxes: Dict[str, Tuple[int, int, int, int]] = {}
@@ -326,6 +398,8 @@ class TranscriptorWindow(tk.Toplevel):
         self._preview_debounce_after: str | None = None
         self._preview_nav_after: str | None = None
         self._suppress_output_sync = False
+        self._filter_review_only = False
+        self._btn_review_filter: ttk.Button | None = None
         self._transcribing = False
         self._ui_disposed = False
         self._segmentation_review_done = False
@@ -345,6 +419,14 @@ class TranscriptorWindow(tk.Toplevel):
         self.report_callback_exception = self._report_callback_exception
         self._on_provider_change()
         self._listar_dbs()
+        self._bootstrap_linked_session(
+            db_name=initial_db_name,
+            book_code=initial_book_code,
+            instance_type=initial_instance_type,
+            pdf_path=initial_pdf_path,
+            session_path=linked_session_path,
+            project_name=initial_project_name,
+        )
         self._schedule_preview_nav_poll()
         self.after(1200, lambda: self._probe_hf_vision_models_async(auto=True))
 
@@ -474,198 +556,390 @@ class TranscriptorWindow(tk.Toplevel):
             pass
 
     def _build_ui(self) -> None:
-        header = ttk.Label(self, text="Modulo 0 - Transcripcion (Imagen -> LaTeX)", style="Header.TLabel")
-        header.pack(anchor="w", padx=16, pady=(14, 6))
-        ttk.Label(
-            self,
-            text="Flujo fijo: Segmentacion V2 + OCR Vision (HuggingFace Qwen) + formateo + resultado previo.",
-            style="SubHeader.TLabel",
-        ).pack(anchor="w", padx=16, pady=(0, 8))
+        self._ui_root = ttk.Frame(self, style="Panel.TFrame")
+        self._ui_root.pack(fill="both", expand=True, padx=16, pady=(14, 16))
+        self._build_header_section()
+        self._build_config_section()
+        self._build_top_actions_section()
+        self._build_actions_section()
+        self._build_body_section()
 
-        top_actions = ttk.Frame(self)
-        top_actions.pack(fill="x", padx=16, pady=(0, 8))
-        ttk.Label(top_actions, text="Proyecto").pack(side="left")
-        ttk.Entry(top_actions, textvariable=self.project_name_var, width=28).pack(side="left", padx=(8, 12))
-        ttk.Button(top_actions, text="Guardar", command=self._save_session_quick, style="Ghost.TButton").pack(
+    def _build_header_section(self) -> None:
+        section = ttk.Frame(self._ui_root, style="Panel.TFrame")
+        section.pack(fill="x", pady=(0, 10))
+        ttk.Label(section, text="Modulo 0 - Transcripcion (Imagen -> LaTeX)", style="Header.TLabel").pack(
+            anchor="w"
+        )
+        ttk.Label(
+            section,
+            textvariable=self.flow_subtitle_var,
+            style="SubHeader.TLabel",
+            wraplength=980,
+            justify="left",
+        ).pack(anchor="w", pady=(4, 0))
+
+    def _build_top_actions_section(self) -> None:
+        shell = ttk.Frame(self._ui_root, style="Toolbar.TFrame")
+        shell.pack(fill="x", pady=(0, 10))
+        card = ttk.Frame(shell, style="ToolbarCard.TFrame", padding=(12, 10))
+        card.pack(fill="x")
+        card.columnconfigure(0, weight=3)
+        card.columnconfigure(1, weight=2)
+
+        left = ttk.Frame(card, style="ToolbarCard.TFrame")
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 16))
+        right = ttk.Frame(card, style="ToolbarCard.TFrame")
+        right.grid(row=0, column=1, sticky="ne")
+
+        ttk.Label(left, text="Sesion y proyecto", style="SubHeader.TLabel").pack(anchor="w")
+        ttk.Label(right, text="Acciones de sesion", style="SubHeader.TLabel").pack(anchor="w")
+
+        row_meta = ttk.Frame(left, style="ToolbarCard.TFrame")
+        row_meta.pack(fill="x", pady=(8, 0))
+        row_session = ttk.Frame(right, style="ToolbarCard.TFrame")
+        row_session.pack(fill="x", pady=(8, 0))
+
+        tk.Label(
+            row_meta,
+            text="Proyecto",
+            bg=self.palette["surface_alt"],
+            fg=self.palette["muted"],
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left")
+        ttk.Entry(row_meta, textvariable=self.project_name_var, width=28).pack(side="left", padx=(8, 12))
+        tk.Label(
+            row_meta,
+            text="Libro",
+            bg=self.palette["surface_alt"],
+            fg=self.palette["muted"],
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left")
+        ttk.Entry(row_meta, textvariable=self.book_code_var, width=18).pack(side="left", padx=(8, 12))
+        tk.Label(
+            row_meta,
+            text="Instancia",
+            bg=self.palette["surface_alt"],
+            fg=self.palette["muted"],
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left")
+        ttk.Combobox(
+            row_meta,
+            textvariable=self.instance_type_var,
+            values=["", "resueltos", "propuestos"],
+            width=14,
+            state="normal",
+        ).pack(side="left", padx=(8, 12))
+        ttk.Button(row_meta, text="Reporte", command=self._show_session_report, style="Ghost.TButton").pack(
             side="left"
         )
-        ttk.Button(top_actions, text="Guardar como...", command=self._save_session_dialog, style="Ghost.TButton").pack(
+
+        ttk.Button(row_session, text="Guardar", command=self._save_session_quick, style="Ghost.TButton").pack(
+            side="left", anchor="w"
+        )
+        ttk.Button(row_session, text="Guardar como...", command=self._save_session_dialog, style="Ghost.TButton").pack(
             side="left", padx=(8, 0)
         )
-        ttk.Button(top_actions, text="Cargar sesion", command=self._load_session_dialog, style="Ghost.TButton").pack(
+        ttk.Button(row_session, text="Cargar", command=self._load_session_dialog, style="Ghost.TButton").pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Button(row_session, text="Recargar", command=self._reload_current_session, style="Ghost.TButton").pack(
             side="left", padx=(8, 0)
         )
         ttk.Button(
-            top_actions,
-            text="Exportar dataset (entrenamiento)",
+            row_session,
+            text="Exportar dataset",
             command=self._export_training_dataset_dialog,
             style="Ghost.TButton",
         ).pack(side="left", padx=(8, 0))
 
-        cfg_card = ttk.Frame(self, style="Card.TFrame", padding=12)
-        cfg_card.pack(fill="x", padx=16)
-        cfg = ttk.Frame(cfg_card)
-        cfg.pack(fill="x")
+    def _build_config_section(self) -> None:
+        shell = ttk.Frame(self._ui_root, style="Toolbar.TFrame")
+        shell.pack(fill="x", pady=(0, 10))
+        card = ttk.Frame(shell, style="ToolbarCard.TFrame", padding=(12, 10))
+        card.pack(fill="x")
 
-        ttk.Label(cfg, text="Base de datos").grid(row=0, column=0, sticky="w")
-        self.combo_db = ttk.Combobox(cfg, state="readonly", textvariable=self.db_name_var, values=[])
-        self.combo_db.grid(row=0, column=1, sticky="ew", padx=(8, 8))
-        ttk.Button(cfg, text="Refrescar", command=self._listar_dbs, style="Ghost.TButton").grid(row=0, column=2, sticky="ew")
-
-        ttk.Label(cfg, text="Motor").grid(row=0, column=3, sticky="w", padx=(12, 0))
-        ttk.Label(cfg, text=FIXED_PROVIDER, style="SubHeader.TLabel").grid(row=0, column=4, sticky="w")
-        ttk.Label(cfg, text="Modelo OCR HF").grid(row=0, column=5, sticky="w", padx=(12, 0))
-        self.combo_model = ttk.Combobox(
-            cfg,
-            textvariable=self.model_var,
-            values=HF_MODELS,
-            width=40,
+        tk.Label(
+            card,
+            text="Proveedor OCR",
+            bg=self.palette["surface_alt"],
+            fg=self.palette["muted"],
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left")
+        self.combo_provider = ttk.Combobox(
+            card,
+            textvariable=self.provider_var,
+            values=[PROVIDER_HF],
+            width=18,
             state="readonly",
         )
-        self.combo_model.grid(row=0, column=6, sticky="ew")
-        ttk.Button(
-            cfg,
-            text="Ver disponibilidad HF",
-            command=self._probe_hf_vision_models_async,
-            style="Ghost.TButton",
-        ).grid(row=0, column=7, sticky="ew", padx=(8, 0))
+        self.combo_provider.pack(side="left", padx=(8, 12))
+        self.combo_provider.bind("<<ComboboxSelected>>", self._on_provider_change)
 
-        ttk.Label(cfg, text="Timeout (s)").grid(row=1, column=0, sticky="w", pady=(10, 0))
-        ttk.Spinbox(cfg, from_=30, to=600, textvariable=self.timeout_var, width=8).grid(
-            row=1, column=1, sticky="w", padx=(8, 8), pady=(10, 0)
-        )
-        ttk.Label(cfg, text="Reintentos").grid(row=1, column=2, sticky="w", pady=(10, 0))
-        ttk.Spinbox(cfg, from_=0, to=5, textvariable=self.retries_var, width=8).grid(
-            row=1, column=3, sticky="w", padx=(8, 0), pady=(10, 0)
-        )
-        ttk.Label(cfg, text="OCR idioma").grid(row=1, column=4, sticky="w", padx=(12, 0), pady=(10, 0))
-        ttk.Entry(cfg, textvariable=self.ocr_lang_var, width=14).grid(row=1, column=5, sticky="w", pady=(10, 0))
-        ttk.Checkbutton(cfg, text="Omitir ya transcritos", variable=self.skip_done_var).grid(
-            row=1, column=6, sticky="w", padx=(12, 0), pady=(10, 0)
-        )
-        ttk.Label(
-            cfg,
-            text="Ruta fija: 1) Segmentar V2 -> 2) OCR + Modelo -> 3) Claves/Solucion (opcional) -> 4) Guardar BD",
-            style="SubHeader.TLabel",
-        ).grid(row=2, column=0, columnspan=7, sticky="w", pady=(10, 0))
-        ttk.Label(cfg, text="Modelo formateo HF").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        tk.Label(
+            card,
+            text="Modelo OCR",
+            bg=self.palette["surface_alt"],
+            fg=self.palette["muted"],
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left")
+        self.combo_model = ttk.Combobox(card, textvariable=self.model_var, width=28, state="normal")
+        self.combo_model.pack(side="left", padx=(8, 12))
+
+        tk.Label(
+            card,
+            text="Modelo formato",
+            bg=self.palette["surface_alt"],
+            fg=self.palette["muted"],
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left")
         self.combo_format_model = ttk.Combobox(
-            cfg,
+            card,
             textvariable=self.format_model_var,
-            values=HF_FORMAT_MODELS,
-            width=28,
-            state="readonly",
-        )
-        self.combo_format_model.grid(row=3, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
-        ttk.Label(cfg, text="HF token").grid(row=3, column=3, sticky="e", padx=(12, 0), pady=(8, 0))
-        ttk.Entry(cfg, textvariable=self.hf_token_var, width=28, show="*").grid(
-            row=3, column=4, columnspan=3, sticky="ew", pady=(8, 0)
-        )
-        ttk.Label(cfg, text="Costo in USD/1M").grid(row=5, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(cfg, textvariable=self.rate_in_var, width=10).grid(
-            row=5, column=1, sticky="w", padx=(8, 8), pady=(8, 0)
-        )
-        ttk.Label(cfg, text="Costo out USD/1M").grid(row=5, column=2, sticky="w", pady=(8, 0))
-        ttk.Entry(cfg, textvariable=self.rate_out_var, width=10).grid(
-            row=5, column=3, sticky="w", padx=(8, 8), pady=(8, 0)
-        )
-        ttk.Label(cfg, textvariable=self.usage_summary_var, style="SubHeader.TLabel").grid(
-            row=6, column=0, columnspan=6, sticky="w", pady=(8, 0)
-        )
-        ttk.Button(cfg, text="Reiniciar contador", command=self._reset_usage_stats, style="Ghost.TButton").grid(
-            row=6, column=5, sticky="e", pady=(8, 0)
-        )
-        ttk.Button(cfg, text="Ver consumo HF", command=self._open_hf_usage_pages, style="Ghost.TButton").grid(
-            row=6, column=6, sticky="e", padx=(8, 0), pady=(8, 0)
-        )
-        ttk.Label(cfg, text="Curso").grid(row=7, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(cfg, textvariable=self.curso_var).grid(
-            row=7, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0)
-        )
-        ttk.Label(cfg, text="Tema").grid(row=7, column=3, sticky="e", padx=(12, 0), pady=(8, 0))
-        ttk.Entry(cfg, textvariable=self.tema_var).grid(row=7, column=4, sticky="ew", pady=(8, 0))
-        ttk.Label(cfg, text="Subtema").grid(row=7, column=5, sticky="e", padx=(12, 0), pady=(8, 0))
-        ttk.Entry(cfg, textvariable=self.subtema_var).grid(row=7, column=6, sticky="ew", pady=(8, 0))
-        ttk.Label(cfg, text="Modo etiquetas").grid(row=8, column=0, sticky="w", pady=(8, 0))
-        ttk.Combobox(
-            cfg,
-            state="readonly",
-            textvariable=self.tag_mode_var,
-            values=[TAG_MODE_MANUAL, TAG_MODE_AUTO, TAG_MODE_MIXED],
             width=24,
-        ).grid(row=8, column=1, columnspan=2, sticky="w", padx=(8, 8), pady=(8, 0))
+            state="normal",
+        )
+        self.combo_format_model.pack(side="left", padx=(8, 12))
 
-        cfg.columnconfigure(1, weight=1)
-        cfg.columnconfigure(6, weight=1)
+        tk.Label(
+            card,
+            text="Timeout",
+            bg=self.palette["surface_alt"],
+            fg=self.palette["muted"],
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left")
+        ttk.Spinbox(card, from_=30, to=600, increment=15, textvariable=self.timeout_var, width=6).pack(
+            side="left", padx=(8, 12)
+        )
 
-        # Barra de acciones principal (posicion original: encima del area de trabajo).
-        actions_main = ttk.Frame(self)
-        actions_main.pack(fill="x", padx=16, pady=(8, 0))
-        actions_main_row1 = ttk.Frame(actions_main)
-        actions_main_row1.pack(fill="x")
-        actions_main_row2 = ttk.Frame(actions_main)
+        tk.Label(
+            card,
+            text="Reintentos",
+            bg=self.palette["surface_alt"],
+            fg=self.palette["muted"],
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left")
+        ttk.Spinbox(card, from_=0, to=5, increment=1, textvariable=self.retries_var, width=4).pack(
+            side="left", padx=(8, 12)
+        )
+
+        ttk.Label(
+            card,
+            text="OpenAI usa OPENAI_API_KEY. HF usa HF_TOKEN.",
+            style="SubHeader.TLabel",
+        ).pack(side="left")
+
+    def _build_actions_section(self) -> None:
+        shell = ttk.Frame(self._ui_root, style="Toolbar.TFrame")
+        shell.pack(fill="x", pady=(10, 0))
+        card = ttk.Frame(shell, style="ToolbarCard.TFrame", padding=(12, 10))
+        card.pack(fill="x")
+        card.columnconfigure(0, weight=3)
+        card.columnconfigure(1, weight=2)
+        tk.Label(
+            card,
+            text="Acciones del flujo",
+            bg=self.palette["surface_alt"],
+            fg=self.palette["text"],
+            font=("Segoe UI", 10, "bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+        tk.Label(
+            card,
+            text="Mismo flujo operativo, con mejor separacion visual entre acciones de proceso y salida.",
+            bg=self.palette["surface_alt"],
+            fg=self.palette["muted"],
+            font=("Segoe UI", 9),
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 8))
+
+        left = ttk.Frame(card, style="ToolbarCard.TFrame")
+        left.grid(row=2, column=0, sticky="nsew", padx=(0, 16))
+        right = ttk.Frame(card, style="ToolbarCard.TFrame")
+        right.grid(row=2, column=1, sticky="ne")
+
+        ttk.Label(left, text="Flujo principal", style="SubHeader.TLabel").pack(anchor="w")
+        actions_main_row1 = ttk.Frame(left, style="ToolbarCard.TFrame")
+        actions_main_row1.pack(fill="x", pady=(6, 0))
+
+        ttk.Label(right, text="Salida y publicacion", style="SubHeader.TLabel").pack(anchor="w")
+        actions_main_row2 = ttk.Frame(right, style="ToolbarCard.TFrame")
         actions_main_row2.pack(fill="x", pady=(6, 0))
 
-        ttk.Button(actions_main_row1, text="Paso 1: Segmentar", command=self._start_segmentation_review, style="Ghost.TButton").pack(side="left")
+        ttk.Label(right, text="Herramientas", style="SubHeader.TLabel").pack(anchor="w", pady=(12, 0))
+        actions_tools_row = ttk.Frame(right, style="ToolbarCard.TFrame")
+        actions_tools_row.pack(fill="x", pady=(6, 0))
+
+        self.btn_segmentar = ttk.Button(
+            actions_main_row1,
+            text="Paso 1: Segmentar",
+            command=self._start_segmentation_review,
+            style="Ghost.TButton",
+        )
+        self.btn_segmentar.pack(side="left")
         ttk.Button(
             actions_main_row1,
-            text="Ver recortes segmentos",
-            command=self._open_segment_crops_view,
+            text="Abrir editor segmentos",
+            command=self._open_segment_editor_from_current_selection,
             style="Ghost.TButton",
         ).pack(side="left", padx=(8, 0))
         self.btn_transcribir = ttk.Button(
-            actions_main_row1, text="Paso 2: OCR directo", command=self._transcribir_async, style="Accent.TButton"
+            actions_main_row1,
+            text="Paso 2: OCR fiel",
+            command=self._transcribir_async,
+            style="Accent.TButton",
         )
         self.btn_transcribir.pack(side="left", padx=(8, 0))
-        ttk.Button(
+        self.btn_estructurar = ttk.Button(
             actions_main_row1,
-            text="Paso 3 (opcional): Claves y solucion",
+            text="Paso 3: JSON estructurado",
+            command=self._generar_json_estructurado_async,
+            style="Secondary.TButton",
+        )
+        self.btn_estructurar.pack(side="left", padx=(8, 0))
+        self.btn_render_latex = ttk.Button(
+            actions_main_row1,
+            text="Paso 4: Salida LaTeX",
+            command=self._estructurar_desde_ocr_async,
+            style="Secondary.TButton",
+        )
+        self.btn_render_latex.pack(side="left", padx=(8, 0))
+        ttk.Button(
+            actions_main_row2,
+            text="Vista previa LaTeX",
+            command=self._open_preview,
+            style="Ghost.TButton",
+        ).pack(side="left")
+        ttk.Button(
+            actions_main_row2,
+            text="Guardar a BD",
+            command=self._guardar_bd,
+            style="Secondary.TButton",
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            actions_main_row2,
+            text="Guardar .tex",
+            command=self._guardar_tex,
+            style="Secondary.TButton",
+        ).pack(side="left", padx=(8, 0))
+        self._btn_review_filter = ttk.Button(
+            actions_main_row2,
+            text="Solo inconsistentes",
+            command=self._toggle_review_filter,
+            style="Ghost.TButton",
+        )
+        self._btn_review_filter.pack(side="left", padx=(8, 0))
+
+        ttk.Button(
+            actions_tools_row,
+            text="Ver recortes segmentos",
+            command=self._open_segment_crops_view,
+            style="Ghost.TButton",
+        ).pack(side="left")
+        ttk.Button(
+            actions_tools_row,
+            text="Paso 5: Claves y solucion",
             command=self._open_step3_dialog,
             style="Ghost.TButton",
         ).pack(side="left", padx=(8, 0))
-        ttk.Button(actions_main_row1, text="Copiar salida", command=self._copiar_salida, style="Ghost.TButton").pack(side="left", padx=(8, 0))
-        ttk.Button(actions_main_row1, text="Ver OCR crudo", command=self._open_ocr_raw_view, style="Ghost.TButton").pack(
-            side="left", padx=(8, 0)
-        )
-        ttk.Button(actions_main_row1, text="Ver log", command=self._open_log_view, style="Ghost.TButton").pack(
-            side="left", padx=(8, 0)
-        )
-        ttk.Button(actions_main_row2, text="Guardar .tex", command=self._guardar_tex, style="Secondary.TButton").pack(side="left", padx=(8, 0))
-        ttk.Button(actions_main_row2, text="Guardar a BD", command=self._guardar_bd, style="Secondary.TButton").pack(side="left", padx=(8, 0))
-        ttk.Button(actions_main_row2, text="Vista previa LaTeX", command=self._open_preview, style="Ghost.TButton").pack(
-            side="left", padx=(8, 0)
-        )
+        ttk.Button(
+            actions_tools_row,
+            text="Ver OCR crudo",
+            command=self._open_ocr_raw_view,
+            style="Ghost.TButton",
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            actions_tools_row,
+            text="Copiar salida",
+            command=self._copiar_salida,
+            style="Ghost.TButton",
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            actions_tools_row,
+            text="Limpiar cache OCR",
+            command=self._clear_processing_cache,
+            style="Ghost.TButton",
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            actions_tools_row,
+            text="Ver log",
+            command=self._open_log_view,
+            style="Ghost.TButton",
+        ).pack(side="left", padx=(8, 0))
 
-        body = ttk.Frame(self)
-        body.pack(fill="both", expand=True, padx=16, pady=(14, 16))
+    def _build_body_section(self) -> None:
+        body = ttk.Frame(self._ui_root, style="Panel.TFrame")
+        body.pack(fill="both", expand=True, pady=(14, 0))
 
-        left = ttk.Frame(body)
+        left = ttk.Frame(body, style="Panel.TFrame", width=340)
         left.pack(side="left", fill="y")
-        ttk.Label(left, text="Imagenes").pack(anchor="w")
+        left.pack_propagate(False)
+        self._build_left_column(left)
+
+        right = ttk.Frame(body, style="Panel.TFrame")
+        right.pack(side="left", fill="both", expand=True, padx=(16, 0))
+        self._build_right_column(right)
+
+    def _build_left_column(self, parent) -> None:
+        card = ttk.Frame(parent, style="Card.TFrame", padding=(12, 12))
+        card.pack(fill="both", expand=True)
+        tk.Label(
+            card,
+            text="Imagenes",
+            bg=self.palette["surface"],
+            fg=self.palette["text"],
+            font=("Segoe UI", 10, "bold"),
+        ).pack(anchor="w")
+        tk.Label(
+            card,
+            text="Selecciona una o varias imagenes para operar sobre el lote actual.",
+            bg=self.palette["surface"],
+            fg=self.palette["muted"],
+            font=("Segoe UI", 9),
+            justify="left",
+            wraplength=300,
+        ).pack(anchor="w", pady=(4, 8))
+
         self.list_files = tk.Listbox(
-            left,
+            card,
             selectmode=tk.EXTENDED,
             width=44,
-            bg=self.palette["surface"],
+            bg=self.palette["surface_soft"],
             fg=self.palette["text"],
             selectbackground=self.palette["select"],
             selectforeground=self.palette["text"],
             highlightthickness=1,
-            highlightbackground=self.palette["border"],
+            highlightbackground=self.palette["border_strong"],
+            relief="solid",
+            bd=1,
         )
-        self.list_files.pack(fill="y", expand=True, pady=(6, 0))
+        self.list_files.pack(fill="both", expand=True)
 
-        actions = ttk.Frame(left)
-        actions.pack(fill="x", pady=(10, 0))
+        actions = ttk.Frame(card, style="Card.TFrame")
+        actions.pack(fill="x", pady=(12, 0))
         ttk.Button(actions, text="Agregar imagenes", command=self._add_images, style="Ghost.TButton").pack(side="left")
-        ttk.Button(actions, text="Quitar", command=self._remove_selected, style="Secondary.TButton").pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Quitar", command=self._remove_selected, style="Secondary.TButton").pack(
+            side="left", padx=(8, 0)
+        )
 
-        right = ttk.Frame(body)
-        right.pack(side="left", fill="both", expand=True, padx=(16, 0))
+    def _build_right_column(self, parent) -> None:
+        self._build_output_section(parent)
+        self._build_log_section(parent)
+        self._build_status_section(parent)
 
-        ttk.Label(right, text="Salida (cada linea es un \\item)").pack(anchor="w")
+    def _build_output_section(self, parent) -> None:
+        card = ttk.Frame(parent, style="OutputCard.TFrame", padding=(14, 12))
+        card.pack(fill="both", expand=True)
+        ttk.Label(card, text="Salida LaTeX", style="OutputTitle.TLabel").pack(anchor="w")
+        tk.Label(
+            card,
+            text="Cada linea representa un \\item editable. Esta es la zona principal de trabajo y revision.",
+            bg=self.palette["surface_alt"],
+            fg=self.palette["muted"],
+            font=("Segoe UI", 9),
+            justify="left",
+            wraplength=760,
+        ).pack(anchor="w", pady=(4, 8))
+
         self.txt_out = tk.Text(
-            right,
+            card,
             bg=self.palette["surface"],
             fg=self.palette["text"],
             insertbackground=self.palette["text"],
@@ -673,25 +947,49 @@ class TranscriptorWindow(tk.Toplevel):
             bd=1,
             wrap="word",
             highlightthickness=1,
-            highlightbackground=self.palette["border"],
+            highlightbackground=self.palette["border_strong"],
         )
-        self.txt_out.pack(fill="both", expand=True, pady=(6, 10))
+        self.txt_out.pack(fill="both", expand=True)
         self.txt_out.bind("<<Modified>>", self._on_out_modified)
 
         self.loading_bar = ttk.Progressbar(
-            right,
+            card,
             mode="indeterminate",
             maximum=100,
             style="LoadingGreen.Horizontal.TProgressbar",
         )
-        self.loading_bar.pack(fill="x", pady=(0, 8))
-        ttk.Label(right, textvariable=self.loading_status_var, style="SubHeader.TLabel").pack(anchor="w", pady=(0, 8))
+        self.loading_bar.pack(fill="x", pady=(10, 6))
+        tk.Label(
+            card,
+            textvariable=self.loading_status_var,
+            bg=self.palette["surface_alt"],
+            fg=self.palette["muted"],
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).pack(fill="x")
 
-        ttk.Label(right, text="Log").pack(anchor="w")
-        self.txt_log = tk.Text(
-            right,
-            height=8,
+    def _build_log_section(self, parent) -> None:
+        card = ttk.Frame(parent, style="LogCard.TFrame", padding=(12, 12))
+        card.pack(fill="x", pady=(12, 0))
+        tk.Label(
+            card,
+            text="Log",
             bg=self.palette["surface"],
+            fg=self.palette["text"],
+            font=("Segoe UI", 10, "bold"),
+        ).pack(anchor="w")
+        tk.Label(
+            card,
+            text="Feedback operativo del lote y eventos del proceso actual.",
+            bg=self.palette["surface"],
+            fg=self.palette["muted"],
+            font=("Segoe UI", 9),
+        ).pack(anchor="w", pady=(4, 8))
+
+        self.txt_log = tk.Text(
+            card,
+            height=8,
+            bg=self.palette["surface_soft"],
             fg=self.palette["text"],
             insertbackground=self.palette["text"],
             relief="solid",
@@ -701,11 +999,28 @@ class TranscriptorWindow(tk.Toplevel):
             highlightbackground=self.palette["border"],
         )
         self.txt_log.pack(fill="x")
-        self.progress = ttk.Progressbar(right, mode="determinate", maximum=100, style="Accent.Horizontal.TProgressbar")
-        self.progress.pack(fill="x", pady=(10, 0))
-        ttk.Label(right, textvariable=self.progress_status_var, style="SubHeader.TLabel").pack(
-            anchor="w", pady=(6, 0)
-        )
+
+    def _build_status_section(self, parent) -> None:
+        card = ttk.Frame(parent, style="Card.TFrame", padding=(12, 10))
+        card.pack(fill="x", pady=(10, 0))
+        tk.Label(
+            card,
+            text="Progreso del lote",
+            bg=self.palette["surface"],
+            fg=self.palette["muted"],
+            font=("Segoe UI", 9, "bold"),
+        ).pack(anchor="w")
+        self.progress = ttk.Progressbar(card, mode="determinate", maximum=100, style="Accent.Horizontal.TProgressbar")
+        self.progress.pack(fill="x", pady=(8, 0))
+        tk.Label(
+            card,
+            textvariable=self.progress_status_var,
+            bg=self.palette["surface"],
+            fg=self.palette["muted"],
+            font=("Segoe UI", 9),
+            justify="left",
+            anchor="w",
+        ).pack(fill="x", pady=(6, 0))
 
     def _set_loading_bar(self, active: bool, message: str = "") -> None:
         bar = getattr(self, "loading_bar", None)
@@ -723,9 +1038,20 @@ class TranscriptorWindow(tk.Toplevel):
         except Exception:
             pass
 
+    def _set_main_flow_buttons_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for btn_name in ("btn_segmentar", "btn_transcribir", "btn_estructurar", "btn_render_latex"):
+            try:
+                getattr(self, btn_name).configure(state=state)
+            except Exception:
+                pass
+
     def _bind_shortcuts(self) -> None:
-        # Intenta pegar imagen solo si el portapapeles contiene una.
-        self.bind_all("<Control-v>", self._on_ctrl_v, add=True)
+        # El pegado de imagenes del lote principal debe quedar acotado a esta
+        # instancia del modulo. Usar bind_all provoca que Ctrl+V termine
+        # entrando en otras ventanas del transcriptor o en dialogs secundarios
+        # como el gestor de soluciones.
+        self.bind("<Control-v>", self._on_ctrl_v, add=True)
 
     def _init_drag_and_drop(self) -> None:
         if not DND_AVAILABLE:
@@ -877,6 +1203,12 @@ class TranscriptorWindow(tk.Toplevel):
         self._log_buffer.append(line)
         if len(self._log_buffer) > 5000:
             self._log_buffer = self._log_buffer[-5000:]
+        try:
+            self.state.logs.append(line)
+            if len(self.state.logs) > 5000:
+                self.state.logs = self.state.logs[-5000:]
+        except Exception:
+            pass
         if not self._ui_alive():
             return
         txt = getattr(self, "txt_log", None)
@@ -887,6 +1219,120 @@ class TranscriptorWindow(tk.Toplevel):
             txt.see("end")
         except Exception:
             # Ignore writes after window teardown.
+            return
+
+    def _sync_ocr_label_to_golden(self, label: str, *, corrected_text: str = "") -> None:
+        label = str(label or "").strip()
+        if not label:
+            return
+        raw_ocr = str(self._ocr_raw_first_by_label.get(label, "") or "").strip()
+        if not raw_ocr or raw_ocr.startswith("[ERROR"):
+            return
+        image_path = self._file_map.get(label)
+        if image_path is None:
+            return
+        try:
+            from modulos.modulo12_auditor_entrenamiento.controlador_auditor_entrenamiento import (
+                TrainingAuditController,
+            )
+
+            TrainingAuditController().upsert_ocr_golden_from_session_image(
+                image_path=Path(image_path),
+                source_label=label,
+                ocr_text=raw_ocr,
+                corrected_text=str(corrected_text or ""),
+                status="corrected" if str(corrected_text or "").strip() else "pending",
+                book_code=(self.book_code_var.get() or "").strip(),
+                instance_type=(self.instance_type_var.get() or "").strip(),
+                session_json=str(self._session_file_path or ""),
+                notes="Registrado automaticamente desde OCR fiel del Modulo 0.",
+            )
+        except Exception as exc:
+            self._log(f"Golden OCR: no se pudo sincronizar {label}: {exc}")
+
+    def _sync_item_correction_to_ocr_golden(self, item_num: int) -> None:
+        try:
+            target_num = int(item_num or 0)
+        except Exception:
+            target_num = 0
+        if target_num <= 0:
+            return
+        for entry in list(self._items or []):
+            if len(entry) < 2:
+                continue
+            item_text = str(entry[1] or "").strip()
+            if int(self.controller.parsear_numero_original(item_text) or 0) != target_num:
+                continue
+            image_paths = [str(path or "").strip() for path in (entry[2] if len(entry) > 2 else []) if str(path or "").strip()]
+            labels: list[str] = []
+            for image_path in image_paths:
+                try:
+                    resolved = str(Path(image_path).resolve()).lower()
+                except Exception:
+                    resolved = image_path.lower()
+                for label, source_path in self._file_map.items():
+                    try:
+                        source_key = str(Path(source_path).resolve()).lower()
+                    except Exception:
+                        source_key = str(source_path).lower()
+                    if source_key == resolved:
+                        labels.append(str(label))
+                        break
+            for label in labels:
+                self._sync_ocr_label_to_golden(label, corrected_text=item_text)
+            return
+
+    def _sync_state_snapshot(self, *, preserve_runtime_text: bool = False) -> None:
+        try:
+            file_entries: List[Tuple[str, str]] = []
+            total = int(self.list_files.size())
+            for i in range(total):
+                label = self.list_files.get(i)
+                src = self._file_map.get(label)
+                if src:
+                    file_entries.append((str(label), str(src)))
+            self.workflow.load_images(self.state, file_entries)
+            item_rows = self._build_item_state_rows_raw() if preserve_runtime_text else self._build_item_state_rows()
+            self.workflow.refresh_items(self.state, item_rows, corrected=self._corrected_item_numbers)
+            self.state.project_name = self._normalize_project_name(self.project_name_var.get())
+            self.state.ui_settings = {
+                "db_name": (self.db_name_var.get() or "").strip(),
+                "provider": self._normalize_provider_label(self.provider_var.get()),
+                "model": (self.model_var.get() or "").strip(),
+                "format_model": (self.format_model_var.get() or "").strip(),
+                "project_name": self.state.project_name,
+                "book_code": (self.book_code_var.get() or "").strip(),
+                "instance_type": (self.instance_type_var.get() or "").strip(),
+                "timeout_s": int(self.timeout_var.get()),
+                "retries": int(self.retries_var.get()),
+                "skip_done": bool(self.skip_done_var.get()),
+                "ocr_lang": (self.ocr_lang_var.get() or "").strip(),
+                "curso": (self.curso_var.get() or "").strip(),
+                "tema": (self.tema_var.get() or "").strip(),
+                "subtema": (self.subtema_var.get() or "").strip(),
+                "tag_mode": (self.tag_mode_var.get() or "").strip(),
+            }
+            if preserve_runtime_text:
+                try:
+                    self.state.output_text = (self.txt_out.get("1.0", "end") or "").strip()
+                except Exception:
+                    self.state.output_text = ""
+            else:
+                # Persist full output built from canonical items (never from filtered textbox view).
+                self.state.output_text = self._build_output_text_from_items(review_only=False)
+            self.state.usage.input_tokens = int(self._session_input_tokens)
+            self.state.usage.output_tokens = int(self._session_output_tokens)
+            self.state.usage.total_tokens = int(self._session_total_tokens)
+            self.state.usage.estimated_usd = float(self._session_estimated_usd)
+            self.state.review.reviewed_sources = sorted(str(v) for v in self._segmentation_reviewed_sources)
+            self.state.review.review_done = bool(self._segmentation_review_done)
+            self.state.review.route_active = bool(self._segmentation_route_active)
+            self.state.metadata["step3_last_claves_input"] = str(self._step3_last_claves_input or "")
+            self.state.metadata["preview_images"] = {str(k): str(v) for k, v in self._preview_images.items()}
+            self.state.metadata["preview_item_image_statuses"] = {
+                str(k): str(v) for k, v in self._preview_item_image_statuses.items()
+            }
+        except Exception:
             return
 
     def _open_log_view(self) -> None:
@@ -941,7 +1387,307 @@ class TranscriptorWindow(tk.Toplevel):
                 messagebox.showerror("Log", f"No se pudo copiar:\n{exc}")
 
         ttk.Button(btns, text="Copiar", command=on_copy, style="Ghost.TButton").pack(side="left")
-        ttk.Button(btns, text="Cerrar", command=dlg.destroy, style="Secondary.TButton").pack(side="right")
+
+    def _show_session_report(self) -> None:
+        total = len(self._items)
+        con_clave = 0
+        con_solucion = 0
+        con_estado = 0
+        con_inconsistente = 0
+        numeros: List[int] = []
+        for entry in self._items:
+            item_text = str(entry[1] if len(entry) > 1 else "")
+            num = self.controller.parsear_numero_original(item_text) or 0
+            if TAG_CLAVE_RE.search(item_text):
+                con_clave += 1
+            estado_match = TAG_ESTADO_RE.search(item_text)
+            if estado_match:
+                con_estado += 1
+                estado_val = str(estado_match.group(1) or "").strip().lower().replace(" ", "_")
+                if estado_val in {"inconsistente", "mal_planteado", "ambiguo"}:
+                    con_inconsistente += 1
+            if self._get_solution_paths_for_item_number(num) or TAG_SOLUCION_RE.search(item_text):
+                con_solucion += 1
+            if num > 0:
+                numeros.append(int(num))
+
+        db = (self.db_name_var.get() or "").strip()
+        book_code = (self.book_code_var.get() or "").strip()
+        instance_type = (self.instance_type_var.get() or "").strip()
+        uploaded = {"subidos": 0, "con_solucion": 0, "sin_solucion": 0}
+        if db and book_code and instance_type and numeros:
+            try:
+                uploaded = self.controller.obtener_reporte_subida(
+                    db,
+                    libro_codigo=book_code,
+                    instancia_tipo=instance_type,
+                    numeros=numeros,
+                )
+            except Exception as exc:
+                self._log(f"Reporte BD: {exc}")
+
+        msg = (
+            f"Items en sesion: {total}\n"
+            f"Items con [[Clave=...]]: {con_clave}\n"
+            f"Items con [[Estado=...]]: {con_estado}\n"
+            f"Items inconsistentes marcados: {con_inconsistente}\n"
+            f"Items con solucion registrada: {con_solucion}\n"
+            f"Subidos a BD: {uploaded['subidos']}\n"
+            f"Subidos con solucion: {uploaded['con_solucion']}\n"
+            f"Subidos sin solucion: {uploaded['sin_solucion']}"
+        )
+        self._log(msg.replace("\n", " | "))
+        messagebox.showinfo("Reporte sesion", msg)
+
+    def _open_inconsistent_items_view(self) -> None:
+        self._sync_items_from_output_text()
+        if not self._items:
+            messagebox.showwarning("Inconsistentes", "No hay items en la sesion actual.")
+            return
+
+        rows: List[Tuple[int, int, str]] = []
+        for idx, entry in enumerate(self._items):
+            item_text = str(entry[1] if len(entry) > 1 else "")
+            match = TAG_ESTADO_RE.search(item_text)
+            if not match:
+                continue
+            state = str(match.group(1) or "").strip().lower().replace(" ", "_")
+            if state not in {"inconsistente", "mal_planteado", "ambiguo"}:
+                continue
+            item_num = int(self.controller.parsear_numero_original(item_text) or 0)
+            preview = self.controller.normalizar_item_una_linea(item_text)
+            if len(preview) > 140:
+                preview = preview[:137].rstrip() + "..."
+            rows.append((idx, item_num, preview))
+
+        if not rows:
+            messagebox.showinfo("Inconsistentes", "No hay items marcados como inconsistentes en esta sesion.")
+            return
+
+        win = tk.Toplevel(self)
+        win.title("Items inconsistentes")
+        win.geometry("980x520")
+        win.minsize(820, 420)
+
+        header = tk.Label(
+            win,
+            text=f"Inconsistentes detectados: {len(rows)}",
+            bg=self.palette["surface_alt"],
+            fg=self.palette["text"],
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+            padx=10,
+            pady=8,
+        )
+        header.pack(fill="x")
+
+        container = ttk.Frame(win, style="Panel.TFrame")
+        container.pack(fill="both", expand=True, padx=10, pady=10)
+
+        listbox = tk.Listbox(
+            container,
+            width=54,
+            bg=self.palette["surface"],
+            fg=self.palette["text"],
+            selectbackground=self.palette["select"],
+            selectforeground=self.palette["text"],
+            exportselection=False,
+        )
+        listbox.pack(side="left", fill="y")
+        for _idx, num, preview in rows:
+            label = f"{num:>3}" if num > 0 else "---"
+            listbox.insert("end", f"{label} | {preview}")
+
+        txt = tk.Text(
+            container,
+            wrap="word",
+            bg=self.palette["surface_soft"],
+            fg=self.palette["text"],
+            relief="solid",
+            bd=1,
+            padx=8,
+            pady=8,
+        )
+        txt.pack(side="left", fill="both", expand=True, padx=(10, 0))
+
+        def _render_selected() -> None:
+            sel = listbox.curselection()
+            if not sel:
+                return
+            row_idx = int(sel[0])
+            source_idx, _num, _preview = rows[row_idx]
+            item_text = str(self._items[source_idx][1] if len(self._items[source_idx]) > 1 else "")
+            txt.config(state="normal")
+            txt.delete("1.0", "end")
+            txt.insert("1.0", item_text)
+            txt.config(state="disabled")
+
+        def _go_to_item() -> None:
+            sel = listbox.curselection()
+            if not sel:
+                return
+            row_idx = int(sel[0])
+            source_idx, item_num, _preview = rows[row_idx]
+            item_text = str(self._items[source_idx][1] if len(self._items[source_idx]) > 1 else "")
+            if self._widget_alive(self.txt_out):
+                try:
+                    self.txt_out.focus_set()
+                    if item_num > 0:
+                        raw_text = self.txt_out.get("1.0", "end-1c")
+                        anchor = f"\\item[\\textbf{{{item_num}."
+                        pos = raw_text.find(anchor)
+                        if pos >= 0:
+                            index = self.txt_out.index(f"1.0+{pos}c")
+                            self.txt_out.mark_set("insert", index)
+                            self.txt_out.see(index)
+                    selected = self.txt_out.get("insert linestart", "insert lineend")
+                    if item_text and selected.strip() != item_text.strip():
+                        idx = self.txt_out.search(item_text[: max(10, min(90, len(item_text)))], "1.0", stopindex="end")
+                        if idx:
+                            self.txt_out.mark_set("insert", idx)
+                            self.txt_out.see(idx)
+                except Exception:
+                    pass
+
+        actions = ttk.Frame(win, style="Panel.TFrame")
+        actions.pack(fill="x", padx=10, pady=(0, 10))
+        ttk.Button(actions, text="Ir al item en salida", command=_go_to_item, style="Accent.TButton").pack(side="left")
+        ttk.Button(actions, text="Cerrar", command=win.destroy, style="Ghost.TButton").pack(side="left", padx=(8, 0))
+
+        listbox.bind("<<ListboxSelect>>", lambda _e: _render_selected())
+        listbox.selection_set(0)
+        _render_selected()
+
+    def _is_review_filter_target(self, item_text: str) -> bool:
+        text = str(item_text or "")
+        if self._item_looks_incomplete_for_review(text):
+            return True
+        match = TAG_ESTADO_RE.search(text)
+        if not match:
+            # Sin estado no podemos considerarlo consistente, asi que debe revisarse.
+            return True
+        state = self._normalize_estado_tag_value(str(match.group(1) or ""))
+        return state not in {"consistente", "corregido", "correcto", "revisado", "validado", "ok"}
+
+    def _item_looks_incomplete_for_review(self, item_text: str) -> bool:
+        text = str(item_text or "").strip()
+        if not text:
+            return True
+        lowered = text.lower()
+        if any(token in lowered for token in ("incompleto", "continuacion_pendiente", "continuación_pendiente")):
+            return True
+        if "..." in text or "$...$" in text:
+            return True
+        if ITEM_HEADER_NUM_RE.search(text) is None:
+            return True
+
+        labels = self._option_labels_in_item_for_review(text)
+        if not labels:
+            # Ejercicio abierto: no debe exigir clave ni alternativas A-E.
+            return False
+        expected = {"A", "B", "C", "D", "E"}
+        if not expected.issubset(labels):
+            return True
+        return self._item_has_placeholder_options_for_review(text)
+
+    def _option_labels_in_item_for_review(self, item_text: str) -> Set[str]:
+        text = str(item_text or "")
+        start_match = re.search(
+            rf"(?:{re.escape(SEP_LINE)}|\s)(A)\)\s*",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not start_match:
+            return set()
+        option_region = text[start_match.start() :]
+        return {
+            str(match.group(1) or "").upper()
+            for match in re.finditer(r"(?<![A-Za-z0-9])([A-E])\)", option_region, flags=re.IGNORECASE)
+        }
+
+    def _item_has_placeholder_options_for_review(self, item_text: str) -> bool:
+        text = str(item_text or "")
+        start_match = re.search(
+            rf"(?:{re.escape(SEP_LINE)}|\s)A\)\s*",
+            text,
+            flags=re.IGNORECASE,
+        )
+        option_region = text[start_match.start() :] if start_match else text
+        return any(
+            token in option_region
+            for token in ("A)$...$", "B)$...$", "C)$...$", "D)$...$", "E)$...$", "A)...", "B)...", "C)...", "D)...", "E)...")
+        )
+
+    def _toggle_review_filter(self) -> None:
+        self._filter_review_only = not bool(self._filter_review_only)
+        if self._btn_review_filter is not None:
+            self._btn_review_filter.configure(
+                text="Mostrar todos" if self._filter_review_only else "Solo inconsistentes",
+                style="Accent.TButton" if self._filter_review_only else "Ghost.TButton",
+            )
+        self._render_output_from_items()
+        if self._filter_review_only:
+            self.status_var.set("Filtro activo: salida LaTeX muestra incompletos y todo lo no consistente.")
+        else:
+            self.status_var.set("Filtro desactivado: salida LaTeX muestra todos los problemas.")
+
+    def _normalize_estado_tag_value(self, raw_value: str) -> str:
+        value = self._sanitize_tag_value(str(raw_value or "").strip()).lower()
+        if not value:
+            return "sin_revisar"
+        if value in {"consistente", "bien_planteado", "corregido", "correcto", "revisado", "validado", "ok"}:
+            return "consistente"
+        if value in {"inconsistente", "mal_planteado", "ambiguo", "ambigua"}:
+            return "inconsistente"
+        if value in {"sin_revisar", "pendiente_revision", "pendiente"}:
+            return "sin_revisar"
+        return value
+
+    def _extract_estado_tag_value(self, item_text: str) -> str:
+        match = TAG_ESTADO_RE.search(str(item_text or ""))
+        if not match:
+            return ""
+        return self._normalize_estado_tag_value(str(match.group(1) or ""))
+
+    def _ensure_estado_tag_in_item(self, item_text: str, *, default_estado: str = "sin_revisar") -> str:
+        text = str(item_text or "").strip()
+        if not text:
+            return text
+        if TAG_ESTADO_RE.search(text):
+            return text
+        estado = self._normalize_estado_tag_value(str(default_estado or "").strip())
+        header_match = ITEM_HEADER_RE.search(text)
+        if not header_match:
+            return f"[[Estado={estado}]] {text}".strip()
+        header = header_match.group(1)
+        rest = text[header_match.end() :].lstrip()
+        if rest:
+            return f"{header} [[Estado={estado}]] {rest}".strip()
+        return f"{header} [[Estado={estado}]]".strip()
+
+    def _load_estado_map_from_db(self, numeros: List[int]) -> Dict[int, str]:
+        db_name = (self.db_name_var.get() or "").strip()
+        libro_codigo = (self.book_code_var.get() or "").strip()
+        instancia_tipo = (self.instance_type_var.get() or "").strip()
+        normalized_nums = tuple(sorted({int(v) for v in numeros if int(v) > 0}))
+        if not db_name or not libro_codigo or not instancia_tipo or not normalized_nums:
+            return {}
+        cache_key = (db_name, libro_codigo, instancia_tipo, normalized_nums)
+        if self._estado_db_cache_key == cache_key and self._estado_db_cache_map:
+            return dict(self._estado_db_cache_map)
+        try:
+            estado_map = self.controller.obtener_estado_consistencia_por_numeros(
+                db_name,
+                libro_codigo=libro_codigo,
+                instancia_tipo=instancia_tipo,
+                numeros=list(normalized_nums),
+            )
+        except Exception as exc:
+            self._log(f"Estado por BD: no se pudo cargar consistencia ({exc}).")
+            return {}
+        self._estado_db_cache_key = cache_key
+        self._estado_db_cache_map = dict(estado_map or {})
+        return dict(self._estado_db_cache_map)
 
     def _new_run_log_path(self, *, provider: str, model: str, detect_model: str, total: int) -> Path:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1062,6 +1808,23 @@ class TranscriptorWindow(tk.Toplevel):
                 continue
         return boxes
 
+    @staticmethod
+    def _box_reading_order_key(box: Tuple[int, int, int, int]) -> Tuple[int, int, int, int]:
+        x1, y1, x2, y2 = [int(v) for v in box]
+        return (y1, x1, y2, x2)
+
+    def _sort_boxes_reading_order(self, boxes: Iterable[Tuple[int, int, int, int]]) -> List[Tuple[int, int, int, int]]:
+        clean: List[Tuple[int, int, int, int]] = []
+        for raw in list(boxes or []):
+            try:
+                x1, y1, x2, y2 = [int(v) for v in raw]
+            except Exception:
+                continue
+            if x2 <= x1 or y2 <= y1:
+                continue
+            clean.append((x1, y1, x2, y2))
+        return sorted(clean, key=self._box_reading_order_key)
+
     def _normalize_figure_box_entry(
         self,
         raw: Dict[str, Any],
@@ -1108,6 +1871,189 @@ class TranscriptorWindow(tk.Toplevel):
             "confirmed": bool(confirmed),
             "updated_at": updated_at,
         }
+
+    def _normalize_segment_detector_audit_entry(self, raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not isinstance(raw, dict):
+            return None
+        detector_source = str(raw.get("detector_source", "none") or "none").strip().lower() or "none"
+        detector_model = str(raw.get("detector_model", "") or "").strip()
+        review_status = str(raw.get("review_status", "predicted") or "predicted").strip().lower() or "predicted"
+
+        def _norm_box_rows(values) -> List[Dict[str, Any]]:
+            out: List[Dict[str, Any]] = []
+            if not isinstance(values, list):
+                return out
+            for entry in values:
+                if not isinstance(entry, dict):
+                    continue
+                bbox_raw = entry.get("bbox_px")
+                if not isinstance(bbox_raw, (list, tuple)) or len(bbox_raw) < 4:
+                    continue
+                try:
+                    x1, y1, x2, y2 = [int(v) for v in bbox_raw[:4]]
+                except Exception:
+                    continue
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                try:
+                    conf = float(entry.get("conf", 0.0) or 0.0)
+                except Exception:
+                    conf = 0.0
+                out.append(
+                    {
+                        "bbox_px": [x1, y1, x2, y2],
+                        "conf": max(0.0, min(1.0, conf)),
+                    }
+                )
+            return out
+
+        predicted_boxes = _norm_box_rows(raw.get("predicted_boxes", []))
+        final_boxes = _norm_box_rows(raw.get("final_boxes", []))
+        diagram_presence_label = str(raw.get("diagram_presence_label", "") or "").strip().lower()
+        if diagram_presence_label not in {"yes", "no", "pending"}:
+            diagram_presence_label = "yes" if final_boxes else "no"
+        diagram_presence_source = str(raw.get("diagram_presence_source", "") or "").strip().lower()
+        if not diagram_presence_source:
+            diagram_presence_source = "final_segments"
+        try:
+            max_conf = float(raw.get("max_conf", 0.0) or 0.0)
+        except Exception:
+            max_conf = 0.0
+        try:
+            avg_conf = float(raw.get("avg_conf", 0.0) or 0.0)
+        except Exception:
+            avg_conf = 0.0
+        predicted_at = str(raw.get("predicted_at", "") or "").strip()
+        reviewed_at = str(raw.get("reviewed_at", "") or "").strip()
+        updated_at = str(raw.get("updated_at", "") or "").strip()
+        if not updated_at:
+            updated_at = reviewed_at or predicted_at or datetime.now().isoformat(timespec="seconds")
+        return {
+            "detector_source": detector_source,
+            "detector_model": detector_model,
+            "review_status": review_status,
+            "max_conf": max(0.0, min(1.0, max_conf)),
+            "avg_conf": max(0.0, min(1.0, avg_conf)),
+            "predicted_boxes": predicted_boxes,
+            "final_boxes": final_boxes,
+            "diagram_presence_label": diagram_presence_label,
+            "diagram_presence_source": diagram_presence_source,
+            "predicted_at": predicted_at,
+            "reviewed_at": reviewed_at,
+            "updated_at": updated_at,
+        }
+
+    def _get_segment_detector_audit(self, path: Path) -> Optional[Dict[str, Any]]:
+        key = self._seg_v2_source_key(path)
+        raw = self._segment_detection_audit_by_source.get(key)
+        if not isinstance(raw, dict):
+            return None
+        return self._normalize_segment_detector_audit_entry(raw)
+
+    def _set_segment_detector_audit(self, path: Path, payload: Dict[str, Any]) -> None:
+        key = self._seg_v2_source_key(path)
+        normalized = self._normalize_segment_detector_audit_entry(payload)
+        if normalized is None:
+            self._segment_detection_audit_by_source.pop(key, None)
+            return
+        self._segment_detection_audit_by_source[key] = normalized
+
+    def _boxes_signature(self, boxes: List[Tuple[int, int, int, int]]) -> List[Tuple[int, int, int, int]]:
+        normalized: List[Tuple[int, int, int, int]] = []
+        for box in list(boxes or []):
+            try:
+                x1, y1, x2, y2 = [int(v) for v in box]
+            except Exception:
+                continue
+            if x2 <= x1 or y2 <= y1:
+                continue
+            normalized.append((x1, y1, x2, y2))
+        normalized.sort(key=lambda row: (row[1], row[0], row[3], row[2]))
+        return normalized
+
+    def _update_segment_detector_audit_for_source(
+        self,
+        *,
+        source_path: Path,
+        final_boxes: List[Tuple[int, int, int, int]],
+        predicted_boxes: Optional[List[Dict[str, Any]]] = None,
+        detector_source: Optional[str] = None,
+        detector_model: Optional[str] = None,
+        max_conf: Optional[float] = None,
+        avg_conf: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        existing = self._get_segment_detector_audit(source_path) or {}
+        predicted_rows = predicted_boxes
+        if predicted_rows is None:
+            predicted_rows = list(existing.get("predicted_boxes", []) or [])
+        if detector_source is None:
+            detector_source = str(existing.get("detector_source", "none") or "none").strip().lower() or "none"
+        if detector_model is None:
+            detector_model = str(existing.get("detector_model", "") or "").strip()
+        if max_conf is None:
+            try:
+                max_conf = float(existing.get("max_conf", 0.0) or 0.0)
+            except Exception:
+                max_conf = 0.0
+        if avg_conf is None:
+            try:
+                avg_conf = float(existing.get("avg_conf", 0.0) or 0.0)
+            except Exception:
+                avg_conf = 0.0
+
+        normalized_predicted = self._normalize_segment_detector_audit_entry(
+            {
+                "detector_source": detector_source,
+                "detector_model": detector_model,
+                "predicted_boxes": predicted_rows,
+                "final_boxes": [],
+                "max_conf": max_conf,
+                "avg_conf": avg_conf,
+                "predicted_at": str(existing.get("predicted_at", "") or "").strip(),
+            }
+        ) or {
+            "predicted_boxes": [],
+            "predicted_at": "",
+            "detector_source": detector_source,
+            "detector_model": detector_model,
+            "max_conf": max_conf,
+            "avg_conf": avg_conf,
+        }
+        predicted_sig = self._boxes_signature(
+            [
+                tuple(int(v) for v in (row.get("bbox_px", []) or [])[:4])
+                for row in normalized_predicted.get("predicted_boxes", [])
+                if isinstance(row, dict)
+            ]
+        )
+        final_sig = self._boxes_signature(final_boxes)
+        if not predicted_sig and final_sig:
+            review_status = "manual_only"
+        elif predicted_sig and not final_sig:
+            review_status = "rejected"
+        elif predicted_sig == final_sig:
+            review_status = "accepted"
+        else:
+            review_status = "corrected"
+
+        payload = {
+            "detector_source": detector_source,
+            "detector_model": detector_model,
+            "review_status": review_status,
+            "max_conf": max_conf,
+            "avg_conf": avg_conf,
+            "predicted_boxes": normalized_predicted.get("predicted_boxes", []),
+            "final_boxes": [{"bbox_px": [int(v) for v in box], "conf": 1.0} for box in final_sig],
+            "diagram_presence_label": "yes" if final_sig else "no",
+            "diagram_presence_source": "final_segments",
+            "predicted_at": str(normalized_predicted.get("predicted_at", "") or "").strip()
+            or str(existing.get("predicted_at", "") or "").strip()
+            or datetime.now().isoformat(timespec="seconds"),
+            "reviewed_at": datetime.now().isoformat(timespec="seconds"),
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        self._set_segment_detector_audit(source_path, payload)
+        return self._get_segment_detector_audit(source_path) or payload
 
     def _get_figure_boxes(self, path: Path) -> List[Dict[str, Any]]:
         key = self._seg_v2_source_key(path)
@@ -1335,6 +2281,27 @@ class TranscriptorWindow(tk.Toplevel):
             bucket.pop(old_seg, None)
             replaced_slots.append(old_seg)
 
+        replaced_external: List[Tuple[str, int]] = []
+        for other_source_key, raw_bucket in list(self._segment_item_bindings_by_source.items()):
+            other_key = str(other_source_key or "").strip()
+            if not other_key:
+                continue
+            if other_key == source_key:
+                continue
+            other_bucket = self._get_segment_bindings_by_source_key(other_key)
+            changed_other = False
+            for old_seg, old_payload in list(other_bucket.items()):
+                if int(self._safe_int(old_payload.get("item_num", 0), 0)) != int(item_num):
+                    continue
+                old_slot = self._normalize_binding_slot(str(old_payload.get("slot", "ENUNCIADO") or "ENUNCIADO"))
+                if old_slot != slot_norm:
+                    continue
+                other_bucket.pop(old_seg, None)
+                replaced_external.append((other_key, int(old_seg)))
+                changed_other = True
+            if changed_other:
+                self._set_segment_bindings_by_source_key(other_key, other_bucket)
+
         payload = {
             "item_num": int(item_num),
             "slot": slot_norm,
@@ -1348,6 +2315,10 @@ class TranscriptorWindow(tk.Toplevel):
         for old_seg in replaced_slots:
             self._log(
                 f"binding_replaced source={source_path.name} seg_old={old_seg} -> item={item_num} slot={slot_norm}"
+            )
+        for old_source_key, old_seg in replaced_external:
+            self._log(
+                f"binding_replaced source_key={old_source_key} seg_old={old_seg} -> item={item_num} slot={slot_norm}"
             )
         self._log(
             f"binding_set source={source_path.name} seg={int(segment_idx)} -> item={item_num} slot={slot_norm} marker={marker_name}"
@@ -1379,6 +2350,289 @@ class TranscriptorWindow(tk.Toplevel):
                 marker_map[marker] = crop_path
         return marker_map
 
+    def _item_image_binding_hint_key(self, *, archivo_origen: str, item_num: int) -> str:
+        archivo = str(archivo_origen or "").strip()
+        numero = max(0, int(item_num or 0))
+        if (not archivo) or numero <= 0:
+            return ""
+        return f"{archivo}::{numero}"
+
+    def _normalize_runtime_image_paths(self, image_paths: Iterable[str]) -> List[str]:
+        out: List[str] = []
+        seen: Set[str] = set()
+        for raw_path in image_paths or []:
+            clean = str(raw_path or "").strip()
+            if (not clean) or clean in seen:
+                continue
+            if not self._is_valid_image_path(clean):
+                continue
+            seen.add(clean)
+            out.append(clean)
+        return out
+
+    def _binding_slot_from_marker_name(self, marker_name: str) -> str:
+        parsed = MARKER_VALUE_RE.match(str(marker_name or "").strip())
+        if not parsed:
+            return "ENUNCIADO"
+        opt = str(parsed.group("opt") or "").strip().upper()
+        return self._normalize_binding_slot(opt or "ENUNCIADO")
+
+    def _build_runtime_item_image_binding(
+        self,
+        *,
+        archivo_origen: str,
+        item_text: str,
+        image_paths: Iterable[str],
+        raw_binding: Any = None,
+    ) -> ImageBinding:
+        item_num = int(
+            self.controller.parsear_numero_original(str(item_text or "")) or self._extract_structured_item_number(str(item_text or "")) or 0
+        )
+        hint_key = self._item_image_binding_hint_key(archivo_origen=archivo_origen, item_num=item_num)
+        binding_hint = raw_binding
+        if binding_hint is None and hint_key:
+            binding_hint = self._item_image_binding_hints.get(hint_key, {})
+        binding = ImageBinding.from_dict(binding_hint if isinstance(binding_hint, dict) else {})
+
+        decoded_item = self.controller.normalizar_item_una_linea(self._decode_scan_escapes(str(item_text or "")))
+        text_markers = self._extract_image_marker_names(decoded_item)
+        valid_paths = self._normalize_runtime_image_paths(image_paths)
+        hint_score = max(int(binding.figure_hint_score or 0.0), self._item_image_hint_score(decoded_item))
+
+        source_path = self._find_source_path_by_stem(str(archivo_origen or "").strip())
+        source_key = self._seg_v2_source_key(source_path) if source_path is not None else ""
+        binding_rows: List[Tuple[int, str, str, str, int]] = []
+        if item_num > 0:
+            preferred_keys: List[str] = []
+            if source_key:
+                preferred_keys.append(source_key)
+            for raw_key in self._segment_item_bindings_by_source.keys():
+                key_txt = str(raw_key or "").strip()
+                if key_txt and key_txt not in preferred_keys:
+                    preferred_keys.append(key_txt)
+            seen_binding_keys: Set[Tuple[str, str]] = set()
+            for current_source_key in preferred_keys:
+                source_bindings = self._get_segment_bindings_by_source_key(current_source_key)
+                for seg_idx, payload in source_bindings.items():
+                    if not self._as_bool(payload.get("confirmed"), False):
+                        continue
+                    if int(self._safe_int(payload.get("item_num", 0), 0)) != int(item_num):
+                        continue
+                    slot_name = self._normalize_binding_slot(str(payload.get("slot", "ENUNCIADO") or "ENUNCIADO"))
+                    marker_name = str(payload.get("marker_name", "") or "").strip()
+                    if not marker_name:
+                        marker_name = self._build_binding_marker_name(item_num=item_num, slot=slot_name)
+                    dedupe_key = (marker_name, slot_name)
+                    if dedupe_key in seen_binding_keys:
+                        continue
+                    seen_binding_keys.add(dedupe_key)
+                    crop_path = str(payload.get("crop_path", "") or "").strip()
+                    if (not crop_path) or (not self._is_valid_image_path(crop_path)):
+                        crop_path = str(self._preview_images.get(marker_name, "") or "").strip()
+                    sort_idx = 0 if slot_name == "ENUNCIADO" else 1
+                    binding_rows.append((sort_idx, slot_name, marker_name, crop_path, int(seg_idx)))
+        binding_rows.sort(key=lambda row: (row[0], row[1], row[2], row[4]))
+
+        if binding_rows:
+            marker_names: List[str] = []
+            marker_paths: Dict[str, str] = {}
+            crop_paths: List[str] = []
+            segment_ids: List[int] = []
+            slots: List[str] = []
+            for _sort_idx, slot_name, marker_name, crop_path, seg_idx in binding_rows:
+                if marker_name and marker_name not in marker_names:
+                    marker_names.append(marker_name)
+                if slot_name:
+                    slots.append(slot_name)
+                if seg_idx not in segment_ids:
+                    segment_ids.append(int(seg_idx))
+                if self._is_valid_image_path(crop_path):
+                    marker_paths[marker_name] = crop_path
+                    if crop_path not in crop_paths:
+                        crop_paths.append(crop_path)
+            primary_marker = marker_names[0] if marker_names else (binding.marker_name or "")
+            return ImageBinding(
+                marker_name=primary_marker,
+                marker_names=marker_names,
+                marker_paths=marker_paths,
+                crop_paths=crop_paths,
+                segment_ids=segment_ids,
+                slots=slots,
+                status=IMAGE_BINDING_STATUS_CONFIRMED,
+                origin="segment_binding",
+                figure_hint_score=float(hint_score),
+                needs_review=False,
+            )
+
+        marker_names = list(binding.marker_names or [])
+        for marker_name in text_markers:
+            if marker_name and marker_name not in marker_names:
+                marker_names.append(marker_name)
+        if binding.marker_name and binding.marker_name not in marker_names:
+            marker_names.insert(0, binding.marker_name)
+
+        if valid_paths:
+            marker_paths = dict(binding.marker_paths or {})
+            for raw_path in valid_paths:
+                stem = Path(raw_path).stem.strip()
+                if not stem:
+                    continue
+                if stem not in marker_names:
+                    marker_names.append(stem)
+                marker_paths.setdefault(stem, raw_path)
+            if len(valid_paths) == 1:
+                only_path = valid_paths[0]
+                for marker_name in marker_names:
+                    marker_paths.setdefault(marker_name, only_path)
+            manual_slots = [self._binding_slot_from_marker_name(marker_name) for marker_name in marker_names]
+            primary_marker = marker_names[0] if marker_names else Path(valid_paths[0]).stem.strip()
+            if primary_marker and primary_marker not in marker_names:
+                marker_names.insert(0, primary_marker)
+            return ImageBinding(
+                marker_name=primary_marker,
+                marker_names=marker_names,
+                marker_paths=marker_paths,
+                crop_paths=list(valid_paths),
+                segment_ids=[],
+                slots=manual_slots,
+                status=IMAGE_BINDING_STATUS_MANUAL_CONFIRMED,
+                origin=binding.origin or "item_image_paths",
+                figure_hint_score=float(hint_score),
+                needs_review=False,
+            )
+
+        needs_review = bool(
+            binding.needs_review
+            or binding.status == IMAGE_BINDING_STATUS_NEEDS_REVIEW
+            or marker_names
+            or hint_score > 0
+        )
+        status = IMAGE_BINDING_STATUS_NEEDS_REVIEW if needs_review else IMAGE_BINDING_STATUS_NONE
+        primary_marker = marker_names[0] if marker_names else ""
+        return ImageBinding(
+            marker_name=primary_marker,
+            marker_names=marker_names,
+            marker_paths={},
+            crop_paths=[],
+            segment_ids=list(binding.segment_ids or []),
+            slots=list(binding.slots or []),
+            status=status,
+            origin=binding.origin or ("ocr_hint" if hint_score > 0 else "marker_only"),
+            figure_hint_score=float(hint_score),
+            needs_review=needs_review,
+        )
+
+    def _apply_item_image_binding_contract(
+        self,
+        *,
+        archivo_origen: str,
+        item_text: str,
+        image_paths: Iterable[str],
+        raw_binding: Any = None,
+    ) -> Tuple[str, List[str], ImageBinding]:
+        binding = self._build_runtime_item_image_binding(
+            archivo_origen=archivo_origen,
+            item_text=item_text,
+            image_paths=image_paths,
+            raw_binding=raw_binding,
+        )
+        item_num = int(
+            self.controller.parsear_numero_original(str(item_text or "")) or self._extract_structured_item_number(str(item_text or "")) or 0
+        )
+        source_path = self._find_source_path_by_stem(str(archivo_origen or "").strip())
+        fallback_path = source_path if source_path is not None else Path(str(archivo_origen or "item").strip() or "item")
+        clean_item = self.controller.normalizar_item_una_linea(self._normalize_math_delimiters(str(item_text or "")))
+        clean_item = self._remove_image_markers(clean_item)
+
+        markers_to_apply = list(binding.marker_names or ([] if not binding.marker_name else [binding.marker_name]))
+        if binding.is_confirmed and markers_to_apply:
+            slots = list(binding.slots or [])
+            if len(slots) < len(markers_to_apply):
+                slots.extend(["ENUNCIADO"] * (len(markers_to_apply) - len(slots)))
+            for idx, marker_name in enumerate(markers_to_apply):
+                slot_name = self._normalize_binding_slot(slots[idx] if idx < len(slots) else "ENUNCIADO")
+                clean_item = self._insert_explicit_marker_in_slot(
+                    text=clean_item,
+                    marker_name=marker_name,
+                    slot=slot_name,
+                    path=fallback_path,
+                    numero=max(1, int(item_num or 1)),
+                )
+            clean_item = self._move_image_marker_before_options(clean_item)
+            clean_item = self.controller.normalizar_item_una_linea(self._normalize_math_delimiters(clean_item))
+        else:
+            clean_item = self.controller.normalizar_item_una_linea(self._normalize_math_delimiters(clean_item))
+
+        normalized_paths = self._normalize_runtime_image_paths(
+            list(binding.marker_paths.values()) or list(binding.crop_paths or [])
+        )
+        return clean_item, normalized_paths, binding
+
+    def _build_item_state_rows(self) -> List[Tuple[str, str, List[str], Dict[str, Any]]]:
+        rows: List[Tuple[str, str, List[str], Dict[str, Any]]] = []
+        for entry in self._items:
+            archivo = str(entry[0] if len(entry) > 0 else "")
+            item_text = str(entry[1] if len(entry) > 1 else "")
+            image_paths = list(entry[2] if len(entry) > 2 else [])
+            cleaned_item, cleaned_paths, binding = self._apply_item_image_binding_contract(
+                archivo_origen=archivo,
+                item_text=item_text,
+                image_paths=image_paths,
+            )
+            rows.append((archivo, cleaned_item, cleaned_paths, binding.to_dict()))
+        return rows
+
+    def _sync_runtime_items_with_current_bindings(self) -> None:
+        """
+        Sync runtime item metadata from the current binding truth so that
+        output/preview reflect segment assignments immediately without rewriting
+        the user's text.
+        """
+        rebuilt: List[Tuple[str, str, List[str], Dict[str, Any]]] = []
+        for entry in self._items:
+            archivo = str(entry[0] if len(entry) > 0 else "")
+            item_text = str(entry[1] if len(entry) > 1 else "")
+            image_paths = [str(p) for p in (entry[2] if len(entry) > 2 else [])]
+            raw_binding = entry[3] if len(entry) > 3 else None
+            binding = self._build_runtime_item_image_binding(
+                archivo_origen=archivo,
+                item_text=item_text,
+                image_paths=image_paths,
+                raw_binding=raw_binding,
+            )
+            normalized_paths = self._normalize_runtime_image_paths(
+                list(binding.marker_paths.values()) or list(binding.crop_paths or [])
+            )
+            rebuilt.append(
+                (
+                    archivo,
+                    item_text,
+                    normalized_paths,
+                    binding.to_dict(),
+                )
+            )
+        self._items = rebuilt
+
+    def _build_item_state_rows_raw(self) -> List[Tuple[str, str, List[str], Dict[str, Any]]]:
+        """
+        Build a persistence snapshot without rewriting the user's text.
+        Saving a session must not normalize or reconstruct item content.
+        """
+        rows: List[Tuple[str, str, List[str], Dict[str, Any]]] = []
+        for entry in self._items:
+            archivo = str(entry[0] if len(entry) > 0 else "")
+            item_text = str(entry[1] if len(entry) > 1 else "")
+            image_paths = [str(p) for p in (entry[2] if len(entry) > 2 else [])]
+            raw_binding = entry[3] if len(entry) > 3 else None
+            binding = self._build_runtime_item_image_binding(
+                archivo_origen=archivo,
+                item_text=item_text,
+                image_paths=image_paths,
+                raw_binding=raw_binding,
+            )
+            rows.append((archivo, item_text, image_paths, binding.to_dict()))
+        return rows
+
     def _insert_explicit_marker_in_slot(
         self,
         *,
@@ -1396,6 +2650,27 @@ class TranscriptorWindow(tk.Toplevel):
             return raw
 
         slot_norm = self._normalize_binding_slot(slot)
+        if slot_norm in {"A", "B", "C", "D", "E"}:
+            numero_real = self.controller.parsear_numero_original(raw) or int(numero or 0) or 1
+            base_body = self._body_without_tags_and_markers(raw)
+            base_enunciado, base_options = self._extract_options_loose(base_body)
+            current_value = str(base_options.get(slot_norm, "") or "").strip()
+            if (slot_norm not in base_options) or self._option_value_needs_text_completion(current_value):
+                slot_markers = self._extract_image_marker_names_by_slot(raw)
+                marker_bucket = list(slot_markers.get(slot_norm, []) or [])
+                if str(marker_name or "").strip() and marker_name not in marker_bucket:
+                    marker_bucket.append(str(marker_name).strip())
+                slot_markers[slot_norm] = marker_bucket
+                if slot_norm not in base_options:
+                    base_options[slot_norm] = ""
+                return self._rebuild_item_with_slot_markers(
+                    base_item=raw,
+                    numero=numero_real,
+                    enunciado=base_enunciado or base_body or "[[ocr_sin_texto]]",
+                    options=base_options,
+                    slot_markers=slot_markers,
+                )
+
         if slot_norm == "ENUNCIADO":
             if f"{SEP_LINE}A)" in raw:
                 return raw.replace(f"{SEP_LINE}A)", f" {marker} {SEP_LINE}A)", 1)
@@ -1481,6 +2756,301 @@ class TranscriptorWindow(tk.Toplevel):
                 next_seg = next((i for i in range(len(segs)) if i not in used_seg), None)
             self._set_segment_bindings_by_source_key(source_key, bucket)
         return migrated
+
+    def _infer_slot_from_marker_name(self, marker_name: str) -> str:
+        parsed = MARKER_VALUE_RE.match(str(marker_name or "").strip())
+        if not parsed:
+            return "ENUNCIADO"
+        opt = str(parsed.group("opt") or "").strip().upper()
+        if opt in {"A", "B", "C", "D", "E", "F", "CLAVE"}:
+            return opt
+        return "ENUNCIADO"
+
+    def _collect_global_auto_reassign_candidates(self) -> List[Dict[str, Any]]:
+        candidates: List[Dict[str, Any]] = []
+        for entry in self._items:
+            if len(entry) < 2:
+                continue
+            archivo = str(entry[0] or "").strip()
+            item_text = str(entry[1] or "")
+            item_num = self.controller.parsear_numero_original(item_text) or 0
+            if item_num <= 0:
+                continue
+            markers = self._extract_image_marker_names(item_text)
+            for marker_name in markers:
+                mk = str(marker_name or "").strip()
+                if not mk:
+                    continue
+                candidates.append(
+                    {
+                        "archivo": archivo,
+                        "item_num": int(item_num),
+                        "slot": self._infer_slot_from_marker_name(mk),
+                        "marker_name": mk,
+                    }
+                )
+        return candidates
+
+    def _looks_legacy_manual_marker_session(self, candidates: List[Dict[str, Any]]) -> bool:
+        if not candidates:
+            return False
+        archivos = [str(row.get("archivo") or "").strip() for row in candidates]
+        if not archivos:
+            return False
+        manual = 0
+        for archivo in archivos:
+            if re.fullmatch(r"manual_\d+", archivo, flags=re.IGNORECASE):
+                manual += 1
+        return manual == len(archivos)
+
+    def _store_marker_crop_from_segment(
+        self,
+        *,
+        source_path: Path,
+        segment: Any,
+        marker_name: str,
+    ) -> str:
+        seg_image_path = Path(getattr(segment, "image_path", "") or "")
+        if seg_image_path.exists() and seg_image_path.is_file():
+            stored = self._materialize_selected_segment_image(
+                image_path=seg_image_path,
+                marker_name=marker_name,
+            )
+            if stored:
+                return str(stored)
+
+        bbox = tuple(int(v) for v in getattr(segment, "bbox", ()) or ())
+        if len(bbox) == 4:
+            bbox_norm = self._box_px_to_norm(path=source_path, box_px=bbox)
+            if bbox_norm is not None:
+                stored = self._save_figure_crop(
+                    image_path=source_path,
+                    marker_name=marker_name,
+                    bbox_norm=bbox_norm,
+                )
+                if stored:
+                    return str(stored)
+        return ""
+
+    def _auto_reassign_segment_bindings_legacy_global(
+        self,
+        *,
+        sources: List[Tuple[int, str, Path]],
+        candidates: List[Dict[str, Any]],
+    ) -> Dict[str, int]:
+        flat_segments: List[Tuple[Path, str, str, int, Any]] = []
+        for _idx, _label, src in sources:
+            try:
+                segs = self._get_segments_v2_for_source(src)
+            except Exception:
+                segs = []
+            if not segs:
+                continue
+            source_stem = str(src.stem or "").strip()
+            source_key = self._seg_v2_source_key(src)
+            for seg_idx, seg in enumerate(segs):
+                flat_segments.append((src, source_stem, source_key, seg_idx, seg))
+
+        if not flat_segments or not candidates:
+            return {"sources": len(sources), "assigned": 0, "truncated": 0}
+
+        max_pairs = min(len(flat_segments), len(candidates))
+        truncated = 1 if len(flat_segments) != len(candidates) else 0
+        buckets_by_source: Dict[str, Dict[int, Dict[str, Any]]] = {}
+        assigned = 0
+
+        for pair_idx in range(max_pairs):
+            src, source_stem, source_key, seg_idx, seg = flat_segments[pair_idx]
+            candidate = candidates[pair_idx]
+            marker_name = str(candidate["marker_name"])
+            crop_path = self._store_marker_crop_from_segment(
+                source_path=src,
+                segment=seg,
+                marker_name=marker_name,
+            )
+            if crop_path:
+                self._preview_images[marker_name] = crop_path
+                self._missing_marker_warned.discard(marker_name)
+                linked = self._assign_crop_to_items(
+                    source_stem=source_stem,
+                    marker_name=marker_name,
+                    crop_path=crop_path,
+                )
+                if linked <= 0:
+                    self._assign_image_to_marker(
+                        marker_name=marker_name,
+                        image_path=crop_path,
+                    )
+            bucket = buckets_by_source.setdefault(source_key, {})
+            bucket[int(seg_idx)] = {
+                "item_num": int(candidate["item_num"]),
+                "slot": self._normalize_binding_slot(str(candidate["slot"])),
+                "marker_name": marker_name,
+                "crop_path": crop_path,
+                "confirmed": True,
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            assigned += 1
+
+        for _src, _stem, source_key, _seg_idx, _seg in flat_segments:
+            self._set_segment_bindings_by_source_key(source_key, buckets_by_source.get(source_key, {}))
+
+        return {"sources": len(sources), "assigned": int(assigned), "truncated": int(truncated)}
+
+    def _auto_reassign_segment_bindings(
+        self,
+        *,
+        selected_labels: Optional[Set[str]] = None,
+    ) -> Dict[str, int]:
+        self._sync_items_from_output_text()
+
+        sources = self._collect_review_sources(selected_labels=selected_labels)
+        if not sources:
+            return {"sources": 0, "assigned": 0, "truncated": 0}
+
+        assigned_total = 0
+        truncated_sources = 0
+
+        for _idx, _label, src in sources:
+            source_stem = str(src.stem or "").strip()
+            if not source_stem:
+                continue
+            try:
+                segs = self._get_segments_v2_for_source(src)
+            except Exception:
+                segs = []
+            if not segs:
+                continue
+
+            candidates: List[Dict[str, Any]] = []
+            candidates_by_marker: Dict[str, Dict[str, Any]] = {}
+            for entry in self._items:
+                if len(entry) < 2:
+                    continue
+                archivo = str(entry[0] or "").strip()
+                if not self._source_stems_match(archivo, source_stem):
+                    continue
+                item_text = str(entry[1] or "")
+                item_num = self.controller.parsear_numero_original(item_text) or 0
+                if item_num <= 0:
+                    continue
+                markers = self._extract_image_marker_names(item_text)
+                for marker_name in markers:
+                    mk = str(marker_name or "").strip()
+                    if not mk:
+                        continue
+                    candidates.append(
+                        {
+                            "item_num": int(item_num),
+                            "slot": self._infer_slot_from_marker_name(mk),
+                            "marker_name": mk,
+                        }
+                    )
+                    candidates_by_marker.setdefault(mk, candidates[-1])
+
+            source_key = self._seg_v2_source_key(src)
+            existing_bucket = self._get_segment_bindings_by_source_key(source_key)
+            if not candidates:
+                if existing_bucket:
+                    self._set_segment_bindings_by_source_key(source_key, {})
+                continue
+
+            new_bucket: Dict[int, Dict[str, Any]] = {}
+            used_seg_indices: Set[int] = set()
+            used_markers: Set[str] = set()
+            if len(candidates) != len(segs):
+                truncated_sources += 1
+
+            def _assign_candidate_to_segment(seg_idx: int, candidate: Dict[str, Any]) -> bool:
+                nonlocal assigned_total
+                if seg_idx < 0 or seg_idx >= len(segs):
+                    return False
+                seg = segs[seg_idx]
+                marker_name = str(candidate["marker_name"])
+                crop_saved = self._store_marker_crop_from_segment(
+                    source_path=src,
+                    segment=seg,
+                    marker_name=marker_name,
+                )
+                crop_path = str(crop_saved or "").strip()
+                if crop_path:
+                    self._preview_images[marker_name] = crop_path
+                    self._missing_marker_warned.discard(marker_name)
+                    linked = self._assign_crop_to_items(
+                        source_stem=source_stem,
+                        marker_name=marker_name,
+                        crop_path=crop_path,
+                    )
+                    if linked <= 0:
+                        self._assign_image_to_marker(
+                            marker_name=marker_name,
+                            image_path=crop_path,
+                        )
+                new_bucket[int(seg_idx)] = {
+                    "item_num": int(candidate["item_num"]),
+                    "slot": self._normalize_binding_slot(str(candidate["slot"])),
+                    "marker_name": marker_name,
+                    "crop_path": crop_path,
+                    "confirmed": True,
+                    "updated_at": datetime.now().isoformat(timespec="seconds"),
+                }
+                assigned_total += 1
+                used_seg_indices.add(int(seg_idx))
+                used_markers.add(marker_name)
+                return True
+
+            # Preserve existing bindings when the marker is still present in LaTeX.
+            for seg_idx in sorted(existing_bucket.keys()):
+                old_payload = existing_bucket.get(seg_idx, {})
+                marker_name = str(old_payload.get("marker_name", "") or "").strip()
+                if not marker_name or marker_name not in candidates_by_marker:
+                    continue
+                _assign_candidate_to_segment(int(seg_idx), candidates_by_marker[marker_name])
+
+            remaining_candidates = [
+                candidate
+                for candidate in candidates
+                if str(candidate.get("marker_name", "") or "").strip() not in used_markers
+            ]
+            remaining_seg_indices = [
+                seg_idx
+                for seg_idx in range(len(segs))
+                if int(seg_idx) not in used_seg_indices
+            ]
+
+            for seg_idx, candidate in zip(remaining_seg_indices, remaining_candidates):
+                _assign_candidate_to_segment(int(seg_idx), candidate)
+
+            self._set_segment_bindings_by_source_key(source_key, new_bucket)
+
+        if assigned_total > 0:
+            self._render_output_from_items()
+            self._refresh_training_pairs_from_items()
+            return {
+                "sources": len(sources),
+                "assigned": int(assigned_total),
+                "truncated": int(truncated_sources),
+            }
+
+        legacy_candidates = self._collect_global_auto_reassign_candidates()
+        if self._looks_legacy_manual_marker_session(legacy_candidates):
+            legacy_stats = self._auto_reassign_segment_bindings_legacy_global(
+                sources=sources,
+                candidates=legacy_candidates,
+            )
+            if int(legacy_stats.get("assigned", 0)) > 0:
+                self._log(
+                    "Reasignacion automatica: aplicado fallback legacy manual_* por orden global de segmentos/etiquetas."
+                )
+                self._render_output_from_items()
+                self._refresh_training_pairs_from_items()
+                return legacy_stats
+
+        return {
+            "sources": len(sources),
+            "assigned": int(assigned_total),
+            "truncated": int(truncated_sources),
+        }
 
     def _collect_dataset_sources(self) -> List[Tuple[str, Path]]:
         reviewed_sources = self._collect_review_sources()
@@ -1575,6 +3145,106 @@ class TranscriptorWindow(tk.Toplevel):
                         "binding_confirmed": bool(metadata.get("binding_confirmed", False)),
                         "binding_source": str(metadata.get("binding_source", "") or ""),
                     },
+                }
+            )
+        return rows
+
+    def _build_osr_golden_jsonl_rows(self) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        system_prompt = (
+            "Convierte la imagen de uno o mas problemas al formato LaTeX final del banco. "
+            "Respeta la numeracion visible, no resuelvas, usa separadores £/æ y coloca "
+            "[[Imagen=img-n]] solo si el problema tiene figura real."
+        )
+        for key in sorted(self._training_pairs_by_item.keys()):
+            pair = self._training_pairs_by_item.get(key, {})
+            if not isinstance(pair, dict):
+                continue
+            metadata = dict(pair.get("metadata", {}) or {})
+            human_raw = self.controller.normalizar_item_una_linea(str(pair.get("human_final_output", "") or ""))
+            final_latex = self._strip_taxonomy_tags_for_training(human_raw)
+            figure_confirmed = self._as_bool(metadata.get("figure_confirmed"), False)
+            if not figure_confirmed:
+                final_latex = self.controller.normalizar_item_una_linea(IMAGE_TAG_RE.sub(" ", final_latex))
+            if not final_latex:
+                continue
+
+            image_paths: List[str] = []
+            raw_paths = metadata.get("human_image_paths", [])
+            if isinstance(raw_paths, list):
+                image_paths.extend(str(p).strip() for p in raw_paths if str(p or "").strip())
+            source_path = str(metadata.get("source_path", "") or "").strip()
+            if source_path and source_path not in image_paths:
+                image_paths.append(source_path)
+            primary_image = image_paths[0] if image_paths else source_path
+
+            structured_item = pair.get("structured_item_json", {})
+            if not isinstance(structured_item, dict):
+                structured_item = {}
+
+            rows.append(
+                {
+                    "schema_version": "osr_golden_v1",
+                    "task": "image_to_final_latex",
+                    "id": str(key),
+                    "input": {
+                        "image_path": primary_image,
+                        "image_paths": image_paths,
+                        "source_path": source_path,
+                        "source_label": str(metadata.get("source_label", "") or ""),
+                        "source_stem": str(metadata.get("source_stem", "") or ""),
+                        "position_in_image": metadata.get("position_in_image", None),
+                        "segment_idx": metadata.get("segment_idx", None),
+                        "ocr_faithful": str(pair.get("ocr_raw_output", "") or ""),
+                        "structured_json_raw": str(pair.get("structured_model_output", "") or ""),
+                        "structured_item": structured_item,
+                    },
+                    "model_outputs": {
+                        "final_latex_candidate": str(pair.get("final_latex_candidate", "") or ""),
+                        "pipeline_rendered_output": str(pair.get("model_raw_output", "") or ""),
+                        "validated_output": str(pair.get("model_validated_output", "") or ""),
+                    },
+                    "gold": {
+                        "final_latex": final_latex,
+                        "status": str(pair.get("status", "") or ""),
+                        "is_human_corrected": str(pair.get("status", "") or "") != "OK_DIRECTO",
+                    },
+                    "quality": {
+                        "needs_review": bool(metadata.get("needs_review", False)),
+                        "errors": list(pair.get("errors", []) or []),
+                        "retry_count": int(self._safe_int(metadata.get("retry_count", 0), 0)),
+                        "figure_confirmed": bool(figure_confirmed),
+                        "binding_confirmed": bool(metadata.get("binding_confirmed", False)),
+                        "segmentation_reviewed": bool(metadata.get("segmentation_reviewed", False)),
+                    },
+                    "metadata": {
+                        "provider": str(pair.get("provider", "") or ""),
+                        "model": str(pair.get("model", "") or ""),
+                        "prompt_version": str(pair.get("prompt_version", self._vision_direct_prompt_version) or ""),
+                        "run_id": str(pair.get("run_id", "") or ""),
+                        "timestamp": str(pair.get("timestamp", "") or ""),
+                        "item_num": int(self._safe_int(metadata.get("item_num", 0), 0)),
+                        "curso_hint": str(metadata.get("curso_hint", "") or ""),
+                        "tema_hint": str(metadata.get("tema_hint", "") or ""),
+                        "has_figure": bool(metadata.get("has_figure", False)),
+                        "figure_bbox_source": str(metadata.get("figure_bbox_source", "") or ""),
+                        "figure_bbox_norm": metadata.get("figure_bbox_norm", None),
+                        "marker_name": str(metadata.get("marker_name", "") or ""),
+                        "slot": str(metadata.get("slot", "") or ""),
+                        "detector_source": str(pair.get("detector_source", metadata.get("detector_source", "")) or ""),
+                        "source_labels": list(pair.get("source_labels", []) or []),
+                    },
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {
+                            "role": "user",
+                            "content": (
+                                "Transcribe la imagen al formato final canonico. "
+                                f"OCR fiel disponible: {str(pair.get('ocr_raw_output', '') or '').strip()}"
+                            ),
+                        },
+                        {"role": "assistant", "content": final_latex},
+                    ],
                 }
             )
         return rows
@@ -1717,11 +3387,90 @@ class TranscriptorWindow(tk.Toplevel):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         return f"sesion_{slug}_{ts}.json"
 
+    def _infer_instance_type_for_session_path(self, session_path: Path) -> str:
+        current = str(self.instance_type_var.get() or "").strip().lower()
+        if current:
+            return normalize_instance_name(current, "sesion")
+        stem = str(session_path.stem or "").strip().lower()
+        return normalize_instance_name(stem, "sesion")
+
+    def _configure_project_storage_from_session_path(self, session_path: Path) -> None:
+        try:
+            project_root = infer_workspace_from_session_path(session_path)
+            if project_root is None:
+                return
+            instance_name = normalize_instance_name(self._infer_instance_type_for_session_path(session_path), "sesion")
+            layout = project_dirs(project_root, instance_name)
+            for path in (
+                layout["sessions_dir"],
+                layout["sources_dir"],
+                layout["crops_dir"],
+                layout["segments_dir"],
+                layout["datasets_dir"],
+                layout["solutions_dir"],
+            ):
+                path.mkdir(parents=True, exist_ok=True)
+            self._runs_dir = layout["instance_root"]
+            self._sessions_dir = layout["sessions_dir"]
+            self._session_last_dir = layout["sessions_dir"]
+            self._datasets_dir = layout["datasets_dir"]
+            self._tmp_crop_root = layout["crops_dir"]
+            self._final_crop_dir = layout["crops_dir"]
+            self._segmentador_v2 = SegmentadorProblemasV2(layout["segments_dir"])
+            if not str(self._linked_solutions_dir or "").strip():
+                self._linked_solutions_dir = str(layout["solutions_dir"])
+        except Exception:
+            return
+
+    def _path_is_within(self, path: Path, base: Path) -> bool:
+        try:
+            path.resolve().relative_to(base.resolve())
+            return True
+        except Exception:
+            return False
+
+    def _normalize_path_string(self, raw_path: Any) -> str:
+        value = str(raw_path or "").strip().strip('"').strip("'")
+        if not value:
+            return ""
+        try:
+            normalized = os.path.normpath(value)
+        except Exception:
+            normalized = value
+        try:
+            return str(remap_legacy_drive_path(normalized, prefer_existing=True))
+        except Exception:
+            return normalized
+
+    def _relative_posix_path(self, path: Path, *, base: Path) -> str:
+        try:
+            rel = os.path.relpath(str(path), str(base))
+        except Exception:
+            try:
+                rel = str(path.resolve().relative_to(base.resolve()))
+            except Exception:
+                rel = str(path)
+        rel = str(rel).replace("\\", "/")
+        if rel in {"", "."}:
+            return "./"
+        if rel.startswith("../"):
+            return rel
+        if rel.startswith("./"):
+            return rel
+        return f"./{rel}"
+
     def _session_temp_dir_for_path(self, session_path: Path) -> Path:
+        try:
+            project_root = infer_workspace_from_session_path(session_path)
+            if project_root is not None:
+                instance_name = normalize_instance_name(self._infer_instance_type_for_session_path(session_path), "sesion")
+                return project_dirs(project_root, instance_name)["instance_root"]
+        except Exception:
+            pass
         return session_path.parent / f"{session_path.stem}_tmp"
 
     def _resolve_session_resource_path(self, raw_path: str, *, session_path: Path) -> Path:
-        value = str(raw_path or "").strip()
+        value = self._normalize_path_string(raw_path)
         if not value:
             return Path(value)
         p = Path(value)
@@ -1737,10 +3486,205 @@ class TranscriptorWindow(tk.Toplevel):
                     return cand.resolve()
             except Exception:
                 continue
+        # Compatibilidad: sesiones antiguas que apuntan a "<nombre>_tmp/{sources|crops|segments}/..."
+        try:
+            if not p.is_absolute():
+                parts = list(p.parts)
+                if len(parts) >= 2:
+                    old_root_name = str(parts[0] or "").strip().lower()
+                    old_bucket = str(parts[1] or "").strip().lower()
+                    if old_root_name.endswith("_tmp") and old_bucket in {"sources", "crops", "segments"}:
+                        if "resuelt" in old_root_name:
+                            inst = "resueltos"
+                        elif "propuest" in old_root_name:
+                            inst = "propuestos"
+                        else:
+                            inst = self._infer_instance_type_for_session_path(session_path)
+                        if session_path.parent.name.strip().lower() == "sessions":
+                            project_root = session_path.parent.parent
+                            migrated = project_root / "temporales" / inst / old_bucket / Path(*parts[2:])
+                            if migrated.exists():
+                                return migrated.resolve()
+        except Exception:
+            pass
+        # Fallback: si la sesion es de proyecto, buscar por nombre dentro de
+        # temporales/<instancia>/{sources,crops,segments}.
+        try:
+            if session_path.parent.name.strip().lower() == "sessions":
+                project_root = session_path.parent.parent
+                instance_name = self._safe_fs_name(self._infer_instance_type_for_session_path(session_path), "sesion")
+                tmp_root = project_root / "temporales" / instance_name
+                target_name = p.name.strip() if p.name else ""
+                if target_name:
+                    for bucket in ("sources", "crops"):
+                        direct = tmp_root / bucket / target_name
+                        if direct.exists():
+                            return direct.resolve()
+                    seg_root = tmp_root / "segments"
+                    if seg_root.exists():
+                        direct_seg = seg_root / target_name
+                        if direct_seg.exists():
+                            return direct_seg.resolve()
+                        try:
+                            found = next(seg_root.rglob(target_name), None)
+                        except Exception:
+                            found = None
+                        if found is not None and found.exists():
+                            return found.resolve()
+        except Exception:
+            pass
+        # Fallback de soluciones: si la ruta antigua no existe (por cambio de carpeta),
+        # reubicar por nombre en carpeta de soluciones vigente o legacy.
+        try:
+            target_name = p.name.strip() if p.name else ""
+            if target_name:
+                found_solution = self._find_existing_by_name(
+                    target_name,
+                    self._solution_search_dirs_for_session(session_path),
+                )
+                if found_solution is not None:
+                    return found_solution
+        except Exception:
+            pass
         return candidates[0] if candidates else p
 
-    def _export_session_temp_bundle(self, *, out_path: Path, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _project_instance_dirs_for_session(self, session_path: Path) -> Dict[str, Path]:
+        try:
+            project_root = infer_workspace_from_session_path(session_path)
+            if project_root is None:
+                return {}
+            instance_name = normalize_instance_name(self._infer_instance_type_for_session_path(session_path), "sesion")
+            layout = project_dirs(project_root, instance_name)
+            return {
+                "project_root": layout["project_root"],
+                "instance_root": layout["instance_root"],
+                "sources_dir": layout["sources_dir"],
+                "crops_dir": layout["crops_dir"],
+                "segments_dir": layout["segments_dir"],
+            }
+        except Exception:
+            return {}
+
+    def _solution_search_dirs_for_session(self, session_path: Path) -> List[Path]:
+        dirs: List[Path] = []
+        linked = self._normalize_path_string(self._linked_solutions_dir)
+        if linked:
+            try:
+                dirs.append(Path(linked))
+            except Exception:
+                pass
+        proj = self._project_instance_dirs_for_session(session_path)
+        project_root = proj.get("project_root")
+        if isinstance(project_root, Path):
+            instance_type = self._safe_fs_name(self._infer_instance_type_for_session_path(session_path), "sesion")
+            dirs.append(project_root / "solutions" / instance_type)
+            dirs.append(project_root / "solutions")
+            dirs.append(project_root / "soluciones")
+        unique: List[Path] = []
+        seen: Set[str] = set()
+        for d in dirs:
+            try:
+                key = str(d.resolve()).lower()
+            except Exception:
+                key = str(d).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(d)
+        return unique
+
+    def _find_existing_by_name(self, name: str, search_dirs: List[Path]) -> Optional[Path]:
+        target_name = str(name or "").strip()
+        if not target_name:
+            return None
+        for base in search_dirs:
+            try:
+                if not base.exists():
+                    continue
+                direct = base / target_name
+                if direct.exists() and direct.is_file():
+                    return direct.resolve()
+                found = next(base.rglob(target_name), None)
+                if found is not None and found.exists() and found.is_file():
+                    return found.resolve()
+            except Exception:
+                continue
+        return None
+
+    def _recover_sources_from_project_dirs(self, session_path: Path) -> int:
+        dirs = self._project_instance_dirs_for_session(session_path)
+        sources_dir = dirs.get("sources_dir")
+        if not isinstance(sources_dir, Path) or not sources_dir.exists():
+            return 0
+        image_paths = self._collect_image_paths([str(sources_dir)])
+        added, _skipped = self._add_images_from_paths(image_paths)
+        return int(added)
+
+    def _recover_item_images_from_project_crops(self) -> int:
+        if not self._items:
+            return 0
+        updated_items = 0
+        rebuilt: List[Tuple[str, str, List[str]]] = []
+        for entry in self._items:
+            archivo = str(entry[0] if len(entry) > 0 else "")
+            item_txt = str(entry[1] if len(entry) > 1 else "")
+            imgs = list(entry[2] if len(entry) > 2 else [])
+            valid_existing: List[str] = []
+            seen_existing: Set[str] = set()
+            for raw in imgs:
+                clean = str(raw or "").strip()
+                if clean and self._is_valid_image_path(clean) and clean not in seen_existing:
+                    seen_existing.add(clean)
+                    valid_existing.append(clean)
+            if valid_existing:
+                rebuilt.append((archivo, item_txt, valid_existing))
+                continue
+
+            resolved: List[str] = []
+            seen_resolved: Set[str] = set()
+            for marker in self._extract_image_marker_names(item_txt):
+                crop = str(self._find_crop_by_marker_name(marker) or "").strip()
+                if not crop:
+                    continue
+                if crop in seen_resolved:
+                    continue
+                seen_resolved.add(crop)
+                resolved.append(crop)
+                self._preview_images[str(marker)] = crop
+            if resolved:
+                updated_items += 1
+                rebuilt.append((archivo, item_txt, resolved))
+            else:
+                rebuilt.append((archivo, item_txt, valid_existing))
+        self._items = rebuilt
+        return updated_items
+
+    def _export_session_temp_bundle(
+        self,
+        *,
+        out_path: Path,
+        payload: Dict[str, Any],
+        extra_source_roots: Optional[List[Path]] = None,
+        extra_segment_roots: Optional[List[Path]] = None,
+    ) -> Dict[str, Any]:
         tmp_root = self._session_temp_dir_for_path(out_path)
+        # Reescribimos el bundle temporal por guardado para evitar acumulacion
+        # de archivos duplicados de sesiones previas. Si la sesion ya trabaja
+        # directamente sobre ese mismo root, evitamos borrar para no invalidar
+        # rutas que se esten reutilizando.
+        same_runtime_root = False
+        try:
+            same_runtime_root = (
+                self._path_is_within(self._tmp_crop_root, tmp_root)
+                or self._path_is_within(Path(self._segmentador_v2.out_root), tmp_root)
+            )
+        except Exception:
+            same_runtime_root = False
+        if tmp_root.exists() and not same_runtime_root:
+            try:
+                shutil.rmtree(tmp_root)
+            except Exception:
+                pass
         sources_dir = tmp_root / "sources"
         crops_dir = tmp_root / "crops"
         segments_dir = tmp_root / "segments"
@@ -1752,16 +3696,59 @@ class TranscriptorWindow(tk.Toplevel):
         crop_map: Dict[str, str] = {}
         source_stems: Set[str] = set()
 
+        def _same_file_content(left: Path, right: Path) -> bool:
+            try:
+                if left.resolve() == right.resolve():
+                    return True
+            except Exception:
+                pass
+            try:
+                if (not left.exists()) or (not right.exists()):
+                    return False
+                if left.stat().st_size != right.stat().st_size:
+                    return False
+            except Exception:
+                return False
+
+            def _sha1(path: Path) -> str:
+                digest = hashlib.sha1()
+                with path.open("rb") as fh:
+                    while True:
+                        chunk = fh.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        digest.update(chunk)
+                return digest.hexdigest()
+
+            try:
+                return _sha1(left) == _sha1(right)
+            except Exception:
+                return False
+
+        missing_resources: List[str] = []
+        copied_sources = 0
+        copied_crops = 0
+        copied_segments = 0
+
+        def _count_bundle_files(root: Path) -> int:
+            try:
+                return sum(1 for path in root.rglob("*") if path.is_file())
+            except Exception:
+                return 0
+
         def _copy_to_bundle(path_str: str, *, dest_dir: Path, cache: Dict[str, str], fallback_name: str) -> str:
+            nonlocal copied_sources, copied_crops
             raw = str(path_str or "").strip()
             if not raw:
                 return raw
-            src = Path(raw)
+            src = self._resolve_session_resource_path(raw, session_path=out_path)
             try:
                 src_resolved = src.resolve()
             except Exception:
                 src_resolved = src
             if (not src_resolved.exists()) or (not src_resolved.is_file()):
+                if raw not in missing_resources:
+                    missing_resources.append(raw)
                 return raw
 
             key = str(src_resolved).lower()
@@ -1769,20 +3756,41 @@ class TranscriptorWindow(tk.Toplevel):
             if cached:
                 return cached
 
+            try:
+                dest_resolved = dest_dir.resolve()
+            except Exception:
+                dest_resolved = dest_dir
+            if self._path_is_within(src_resolved, dest_resolved):
+                try:
+                    rel_existing = self._relative_posix_path(src_resolved, base=out_path.parent)
+                    cache[key] = rel_existing
+                    return rel_existing
+                except Exception:
+                    pass
+
             safe = self._safe_fs_name(src_resolved.stem, fallback_name)
             ext = src_resolved.suffix.lower() or ".png"
             target = dest_dir / f"{safe}{ext}"
-            idx = 1
             while target.exists():
-                idx += 1
+                if _same_file_content(src_resolved, target):
+                    rel_existing = self._relative_posix_path(target, base=out_path.parent)
+                    cache[key] = rel_existing
+                    return rel_existing
+                idx = 2 if target.name == f"{safe}{ext}" else idx + 1
                 target = dest_dir / f"{safe}_{idx:02d}{ext}"
             try:
                 shutil.copy2(src_resolved, target)
             except Exception:
+                if raw not in missing_resources:
+                    missing_resources.append(raw)
                 return raw
 
-            rel = "./" + str(target.relative_to(out_path.parent)).replace("\\", "/")
+            rel = self._relative_posix_path(target, base=out_path.parent)
             cache[key] = rel
+            if dest_dir == sources_dir:
+                copied_sources += 1
+            elif dest_dir == crops_dir:
+                copied_crops += 1
             return rel
 
         files_payload = payload.get("files", [])
@@ -1850,8 +3858,22 @@ class TranscriptorWindow(tk.Toplevel):
                             fallback_name="binding",
                         )
 
-        segments_root = self._runs_dir / "v2_segments"
-        if segments_root.exists():
+        segment_roots: List[Path] = [Path(self._segmentador_v2.out_root)]
+        for root in extra_segment_roots or []:
+            if isinstance(root, Path):
+                segment_roots.append(root)
+        seen_segment_roots: Set[str] = set()
+        for segments_root in segment_roots:
+            try:
+                root_key = str(segments_root.resolve()).lower()
+            except Exception:
+                root_key = str(segments_root).lower()
+            if root_key in seen_segment_roots:
+                continue
+            seen_segment_roots.add(root_key)
+            same_segments_root = self._path_is_within(segments_root, segments_dir) or self._path_is_within(segments_dir, segments_root)
+            if not segments_root.exists():
+                continue
             for stem in sorted(source_stems):
                 src_dir = segments_root / stem
                 if not src_dir.exists() or (not src_dir.is_dir()):
@@ -1862,18 +3884,34 @@ class TranscriptorWindow(tk.Toplevel):
                     for seg_file in src_dir.glob("*.*"):
                         if not seg_file.is_file():
                             continue
-                        if seg_file.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+                        if seg_file.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".json"}:
                             continue
-                        shutil.copy2(seg_file, dst_dir / seg_file.name)
+                        target_seg = dst_dir / seg_file.name
+                        if same_segments_root:
+                            copied_segments += 1
+                            continue
+                        shutil.copy2(seg_file, target_seg)
+                        copied_segments += 1
                 except Exception:
                     continue
 
+        persisted_sources = _count_bundle_files(sources_dir)
+        persisted_crops = _count_bundle_files(crops_dir)
+        persisted_segments = _count_bundle_files(segments_dir)
         payload["session_bundle"] = {
             "mode": "portable_tmp",
-            "root": "./" + str(tmp_root.relative_to(out_path.parent)).replace("\\", "/"),
-            "sources_dir": "./" + str(sources_dir.relative_to(out_path.parent)).replace("\\", "/"),
-            "crops_dir": "./" + str(crops_dir.relative_to(out_path.parent)).replace("\\", "/"),
-            "segments_dir": "./" + str(segments_dir.relative_to(out_path.parent)).replace("\\", "/"),
+            "root": self._relative_posix_path(tmp_root, base=out_path.parent),
+            "sources_dir": self._relative_posix_path(sources_dir, base=out_path.parent),
+            "crops_dir": self._relative_posix_path(crops_dir, base=out_path.parent),
+            "segments_dir": self._relative_posix_path(segments_dir, base=out_path.parent),
+            "files_count": len(files_payload) if isinstance(files_payload, list) else 0,
+            "copied_sources": copied_sources,
+            "copied_crops": copied_crops,
+            "copied_segments": copied_segments,
+            "persisted_sources": persisted_sources,
+            "persisted_crops": persisted_crops,
+            "persisted_segments": persisted_segments,
+            "missing_resources": missing_resources[:50],
             "saved_at": datetime.now().isoformat(timespec="seconds"),
         }
         return payload
@@ -1883,8 +3921,20 @@ class TranscriptorWindow(tk.Toplevel):
             self.project_name_var.set(self._normalize_project_name(self.project_name_var.get()))
             out_path = out_path.expanduser().resolve()
             out_path.parent.mkdir(parents=True, exist_ok=True)
+            previous_crop_root = Path(self._tmp_crop_root)
+            previous_segment_root = Path(self._segmentador_v2.out_root)
+            self._configure_project_storage_from_session_path(out_path)
             payload = self._build_session_payload()
-            out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            payload = self._export_session_temp_bundle(
+                out_path=out_path,
+                payload=payload,
+                extra_source_roots=[previous_crop_root],
+                extra_segment_roots=[previous_segment_root],
+            )
+            payload = enrich_session_payload_with_structure(payload, session_path=out_path)
+            self._write_session_images_manifest(out_path=out_path, payload=payload)
+            payload_for_disk = self._strip_images_from_session_payload(out_path=out_path, payload=payload)
+            out_path.write_text(json.dumps(payload_for_disk, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as exc:
             messagebox.showerror("Sesion", f"No se pudo guardar la sesion:\n{exc}")
             return False
@@ -1892,11 +3942,137 @@ class TranscriptorWindow(tk.Toplevel):
         self._session_file_path = out_path
         self._session_last_dir = out_path.parent
         self._log(f"Sesion guardada: {out_path}")
+        bundle = payload.get("session_bundle", {}) if isinstance(payload, dict) else {}
+        if isinstance(bundle, dict):
+            bundle_root = str(bundle.get("root", "") or "").strip()
+            if bundle_root:
+                self._log(f"Sesion portable: recursos copiados en {bundle_root}")
+            files_count = int(self._safe_int(bundle.get("files_count", 0), 0))
+            copied_sources = int(self._safe_int(bundle.get("copied_sources", 0), 0))
+            copied_segments = int(self._safe_int(bundle.get("copied_segments", 0), 0))
+            persisted_sources = int(self._safe_int(bundle.get("persisted_sources", copied_sources), copied_sources))
+            persisted_segments = int(self._safe_int(bundle.get("persisted_segments", copied_segments), copied_segments))
+            missing = bundle.get("missing_resources", [])
+            if files_count > 0 and persisted_sources <= 0:
+                self._log("ADVERTENCIA: la sesion tiene imagenes en la lista, pero no quedo ninguna fuente en el paquete.")
+            if persisted_segments <= 0 and self._segmentacion_v2_overrides:
+                self._log("ADVERTENCIA: hay segmentacion en memoria, pero no quedaron recortes/segmentos en el paquete.")
+            if isinstance(missing, list) and missing:
+                self._log(f"ADVERTENCIA: recursos no encontrados al guardar: {len(missing)}.")
         if show_success_popup:
             messagebox.showinfo("Sesion", f"Sesion guardada en:\n{out_path}")
         return True
 
+    def _clone_jsonable(self, value: Any) -> Any:
+        return json.loads(json.dumps(value, ensure_ascii=False))
+
+    def _images_manifest_path_for_session(self, session_path: Path) -> Path:
+        return session_path.with_name(f"{session_path.stem}__images.json")
+
+    def _build_session_images_manifest(self, *, out_path: Path, payload: Dict[str, Any]) -> Dict[str, Any]:
+        state_v3 = payload.get("state_v3", {}) if isinstance(payload, dict) else {}
+        source_images = state_v3.get("source_images", []) if isinstance(state_v3, dict) else []
+        return {
+            "schema_version": 1,
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "session_file": out_path.name,
+            "session_path": str(out_path),
+            "book_code": str(payload.get("book_code", "") or "").strip(),
+            "instance_type": str(payload.get("instance_type", "") or "").strip(),
+            "session_bundle": self._clone_jsonable(payload.get("session_bundle", {}) or {}),
+            "files": self._clone_jsonable(payload.get("files", []) or []),
+            "segmentation": self._clone_jsonable(payload.get("segmentation", {}) or {}),
+            "sources": self._clone_jsonable(payload.get("sources", []) or []),
+            "segments": self._clone_jsonable(payload.get("segments", []) or []),
+            "preview_images": self._clone_jsonable(payload.get("preview_images", {}) or {}),
+            "figure_boxes_by_source": self._clone_jsonable(payload.get("figure_boxes_by_source", {}) or {}),
+            "segment_detection_audit_by_source": self._clone_jsonable(payload.get("segment_detection_audit_by_source", {}) or {}),
+            "ocr_exclusion_boxes": self._clone_jsonable(payload.get("ocr_exclusion_boxes", {}) or {}),
+            "segment_item_bindings_by_source": self._clone_jsonable(
+                payload.get("segment_item_bindings_by_source", {}) or {}
+            ),
+            "state_v3_source_images": self._clone_jsonable(source_images or []),
+        }
+
+    def _strip_images_from_session_payload(self, *, out_path: Path, payload: Dict[str, Any]) -> Dict[str, Any]:
+        cleaned = self._clone_jsonable(payload)
+        cleaned["images_manifest_file"] = self._images_manifest_path_for_session(out_path).name
+        for key in (
+            "files",
+            "preview_images",
+            "segmentation",
+            "figure_boxes_by_source",
+            "segment_detection_audit_by_source",
+            "ocr_exclusion_boxes",
+            "segment_item_bindings_by_source",
+            "sources",
+            "segments",
+        ):
+            cleaned.pop(key, None)
+        state_v3 = cleaned.get("state_v3", {})
+        if isinstance(state_v3, dict):
+            state_v3.pop("source_images", None)
+            cleaned["state_v3"] = state_v3
+        return cleaned
+
+    def _write_session_images_manifest(self, *, out_path: Path, payload: Dict[str, Any]) -> Path:
+        manifest_path = self._images_manifest_path_for_session(out_path)
+        manifest_payload = self._build_session_images_manifest(out_path=out_path, payload=payload)
+        manifest_path.write_text(json.dumps(manifest_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._log(f"Sesion: manifiesto de imagenes actualizado en {manifest_path}")
+        return manifest_path
+
+    def _load_session_images_manifest(self, *, session_path: Path) -> Dict[str, Any]:
+        manifest_path = self._images_manifest_path_for_session(session_path)
+        if not manifest_path.exists():
+            return {}
+        try:
+            try:
+                payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except Exception:
+                payload = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+        except Exception as exc:
+            self._log(f"Sesion: no se pudo leer el manifiesto de imagenes {manifest_path}. Detalle: {exc}")
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _merge_images_manifest_into_session_payload(
+        self,
+        *,
+        payload: Dict[str, Any],
+        images_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not isinstance(payload, dict) or not isinstance(images_payload, dict) or not images_payload:
+            return payload
+        merged = dict(payload)
+        for key in (
+            "files",
+            "segmentation",
+            "sources",
+            "segments",
+            "preview_images",
+            "figure_boxes_by_source",
+            "segment_detection_audit_by_source",
+            "ocr_exclusion_boxes",
+            "segment_item_bindings_by_source",
+        ):
+            current_value = merged.get(key)
+            current_empty = current_value in (None, "", [], {})
+            if (key not in merged or current_empty) and key in images_payload:
+                merged[key] = self._clone_jsonable(images_payload.get(key))
+        if "session_bundle" not in merged and "session_bundle" in images_payload:
+            merged["session_bundle"] = self._clone_jsonable(images_payload.get("session_bundle"))
+        state_v3 = merged.get("state_v3", {})
+        if not isinstance(state_v3, dict):
+            state_v3 = {}
+        source_images_empty = state_v3.get("source_images") in (None, "", [], {})
+        if ("source_images" not in state_v3 or source_images_empty) and "state_v3_source_images" in images_payload:
+            state_v3["source_images"] = self._clone_jsonable(images_payload.get("state_v3_source_images", []))
+            merged["state_v3"] = state_v3
+        return merged
+
     def _build_session_payload(self) -> Dict[str, Any]:
+        self._sync_state_snapshot(preserve_runtime_text=True)
         file_entries: List[Dict[str, str]] = []
         total = int(self.list_files.size())
         for i in range(total):
@@ -1907,14 +4083,20 @@ class TranscriptorWindow(tk.Toplevel):
             file_entries.append({"label": str(label), "path": str(src)})
 
         items_payload: List[Dict[str, Any]] = []
-        for archivo_origen, item, image_paths in self._items:
+        for archivo_origen, item, image_paths, image_binding in self._build_item_state_rows_raw():
             items_payload.append(
                 {
                     "archivo_origen": str(archivo_origen or "").strip(),
-                    "item": str(item or "").strip(),
-                    "imagenes": [str(p) for p in (image_paths or []) if str(p or "").strip()],
+                    "item": str(item or ""),
+                    "imagenes": [str(p) for p in (image_paths or [])],
+                    "image_binding": dict(image_binding or {}),
                 }
             )
+        solution_paths_payload = {
+            str(int(k)): self._normalize_solution_groups_payload(v)
+            for k, v in self._solution_path_by_item_num.items()
+            if int(k) > 0 and self._normalize_solution_groups_payload(v)
+        }
 
         segment_overrides: Dict[str, List[List[int]]] = {}
         for key, boxes in self._segmentacion_v2_overrides.items():
@@ -1953,6 +4135,13 @@ class TranscriptorWindow(tk.Toplevel):
                     bucket.append(dict(entry))
             if bucket:
                 figure_boxes_payload[str(key)] = bucket
+        segment_detection_audit_payload: Dict[str, Dict[str, Any]] = {}
+        for key, entry_raw in self._segment_detection_audit_by_source.items():
+            if not isinstance(entry_raw, dict):
+                continue
+            entry = self._normalize_segment_detector_audit_entry(entry_raw)
+            if entry is not None:
+                segment_detection_audit_payload[str(key)] = dict(entry)
         segment_bindings_payload: Dict[str, Dict[str, Dict[str, Any]]] = {}
         for key in list(self._segment_item_bindings_by_source.keys()):
             bucket = self._get_segment_bindings_by_source_key(str(key))
@@ -1978,13 +4167,20 @@ class TranscriptorWindow(tk.Toplevel):
 
         payload: Dict[str, Any] = {
             "schema_version": 2,
+            "state_v3": self.state.to_dict(),
             "saved_at": datetime.now().isoformat(timespec="seconds"),
+            "book_code": (self.book_code_var.get() or "").strip(),
+            "instance_type": (self.instance_type_var.get() or "").strip(),
+            "pdf_path": (self.pdf_path_var.get() or "").strip(),
             "ui": {
                 "db_name": (self.db_name_var.get() or "").strip(),
-                "provider": FIXED_PROVIDER,
+                "provider": self._normalize_provider_label(self.provider_var.get()),
                 "model": (self.model_var.get() or "").strip(),
                 "format_model": (self.format_model_var.get() or "").strip(),
                 "project_name": self._normalize_project_name(self.project_name_var.get()),
+                "book_code": (self.book_code_var.get() or "").strip(),
+                "instance_type": (self.instance_type_var.get() or "").strip(),
+                "pdf_path": (self.pdf_path_var.get() or "").strip(),
                 "timeout_s": int(self.timeout_var.get()),
                 "retries": int(self.retries_var.get()),
                 "skip_done": bool(self.skip_done_var.get()),
@@ -2011,10 +4207,21 @@ class TranscriptorWindow(tk.Toplevel):
             },
             "files": file_entries,
             "items": items_payload,
+            "solution_paths_by_item": solution_paths_payload,
             "output_text": output_text,
             "step3_last_claves_input": str(self._step3_last_claves_input or ""),
             "transcribed_by_label": {str(k): str(v) for k, v in self._transcribed_by_label.items()},
             "ocr_raw_first_by_label": {str(k): str(v) for k, v in self._ocr_raw_first_by_label.items()},
+            "ocr_candidate_cache_by_label": {
+                str(label): {
+                    str(cache_key): dict(entry)
+                    for cache_key, entry in bucket.items()
+                    if isinstance(entry, dict)
+                }
+                for label, bucket in self._ocr_candidate_cache_by_label.items()
+                if isinstance(bucket, dict) and bucket
+            },
+            "ocr_structured_by_label": {str(k): str(v) for k, v in self._ocr_structured_by_label.items()},
             "geometry_pass_by_label": {str(k): str(v) for k, v in self._geometry_pass_by_label.items()},
             "geometry_pass_payload_by_label": {
                 str(k): dict(v) for k, v in self._geometry_pass_payload_by_label.items()
@@ -2032,14 +4239,20 @@ class TranscriptorWindow(tk.Toplevel):
                 str(k): dict(v) for k, v in self._yolo_figure_suggestions_by_source.items()
             },
             "preview_images": {str(k): str(v) for k, v in self._preview_images.items()},
+            "preview_item_image_statuses": {
+                str(k): str(v) for k, v in self._preview_item_image_statuses.items()
+            },
             "corrected_items": sorted(int(n) for n in self._corrected_item_numbers if int(n) > 0),
             "segmentation": {
                 "overrides": segment_overrides,
                 "reviewed_sources": sorted(str(v) for v in self._segmentation_reviewed_sources),
                 "review_done": bool(self._segmentation_review_done),
                 "used_segments": used_segments_payload,
+                "crops_dir": str(self._tmp_crop_root),
+                "segments_dir": str(self._segmentador_v2.out_root),
             },
             "figure_boxes_by_source": figure_boxes_payload,
+            "segment_detection_audit_by_source": segment_detection_audit_payload,
             "ocr_exclusion_boxes": ocr_boxes,
             "segment_item_bindings_by_source": segment_bindings_payload,
         }
@@ -2050,6 +4263,11 @@ class TranscriptorWindow(tk.Toplevel):
             messagebox.showwarning("Sesion", "Espera a que termine la transcripcion actual para guardar sesion.")
             return
         if self._session_file_path is None:
+            inferred_path = self._infer_session_path_from_library_context()
+            if inferred_path is not None:
+                self._log(f"Guardar: ruta de sesion inferida desde biblioteca: {inferred_path}")
+                self._save_session_to_path(inferred_path, show_success_popup=False)
+                return
             self._save_session_dialog()
             return
         self._save_session_to_path(self._session_file_path, show_success_popup=False)
@@ -2070,6 +4288,23 @@ class TranscriptorWindow(tk.Toplevel):
             return
         self._save_session_to_path(Path(path), show_success_popup=True)
 
+    def _load_session_from_path(self, session_path: Path, *, show_error_popup: bool) -> bool:
+        try:
+            try:
+                payload = json.loads(session_path.read_text(encoding="utf-8"))
+            except Exception:
+                payload = json.loads(session_path.read_text(encoding="utf-8-sig"))
+            payload = self._merge_images_manifest_into_session_payload(
+                payload=payload if isinstance(payload, dict) else {},
+                images_payload=self._load_session_images_manifest(session_path=session_path),
+            )
+        except Exception as exc:
+            if show_error_popup:
+                messagebox.showerror("Sesion", f"No se pudo leer la sesion:\n{exc}")
+            return False
+        self._apply_loaded_session(payload=payload, session_path=session_path)
+        return True
+
     def _load_session_dialog(self) -> None:
         if self._transcribing:
             messagebox.showwarning("Sesion", "Espera a que termine la transcripcion actual para cargar sesion.")
@@ -2082,22 +4317,183 @@ class TranscriptorWindow(tk.Toplevel):
         if not path:
             return
         session_path = Path(path)
-        try:
-            payload = json.loads(session_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            messagebox.showerror("Sesion", f"No se pudo leer la sesion:\n{exc}")
+        self._load_session_from_path(session_path, show_error_popup=True)
+
+    def _reload_current_session(self) -> None:
+        if self._transcribing:
+            messagebox.showwarning("Sesion", "Espera a que termine la transcripcion actual para recargar sesion.")
             return
-        self._apply_loaded_session(payload=payload, session_path=session_path)
+        if self._session_file_path is None:
+            messagebox.showinfo("Sesion", "Aun no hay una sesion cargada para recargar.")
+            return
+        confirmed = messagebox.askyesno(
+            "Recargar sesion",
+            "Se recargará la sesión actual desde disco y se descartará el estado no guardado en memoria.\n\n"
+            "¿Continuar?",
+            default=messagebox.YES,
+        )
+        if not confirmed:
+            return
+        session_path = Path(self._session_file_path)
+        if self._load_session_from_path(session_path, show_error_popup=True):
+            self._log(f"Sesion recargada desde disco: {session_path}")
+
+    def _bootstrap_linked_session(
+        self,
+        *,
+        db_name: str,
+        book_code: str,
+        instance_type: str,
+        pdf_path: str,
+        session_path: str,
+        project_name: str,
+    ) -> None:
+        db_value = str(db_name or "").strip()
+        if db_value:
+            self.db_name_var.set(db_value)
+        if project_name:
+            self.project_name_var.set(self._normalize_project_name(project_name))
+        book_value = str(book_code or "").strip()
+        if book_value:
+            self.book_code_var.set(book_value)
+        instance_value = str(instance_type or "").strip().lower()
+        if instance_value:
+            self.instance_type_var.set(normalize_instance_name(instance_value, "sesion"))
+        pdf_value = str(pdf_path or "").strip()
+        if pdf_value:
+            self.pdf_path_var.set(str(remap_legacy_drive_path(pdf_value, prefer_existing=True)))
+
+        raw_session = str(session_path or "").strip()
+        if not raw_session:
+            inferred = self._infer_session_path_from_library_context()
+            if inferred is None:
+                self._linked_session_bootstrap_status = "none"
+                return
+            raw_session = str(inferred)
+            self._log(f"Sesion enlazada inferida desde biblioteca: {raw_session}")
+
+        path = remap_legacy_drive_path(Path(raw_session).expanduser(), prefer_existing=False)
+        if str(path) != raw_session:
+            self._log(f"Sesion enlazada remapeada: {raw_session} -> {path}")
+        self._configure_project_storage_from_session_path(path)
+        if path.exists():
+            loaded = self._load_session_from_path(path, show_error_popup=True)
+            self._linked_session_bootstrap_status = "loaded" if loaded else "error"
+        else:
+            created = self._save_session_to_path(path, show_success_popup=False)
+            self._linked_session_bootstrap_status = "created" if created else "error"
+            if created:
+                self._log(f"Sesion inicializada para la instancia: {self._session_file_path}")
+
+        if db_value:
+            self.db_name_var.set(db_value)
+        if project_name:
+            self.project_name_var.set(self._normalize_project_name(project_name))
+        if book_value:
+            self.book_code_var.set(book_value)
+        if instance_value:
+            self.instance_type_var.set(normalize_instance_name(instance_value, "sesion"))
+        if pdf_value:
+            self.pdf_path_var.set(str(remap_legacy_drive_path(pdf_value, prefer_existing=True)))
+
+    def _infer_session_path_from_library_context(self) -> Optional[Path]:
+        db_name = str(self.db_name_var.get() or "").strip()
+        book_code = str(self.book_code_var.get() or "").strip()
+        instance_type = normalize_instance_name(str(self.instance_type_var.get() or "").strip(), "sesion")
+        if not instance_type:
+            return None
+        if not db_name or not book_code:
+            return self._infer_session_path_from_pdf_context(instance_type)
+        try:
+            from modulos.modulo9_organizador_libros.controlador_organizador_libros import (
+                BookInstanceUpdateInput,
+                BookProgressController,
+            )
+
+            controller = BookProgressController()
+            books = controller.listar_libros(db_name)
+            book = next(
+                (
+                    row
+                    for row in books
+                    if str(row.get("codigo") or "").strip().lower() == book_code.lower()
+                    or str(row.get("titulo") or "").strip().lower() == book_code.lower()
+                ),
+                None,
+            )
+            if not book:
+                return None
+            book_id = int(book.get("id") or 0)
+            if book_id <= 0:
+                return None
+            instancia = controller.obtener_instancia(db_name, book_id, instance_type) or {}
+            session_raw = str(instancia.get("session_path") or "").strip()
+            if not session_raw:
+                workspace_raw = str(book.get("workspace_dir") or "").strip()
+                if not workspace_raw:
+                    return None
+                session_raw = str(project_dirs(Path(workspace_raw), instance_type).get("session_path") or "")
+                instancia_id = int(instancia.get("id") or 0) if isinstance(instancia, dict) else 0
+                if instancia_id > 0 and session_raw:
+                    try:
+                        controller.actualizar_instancia(
+                            db_name,
+                            instancia_id,
+                            BookInstanceUpdateInput(
+                                libro_id=book_id,
+                                tipo=instance_type,
+                                total_esperado=int(instancia.get("total_esperado") or 0),
+                                session_path=session_raw,
+                                soluciones_dir=str(instancia.get("soluciones_dir") or ""),
+                                notas=str(instancia.get("notas") or ""),
+                                activo=bool(instancia.get("activo", True)),
+                            ),
+                        )
+                    except Exception as exc:
+                        self._log(f"ADVERTENCIA: no se pudo actualizar ruta de sesion en biblioteca: {exc}")
+            if not session_raw:
+                return None
+            return remap_legacy_drive_path(Path(session_raw).expanduser(), prefer_existing=False)
+        except Exception as exc:
+            self._log(f"ADVERTENCIA: no se pudo inferir ruta de sesion desde biblioteca: {exc}")
+            return self._infer_session_path_from_pdf_context(instance_type)
+
+    def _infer_session_path_from_pdf_context(self, instance_type: str) -> Optional[Path]:
+        pdf_raw = str(self.pdf_path_var.get() or "").strip()
+        if not pdf_raw:
+            return None
+        try:
+            pdf_path = remap_legacy_drive_path(Path(pdf_raw).expanduser(), prefer_existing=True)
+            workspace = pdf_path.parent if pdf_path.suffix.lower() == ".pdf" else pdf_path
+            if not workspace:
+                return None
+            return remap_legacy_drive_path(
+                Path(project_dirs(workspace, normalize_instance_name(instance_type, "sesion"))["session_path"]),
+                prefer_existing=False,
+            )
+        except Exception as exc:
+            self._log(f"ADVERTENCIA: no se pudo inferir ruta de sesion desde PDF: {exc}")
+            return None
 
     def _apply_loaded_session(self, *, payload: Dict[str, Any], session_path: Path) -> None:
+        self._configure_project_storage_from_session_path(session_path)
+        state_payload = payload.get("state_v3", {}) if isinstance(payload, dict) else {}
+        if isinstance(state_payload, dict) and state_payload:
+            try:
+                self.state = TranscriptorSessionState.from_dict(state_payload)
+            except Exception:
+                self.state = TranscriptorSessionState()
         ui = payload.get("ui", {}) if isinstance(payload, dict) else {}
         usage = payload.get("usage", {}) if isinstance(payload, dict) else {}
         files_data = payload.get("files", []) if isinstance(payload, dict) else []
         items_data = payload.get("items", []) if isinstance(payload, dict) else []
+        solution_paths_raw = payload.get("solution_paths_by_item", {}) if isinstance(payload, dict) else {}
         output_text = (payload.get("output_text", "") if isinstance(payload, dict) else "") or ""
         step3_last_input = (payload.get("step3_last_claves_input", "") if isinstance(payload, dict) else "") or ""
         transcribed_map = payload.get("transcribed_by_label", {}) if isinstance(payload, dict) else {}
         ocr_raw_map = payload.get("ocr_raw_first_by_label", {}) if isinstance(payload, dict) else {}
+        ocr_candidate_cache_map = payload.get("ocr_candidate_cache_by_label", {}) if isinstance(payload, dict) else {}
+        ocr_structured_map = payload.get("ocr_structured_by_label", {}) if isinstance(payload, dict) else {}
         geometry_map = payload.get("geometry_pass_by_label", {}) if isinstance(payload, dict) else {}
         geometry_payload_map = payload.get("geometry_pass_payload_by_label", {}) if isinstance(payload, dict) else {}
         ocr_merge_map = payload.get("ocr_merge_applied_by_label", {}) if isinstance(payload, dict) else {}
@@ -2112,14 +4508,18 @@ class TranscriptorWindow(tk.Toplevel):
         review_done_raw = segmentation.get("review_done", False) if isinstance(segmentation, dict) else False
         used_segments_raw = segmentation.get("used_segments", {}) if isinstance(segmentation, dict) else {}
         figure_boxes_raw = payload.get("figure_boxes_by_source", {}) if isinstance(payload, dict) else {}
+        segment_detection_audit_raw = payload.get("segment_detection_audit_by_source", {}) if isinstance(payload, dict) else {}
         ocr_boxes_raw = payload.get("ocr_exclusion_boxes", {}) if isinstance(payload, dict) else {}
         segment_bindings_raw = payload.get("segment_item_bindings_by_source", {}) if isinstance(payload, dict) else {}
 
         self._file_map.clear()
         self.list_files.delete(0, "end")
         self._items.clear()
+        self._solution_path_by_item_num.clear()
         self._transcribed_by_label.clear()
         self._ocr_raw_first_by_label.clear()
+        self._ocr_candidate_cache_by_label.clear()
+        self._ocr_structured_by_label.clear()
         self._geometry_pass_by_label.clear()
         self._geometry_pass_payload_by_label.clear()
         self._ocr_merge_applied_by_label.clear()
@@ -2127,10 +4527,14 @@ class TranscriptorWindow(tk.Toplevel):
         self._direct_item_diagnostics_by_label.clear()
         self._yolo_figure_suggestions_by_source.clear()
         self._preview_images.clear()
+        self._preview_item_image_statuses.clear()
+        self._item_image_binding_hints.clear()
         self._missing_marker_warned.clear()
         self._corrected_item_numbers.clear()
         self._segmentacion_v2_overrides.clear()
+        self._segmentacion_v2_runtime_cache.clear()
         self._segmentation_v2_used_segments.clear()
+        self._segment_detection_audit_by_source.clear()
         self._figure_boxes_by_source.clear()
         self._ocr_exclusion_boxes.clear()
         self._segment_item_bindings_by_source.clear()
@@ -2142,13 +4546,60 @@ class TranscriptorWindow(tk.Toplevel):
 
         # Restore UI configuration first.
         self.db_name_var.set(str(ui.get("db_name", self.db_name_var.get()) or "").strip())
+        provider = self._normalize_provider_label(str(ui.get("provider", self.provider_var.get()) or "").strip())
         model = str(ui.get("model", self.model_var.get()) or "").strip()
         format_model = str(ui.get("format_model", self.format_model_var.get()) or "").strip()
         project_raw = str(ui.get("project_name", "") or "").strip()
         loaded_project = self._normalize_project_name(project_raw if project_raw else session_path.stem)
         self.project_name_var.set(loaded_project)
-        self.model_var.set(model if model in HF_MODELS else DEFAULT_HF_VISION_MODEL)
-        self.format_model_var.set(format_model if format_model in HF_FORMAT_MODELS else DEFAULT_HF_FORMAT_MODEL)
+        self.book_code_var.set(
+            str(
+                ui.get(
+                    "book_code",
+                    payload.get("book_code", self.book_code_var.get()) if isinstance(payload, dict) else self.book_code_var.get(),
+                )
+                or ""
+            ).strip()
+        )
+        instance_type = str(
+            ui.get(
+                "instance_type",
+                payload.get("instance_type", self.instance_type_var.get()) if isinstance(payload, dict) else self.instance_type_var.get(),
+            )
+            or ""
+        ).strip().lower()
+        if instance_type:
+            instance_type = normalize_instance_name(instance_type, "sesion")
+        self.instance_type_var.set(instance_type)
+        self.pdf_path_var.set(
+            str(
+                ui.get(
+                    "pdf_path",
+                    payload.get("pdf_path", self.pdf_path_var.get()) if isinstance(payload, dict) else self.pdf_path_var.get(),
+                )
+                or ""
+            ).strip()
+        )
+        self.provider_var.set(provider)
+        vision_choices = self._vision_model_choices_for_provider(provider)
+        format_choices = self._format_model_choices_for_provider(provider)
+        if provider == PROVIDER_HF:
+            if self._as_bool(os.getenv("MOD0_RESPECT_SAVED_HF_MODEL"), False) and model in vision_choices:
+                self.model_var.set(model)
+            else:
+                self.model_var.set(TRAINED_OCR_VISION_MODEL)
+            self.format_model_var.set(
+                format_model if format_model in format_choices else self._default_format_model_for_provider(provider)
+            )
+        elif provider == PROVIDER_OCR:
+            self.model_var.set("ocr-local")
+            self.format_model_var.set("")
+        else:
+            self.model_var.set(model or self._default_vision_model_for_provider(provider))
+            self.format_model_var.set(
+                format_model
+                or self._default_format_model_for_provider(provider, vision_model=(self.model_var.get() or "").strip())
+            )
         self.timeout_var.set(max(30, min(self._safe_int(ui.get("timeout_s"), 180), 600)))
         self.retries_var.set(max(0, min(self._safe_int(ui.get("retries"), 2), 5)))
         self.skip_done_var.set(self._as_bool(ui.get("skip_done"), False))
@@ -2179,7 +4630,7 @@ class TranscriptorWindow(tk.Toplevel):
                 path_raw = str(row.get("path", "") or "").strip()
                 if not path_raw:
                     continue
-                src = Path(path_raw)
+                src = self._resolve_session_resource_path(path_raw, session_path=session_path)
                 if not src.exists():
                     missing_files += 1
                     continue
@@ -2192,11 +4643,30 @@ class TranscriptorWindow(tk.Toplevel):
                 self._file_map[label] = src
                 self.list_files.insert("end", label)
                 loaded_files += 1
+        if loaded_files == 0:
+            recovered_sources = self._recover_sources_from_project_dirs(session_path)
+            if recovered_sources > 0:
+                loaded_files += recovered_sources
+                self._log(
+                    f"Sesion: se recuperaron {recovered_sources} imagen(es) fuente desde la carpeta del proyecto."
+                )
 
         if isinstance(overrides_raw, dict):
             for key, boxes_raw in overrides_raw.items():
                 parsed = self._parse_boxes_payload(boxes_raw)
-                self._segmentacion_v2_overrides[str(key)] = parsed
+                mapped_key = self._remap_loaded_source_key(str(key), session_path=session_path)
+                if mapped_key:
+                    self._segmentacion_v2_overrides[mapped_key] = parsed
+        restored_override_count = self._hydrate_segmentation_overrides_from_state(session_path=session_path)
+        if restored_override_count > 0:
+            self._log(
+                f"Sesion: se restauraron {restored_override_count} override(s) de segmentacion desde segmentos guardados."
+            )
+        migrated_manifest_count = self._migrate_missing_segment_manifests_from_session(session_path=session_path)
+        if migrated_manifest_count > 0:
+            self._log(
+                f"Sesion: se migraron {migrated_manifest_count} manifest(s) de segmentos legacy."
+            )
         if isinstance(used_segments_raw, dict):
             for key, vals in used_segments_raw.items():
                 bucket: Set[int] = set()
@@ -2209,7 +4679,10 @@ class TranscriptorWindow(tk.Toplevel):
                         if iv >= 0:
                             bucket.add(iv)
                 if bucket:
-                    self._segmentation_v2_used_segments[str(key)] = bucket
+                    mapped_key = self._remap_loaded_source_key(str(key), session_path=session_path)
+                    if mapped_key:
+                        current_bucket = self._segmentation_v2_used_segments.setdefault(mapped_key, set())
+                        current_bucket.update(bucket)
 
         if isinstance(figure_boxes_raw, dict):
             for key, entries_raw in figure_boxes_raw.items():
@@ -2225,16 +4698,32 @@ class TranscriptorWindow(tk.Toplevel):
                     if entry is not None:
                         bucket.append(entry)
                 if bucket:
-                    self._figure_boxes_by_source[str(key)] = bucket
+                    mapped_key = self._remap_loaded_source_key(str(key), session_path=session_path)
+                    if mapped_key:
+                        self._figure_boxes_by_source.setdefault(mapped_key, []).extend(bucket)
+
+        if isinstance(segment_detection_audit_raw, dict):
+            for key, entry_raw in segment_detection_audit_raw.items():
+                if not isinstance(entry_raw, dict):
+                    continue
+                mapped_key = self._remap_loaded_source_key(str(key), session_path=session_path)
+                if not mapped_key:
+                    continue
+                entry = self._normalize_segment_detector_audit_entry(entry_raw)
+                if entry is not None:
+                    self._segment_detection_audit_by_source[mapped_key] = dict(entry)
 
         if isinstance(ocr_boxes_raw, dict):
             for key, box_raw in ocr_boxes_raw.items():
                 parsed = self._parse_boxes_payload([box_raw])
                 if parsed:
-                    self._ocr_exclusion_boxes[str(key)] = parsed[0]
-                    if str(key) not in self._figure_boxes_by_source:
+                    mapped_key = self._remap_loaded_source_key(str(key), session_path=session_path)
+                    if not mapped_key:
+                        continue
+                    self._ocr_exclusion_boxes[mapped_key] = parsed[0]
+                    if mapped_key not in self._figure_boxes_by_source:
                         x1, y1, x2, y2 = [int(v) for v in parsed[0]]
-                        self._figure_boxes_by_source[str(key)] = [
+                        self._figure_boxes_by_source[mapped_key] = [
                             {
                                 "bbox_px": [x1, y1, x2, y2],
                                 "source": "manual",
@@ -2268,7 +4757,11 @@ class TranscriptorWindow(tk.Toplevel):
                     marker_name = str(payload_raw.get("marker_name", "") or "").strip()
                     if not marker_name:
                         marker_name = self._build_binding_marker_name(item_num=item_num, slot=slot)
-                    crop_path = str(payload_raw.get("crop_path", "") or "").strip()
+                    crop_path_raw = str(payload_raw.get("crop_path", "") or "").strip()
+                    crop_path = crop_path_raw
+                    if crop_path_raw:
+                        crop_resolved = self._resolve_session_resource_path(crop_path_raw, session_path=session_path)
+                        crop_path = str(crop_resolved) if crop_resolved.exists() else crop_path_raw
                     parsed_bucket[seg_idx] = {
                         "item_num": item_num,
                         "slot": slot,
@@ -2278,11 +4771,15 @@ class TranscriptorWindow(tk.Toplevel):
                         "updated_at": str(payload_raw.get("updated_at", "") or "").strip() or datetime.now().isoformat(timespec="seconds"),
                     }
                 if parsed_bucket:
-                    self._set_segment_bindings_by_source_key(str(source_key), parsed_bucket)
+                    mapped_key = self._remap_loaded_source_key(str(source_key), session_path=session_path)
+                    if mapped_key:
+                        current_bucket = self._get_segment_bindings_by_source_key(mapped_key)
+                        current_bucket.update(parsed_bucket)
+                        self._set_segment_bindings_by_source_key(mapped_key, current_bucket)
 
         if isinstance(reviewed_raw, list):
             for key in reviewed_raw:
-                key_text = str(key or "").strip().lower()
+                key_text = self._remap_loaded_source_key(str(key or ""), session_path=session_path)
                 if key_text:
                     self._segmentation_reviewed_sources.add(key_text)
         self._segmentation_review_done = self._as_bool(review_done_raw, False)
@@ -2297,13 +4794,70 @@ class TranscriptorWindow(tk.Toplevel):
                 if not item_txt:
                     continue
                 imgs_raw = row.get("imagenes", [])
-                imgs = [str(p) for p in imgs_raw] if isinstance(imgs_raw, list) else []
+                imgs: List[str] = []
+                if isinstance(imgs_raw, list):
+                    for p in imgs_raw:
+                        p_raw = str(p or "").strip()
+                        if not p_raw:
+                            continue
+                        resolved_img = self._resolve_session_resource_path(p_raw, session_path=session_path)
+                        imgs.append(str(resolved_img) if resolved_img.exists() else p_raw)
                 self._items.append((archivo_origen, item_txt, imgs))
+                item_num = int(
+                    self.controller.parsear_numero_original(item_txt)
+                    or self._extract_structured_item_number(item_txt)
+                    or 0
+                )
+                binding_hint = row.get("image_binding", {})
+                if item_num > 0 and isinstance(binding_hint, dict):
+                    hint_key = self._item_image_binding_hint_key(
+                        archivo_origen=archivo_origen,
+                        item_num=item_num,
+                    )
+                    if hint_key:
+                        self._item_image_binding_hints[hint_key] = dict(binding_hint)
+
+        if isinstance(solution_paths_raw, dict):
+            for raw_key, raw_value in solution_paths_raw.items():
+                try:
+                    key = int(raw_key)
+                except Exception:
+                    continue
+                if key <= 0:
+                    continue
+                clean_groups = self._normalize_solution_groups_payload(raw_value)
+                resolved_groups: List[List[str]] = []
+                for group in clean_groups:
+                    resolved_group: List[str] = []
+                    for p in group:
+                        p_raw = str(p or "").strip()
+                        if not p_raw:
+                            continue
+                        resolved = self._resolve_session_resource_path(p_raw, session_path=session_path)
+                        resolved_group.append(str(resolved) if resolved.exists() else p_raw)
+                    if resolved_group:
+                        resolved_groups.append(resolved_group)
+                if resolved_groups:
+                    self._solution_path_by_item_num[key] = resolved_groups
 
         if isinstance(transcribed_map, dict):
             self._transcribed_by_label = {str(k): str(v) for k, v in transcribed_map.items()}
         if isinstance(ocr_raw_map, dict):
             self._ocr_raw_first_by_label = {str(k): str(v) for k, v in ocr_raw_map.items()}
+        if isinstance(ocr_candidate_cache_map, dict):
+            parsed_cache: Dict[str, Dict[str, Dict[str, Any]]] = {}
+            for raw_label, raw_bucket in ocr_candidate_cache_map.items():
+                if not isinstance(raw_bucket, dict):
+                    continue
+                bucket: Dict[str, Dict[str, Any]] = {}
+                for raw_key, raw_entry in raw_bucket.items():
+                    if isinstance(raw_entry, dict):
+                        bucket[str(raw_key)] = dict(raw_entry)
+                if bucket:
+                    parsed_cache[str(raw_label)] = bucket
+            self._ocr_candidate_cache_by_label = parsed_cache
+        if isinstance(ocr_structured_map, dict):
+            self._ocr_structured_by_label = {str(k): str(v) for k, v in ocr_structured_map.items()}
         if isinstance(geometry_map, dict):
             self._geometry_pass_by_label = {str(k): str(v) for k, v in geometry_map.items()}
         if isinstance(geometry_payload_map, dict):
@@ -2365,7 +4919,10 @@ class TranscriptorWindow(tk.Toplevel):
                 source_name = str(value.get("source", "none") or "none").strip().lower()
                 if source_name not in {"yolo", "yolo_cache", "manual", "none", "manual_box", "manual_marker"}:
                     source_name = "none"
-                parsed_suggestions[str(key)] = {
+                mapped_key = self._remap_loaded_source_key(str(key), session_path=session_path)
+                if not mapped_key:
+                    continue
+                parsed_suggestions[mapped_key] = {
                     "has_figure": bool(value.get("has_figure", False)),
                     "bbox_norm": bbox_norm,
                     "conf": max(0.0, min(1.0, conf)),
@@ -2374,7 +4931,25 @@ class TranscriptorWindow(tk.Toplevel):
                 }
             self._yolo_figure_suggestions_by_source = parsed_suggestions
         if isinstance(preview_map, dict):
-            self._preview_images = {str(k): str(v) for k, v in preview_map.items()}
+            resolved_preview: Dict[str, str] = {}
+            for k, v in preview_map.items():
+                key = str(k)
+                p_raw = str(v or "").strip()
+                if not p_raw:
+                    continue
+                p_resolved = self._resolve_session_resource_path(p_raw, session_path=session_path)
+                resolved_preview[key] = str(p_resolved) if p_resolved.exists() else p_raw
+            self._preview_images = resolved_preview
+        canonicalized_marker_crops = self._canonicalize_loaded_marker_crops()
+        if canonicalized_marker_crops > 0:
+            self._log(
+                f"Sesion: se normalizaron {canonicalized_marker_crops} referencia(s) de imagen a crops/<marker>.png."
+            )
+        recovered_item_images = self._recover_item_images_from_project_crops()
+        if recovered_item_images > 0:
+            self._log(
+                f"Sesion: se vincularon imagenes desde crops para {recovered_item_images} item(s)."
+            )
         migrated_bindings = self._migrate_legacy_preview_bindings()
         if migrated_bindings > 0:
             self._log(
@@ -2410,11 +4985,13 @@ class TranscriptorWindow(tk.Toplevel):
 
         self._on_provider_change()
         self._session_file_path = session_path.resolve()
+        self._configure_project_storage_from_session_path(self._session_file_path)
         self._session_last_dir = self._session_file_path.parent
         self._refresh_image_list_colors()
         self._log(
             f"Sesion cargada: {session_path} | archivos={loaded_files} | items={len(self._items)} | faltantes={missing_files}"
         )
+        self._sync_state_snapshot()
         messagebox.showinfo(
             "Sesion",
             f"Sesion cargada.\nArchivos: {loaded_files}\nItems: {len(self._items)}\nFaltantes: {missing_files}",
@@ -2573,17 +5150,23 @@ class TranscriptorWindow(tk.Toplevel):
             pass
         self._refresh_training_pairs_from_items()
         text_rows = self._build_training_pairs_jsonl_rows()
+        osr_golden_rows = self._build_osr_golden_jsonl_rows()
         text_pairs_path = dataset_dir / "pairs_texto.jsonl"
+        osr_golden_path = dataset_dir / "golden_osr.jsonl"
         yolo_stats = {"images": 0, "labels": 0, "boxes": 0}
         if export_yolo:
             yolo_stats = self._export_yolo_bbox_dataset(dataset_dir=dataset_dir, sources=sources)
         manifest["text_pairs_count"] = len(text_rows)
+        manifest["osr_golden_count"] = len(osr_golden_rows)
         manifest["yolo_exported"] = bool(export_yolo)
         manifest["yolo_stats"] = dict(yolo_stats)
 
         try:
             with text_pairs_path.open("w", encoding="utf-8") as fh:
                 for row in text_rows:
+                    fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+            with osr_golden_path.open("w", encoding="utf-8") as fh:
+                for row in osr_golden_rows:
                     fh.write(json.dumps(row, ensure_ascii=False) + "\n")
             (dataset_dir / "manifest.json").write_text(
                 json.dumps(manifest, ensure_ascii=False, indent=2),
@@ -2598,11 +5181,11 @@ class TranscriptorWindow(tk.Toplevel):
             return
 
         self._log(
-            f"Dataset exportado: {dataset_dir} | fuentes={len(samples)} | segmentos={exported_segments} | mascaras={exported_masks} | pares_texto={len(text_rows)} | yolo_boxes={yolo_stats.get('boxes', 0)} | fallos={failed_sources}"
+            f"Dataset exportado: {dataset_dir} | fuentes={len(samples)} | segmentos={exported_segments} | mascaras={exported_masks} | pares_texto={len(text_rows)} | golden_osr={len(osr_golden_rows)} | yolo_boxes={yolo_stats.get('boxes', 0)} | fallos={failed_sources}"
         )
         messagebox.showinfo(
             "Dataset",
-            f"Dataset exportado en:\n{dataset_dir}\n\nFuentes: {len(samples)}\nSegmentos: {exported_segments}\nMascaras OCR: {exported_masks}\nPares texto JSONL: {len(text_rows)}\nYOLO boxes: {yolo_stats.get('boxes', 0)}\nFallos: {failed_sources}",
+            f"Dataset exportado en:\n{dataset_dir}\n\nFuentes: {len(samples)}\nSegmentos: {exported_segments}\nMascaras OCR: {exported_masks}\nPares texto JSONL: {len(text_rows)}\nGolden OSR JSONL: {len(osr_golden_rows)}\nYOLO boxes: {yolo_stats.get('boxes', 0)}\nFallos: {failed_sources}",
         )
 
     def _usage_triplet(self, usage) -> tuple[Optional[int], Optional[int], Optional[int]]:
@@ -2681,28 +5264,134 @@ class TranscriptorWindow(tk.Toplevel):
         details = ", ".join(parts)
         self._log(f"Uso tokens [{provider} | {model} | {label}]: {details}")
 
+    def _normalize_provider_label(self, provider: str) -> str:
+        raw = str(provider or "").strip().lower()
+        if raw in {PROVIDER_OCR.lower(), "ocr", "tesseract", "local"}:
+            return PROVIDER_OCR
+        return PROVIDER_HF
+
+    def _vision_model_choices_for_provider(self, provider: str) -> List[str]:
+        provider = self._normalize_provider_label(provider)
+        if provider == PROVIDER_OCR:
+            return ["ocr-local"]
+        return [TRAINED_OCR_VISION_MODEL]
+
+    def _format_model_choices_for_provider(self, provider: str) -> List[str]:
+        provider = self._normalize_provider_label(provider)
+        if provider == PROVIDER_OCR:
+            return []
+        return [TRAINED_OCR_VISION_MODEL]
+
+    def _default_vision_model_for_provider(self, provider: str) -> str:
+        provider = self._normalize_provider_label(provider)
+        if provider == PROVIDER_OCR:
+            return "ocr-local"
+        return TRAINED_OCR_VISION_MODEL
+
+    def _default_format_model_for_provider(self, provider: str, *, vision_model: str = "") -> str:
+        provider = self._normalize_provider_label(provider)
+        if provider == PROVIDER_OCR:
+            return ""
+        return TRAINED_OCR_VISION_MODEL
+
+    def _refresh_flow_subtitle(self) -> None:
+        provider = self._normalize_provider_label(self.provider_var.get())
+        if provider == PROVIDER_OCR:
+            text = "Flujo activo: Segmentacion V2 + OCR local + JSON + salida final."
+        else:
+            text = "Flujo activo: Segmentacion V2 + OCR geometrico entrenado + JSON + salida final."
+        self.flow_subtitle_var.set(text)
+
     def _on_provider_change(self, _event=None) -> None:
-        # UI sin selectores: forzar flujo fijo en todo momento.
-        self.provider_var.set(FIXED_PROVIDER)
+        provider = self._normalize_provider_label(self.provider_var.get() or FIXED_PROVIDER)
+        self.provider_var.set(provider)
+        vision_choices = self._vision_model_choices_for_provider(provider)
+        format_choices = self._format_model_choices_for_provider(provider)
         current_model = (self.model_var.get() or "").strip()
-        if current_model not in HF_MODELS:
-            self.model_var.set(DEFAULT_HF_VISION_MODEL)
+        if current_model not in vision_choices:
+            self.model_var.set(self._default_vision_model_for_provider(provider))
         current_format = (self.format_model_var.get() or "").strip()
-        if current_format not in HF_FORMAT_MODELS:
-            self.format_model_var.set(DEFAULT_HF_FORMAT_MODEL)
+        if provider == PROVIDER_OCR:
+            self.format_model_var.set("")
+        elif current_format not in format_choices:
+            self.format_model_var.set(
+                self._default_format_model_for_provider(provider, vision_model=(self.model_var.get() or "").strip())
+            )
+        combo_model = getattr(self, "combo_model", None)
+        if self._widget_alive(combo_model):
+            try:
+                combo_model.configure(values=vision_choices)
+            except Exception:
+                pass
+        combo_format = getattr(self, "combo_format_model", None)
+        if self._widget_alive(combo_format):
+            try:
+                combo_format.configure(values=format_choices)
+            except Exception:
+                pass
         current_tag = (self.tag_mode_var.get() or "").strip()
         if current_tag not in {TAG_MODE_MANUAL, TAG_MODE_AUTO, TAG_MODE_MIXED}:
             self.tag_mode_var.set(FIXED_TAG_MODE)
+        self._refresh_flow_subtitle()
+
+    def _read_repo_env_value(self, *names: str) -> str:
+        wanted = [str(name or "").strip() for name in names if str(name or "").strip()]
+        if not wanted:
+            return ""
+        try:
+            repo_root = Path(__file__).resolve().parents[2]
+        except Exception:
+            return ""
+        for env_path in (repo_root / ".env.local", repo_root / ".env"):
+            try:
+                if not env_path.exists():
+                    continue
+                text = env_path.read_text(encoding="utf-8-sig")
+            except Exception:
+                continue
+            for raw_line in text.splitlines():
+                line = str(raw_line or "").strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, raw_value = line.split("=", 1)
+                if key.strip() not in wanted:
+                    continue
+                value = raw_value.strip().strip('"').strip("'")
+                if value:
+                    return value
+        return ""
 
     def _resolve_hf_token(self) -> str:
-        return (
-            (self.hf_token_var.get() or "").strip()
-            or (os.getenv("HF_TOKEN", "") or "").strip()
-            or (os.getenv("HUGGINGFACEHUB_API_TOKEN", "") or "").strip()
-        )
+        token = self._read_repo_env_value("HF_TOKEN", "HUGGINGFACEHUB_API_TOKEN")
+        if not token:
+            token = (
+                (self.hf_token_var.get() or "").strip()
+                or (os.getenv("HF_TOKEN", "") or "").strip()
+                or (os.getenv("HUGGINGFACEHUB_API_TOKEN", "") or "").strip()
+            )
+        if token:
+            try:
+                self.hf_token_var.set(token)
+            except Exception:
+                pass
+            os.environ["HF_TOKEN"] = token
+            os.environ["HUGGINGFACEHUB_API_TOKEN"] = token
+        return token
 
-    def _resolve_hf_base_url(self) -> str:
-        # Flujo fijo por router HF (sin endpoint dedicado configurable).
+    @staticmethod
+    def _trained_ocr_endpoint_configured() -> bool:
+        return bool((os.getenv("HF_TRAINED_OCR_BASE_URL", "") or "").strip())
+
+    def _resolve_hf_base_url(self, model: str = "") -> str:
+        current_model = (model or self.model_var.get() or "").strip()
+        if current_model == TRAINED_OCR_VISION_MODEL:
+            endpoint = (os.getenv("HF_TRAINED_OCR_BASE_URL", "") or "").strip()
+            if not endpoint:
+                raise RuntimeError(
+                    "El modelo OCR entrenado requiere configurar HF_TRAINED_OCR_BASE_URL "
+                    "con la URL OpenAI-compatible de su endpoint dedicado."
+                )
+            return endpoint.rstrip("/")
         return HF_BASE_URL_DEFAULT
 
     def _short_hf_probe_error(self, err: Exception | str) -> str:
@@ -2712,6 +5401,8 @@ class TranscriptorWindow(tk.Toplevel):
             return "NOT_FOUND"
         if "model_not_supported" in low or "not supported by any provider" in low:
             return "NOT_SUPPORTED"
+        if "40301" in low or ("allowed now" in low and "your model" in low):
+            return "MODEL_NOT_ALLOWED"
         if "401" in low:
             return "401_UNAUTHORIZED"
         if "403" in low:
@@ -2744,7 +5435,9 @@ class TranscriptorWindow(tk.Toplevel):
         def worker() -> None:
             available: List[str] = []
             unavailable: Dict[str, str] = {}
-            base_url = self._resolve_hf_base_url()
+            # El auto-probe siempre usa el router compartido. Si el modelo seleccionado
+            # es el entrenado, resolver su URL dedicada despertaria la GPU innecesariamente.
+            base_url = self._resolve_hf_fallback_base_url() if auto else self._resolve_hf_base_url()
             probe_image = "https://endpoints.hf.co/media-examples/img1.png"
             try:
                 client = OpenAI(base_url=base_url, api_key=token, timeout=45)
@@ -2754,6 +5447,10 @@ class TranscriptorWindow(tk.Toplevel):
                 return
 
             for model_name in models:
+                if auto and model_name == TRAINED_OCR_VISION_MODEL:
+                    # El endpoint dedicado escala a cero. No lo despiertes solo por abrir la app.
+                    unavailable[model_name] = "AUTO_PROBE_OMITIDO"
+                    continue
                 try:
                     _resp = client.chat.completions.create(
                         model=model_name,
@@ -2778,17 +5475,21 @@ class TranscriptorWindow(tk.Toplevel):
                     self._hf_probe_running = False
                     return
                 self._hf_probe_running = False
-                self._hf_available_vision_models = list(available)
+                self._hf_available_vision_models = list(dict.fromkeys([TRAINED_OCR_VISION_MODEL, *available]))
                 self._hf_unavailable_vision_models = dict(unavailable)
                 self._hf_probe_last_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
                 combo_model = getattr(self, "combo_model", None)
-                if available and self._widget_alive(combo_model):
+                if (
+                    self._hf_available_vision_models
+                    and self._widget_alive(combo_model)
+                    and self._normalize_provider_label(self.provider_var.get()) == PROVIDER_HF
+                ):
                     try:
-                        combo_model.configure(values=available)
+                        combo_model.configure(values=self._hf_available_vision_models)
                         current = (self.model_var.get() or "").strip()
-                        if current not in available:
-                            self.model_var.set(available[0])
+                        if current != TRAINED_OCR_VISION_MODEL:
+                            self.model_var.set(TRAINED_OCR_VISION_MODEL)
                     except Exception:
                         pass
 
@@ -2810,8 +5511,539 @@ class TranscriptorWindow(tk.Toplevel):
         return HF_BASE_URL_DEFAULT
 
     def _resolve_hf_fallback_model(self) -> str:
-        model = (os.getenv("HF_FALLBACK_MODEL", "") or "").strip()
-        return model or "Qwen/Qwen2.5-VL-7B-Instruct"
+        return TRAINED_OCR_VISION_MODEL
+
+    def _is_hf_ocr_ensemble_enabled(self) -> bool:
+        return False
+
+    def _resolve_hf_ocr_ensemble_models(self, current_model: str) -> List[str]:
+        return [TRAINED_OCR_VISION_MODEL]
+
+    def _ocr_candidate_cache_key(self, *, model: str, prompt_tag: str, start_n: Optional[int] = None) -> str:
+        try:
+            start_n_key = int(start_n) if start_n is not None else 0
+        except Exception:
+            start_n_key = 0
+        return (
+            f"{str(model or '').strip()}::"
+            f"{str(prompt_tag or '').strip() or 'default'}::"
+            f"n{start_n_key}"
+        )
+
+    def _get_ocr_candidate_cache_entry(
+        self,
+        *,
+        label: str,
+        model: str,
+        prompt_tag: str,
+        start_n: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        bucket = self._ocr_candidate_cache_by_label.get(str(label), {})
+        if not isinstance(bucket, dict):
+            return None
+        entry = bucket.get(
+            self._ocr_candidate_cache_key(
+                model=model,
+                prompt_tag=prompt_tag,
+                start_n=start_n,
+            )
+        )
+        return dict(entry) if isinstance(entry, dict) else None
+
+    def _merge_ocr_candidate_cache_entry(
+        self,
+        *,
+        label: str,
+        model: str,
+        prompt_tag: str,
+        start_n: Optional[int] = None,
+        patch: Dict[str, Any],
+    ) -> None:
+        label_key = str(label)
+        bucket = self._ocr_candidate_cache_by_label.setdefault(label_key, {})
+        cache_key = self._ocr_candidate_cache_key(
+            model=model,
+            prompt_tag=prompt_tag,
+            start_n=start_n,
+        )
+        current = dict(bucket.get(cache_key, {})) if isinstance(bucket.get(cache_key, {}), dict) else {}
+        current.update(dict(patch or {}))
+        bucket[cache_key] = current
+
+    def _clear_label_runtime_state(self, label: str) -> None:
+        key = str(label or "").strip()
+        if not key:
+            return
+        self._ocr_candidate_cache_by_label.pop(key, None)
+        self._ocr_raw_first_by_label.pop(key, None)
+        self._ocr_structured_by_label.pop(key, None)
+        self._transcribed_by_label.pop(key, None)
+        self._ocr_merge_applied_by_label.pop(key, None)
+        self._direct_item_diagnostics_by_label.pop(key, None)
+        for bucket_key in list(self._geometry_pass_by_label.keys()):
+            if bucket_key == key or bucket_key.startswith(f"{key} ["):
+                self._geometry_pass_by_label.pop(bucket_key, None)
+        for bucket_key in list(self._geometry_pass_payload_by_label.keys()):
+            if bucket_key == key or bucket_key.startswith(f"{key}#"):
+                self._geometry_pass_payload_by_label.pop(bucket_key, None)
+
+    def _invalidate_ocr_reprocess_state(self, labels: Iterable[str]) -> int:
+        seen: Set[str] = set()
+        for label in labels:
+            key = str(label)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            self._clear_label_runtime_state(key)
+        return len(seen)
+
+    def _clear_processing_cache(self) -> None:
+        if self._transcribing:
+            messagebox.showinfo("Limpiar cache OCR", "Espera a que termine el proceso actual.")
+            return
+
+        total_list = self.list_files.size()
+        selected_indices = list(self.list_files.curselection())
+        if selected_indices:
+            labels = [self.list_files.get(i) for i in selected_indices]
+            scope_text = "la selección actual"
+        else:
+            labels = [self.list_files.get(i) for i in range(total_list)]
+            scope_text = "todo el lote actual"
+
+        if not labels:
+            messagebox.showwarning("Limpiar cache OCR", "No hay imágenes cargadas.")
+            return
+
+        confirmed = messagebox.askyesno(
+            "Limpiar cache OCR",
+            "Se eliminarán el OCR fiel, el cache de candidatos y el JSON estructurado de "
+            f"{scope_text}.\n\n"
+            "No se borrarán imágenes, recortes ni segmentación.\n"
+            "La salida LaTeX actual tampoco se tocará.\n\n"
+            "¿Continuar?",
+            default=messagebox.YES,
+        )
+        if not confirmed:
+            return
+
+        cleared = self._invalidate_ocr_reprocess_state(labels)
+        self._refresh_image_list_colors()
+        self._log(
+            f"Cache OCR limpiado para {cleared} imagen(es) en {scope_text}. "
+            "Vuelve a ejecutar Paso 2 o Paso 3 para regenerar el estado."
+        )
+
+    def _should_retry_glm_full_prompt(self, *, reason: str) -> bool:
+        low = str(reason or "").strip().lower()
+        if not low:
+            return False
+        return any(
+            token in low
+            for token in (
+                "eco",
+                "echo",
+                "trunc",
+                "max tokens",
+                "max_token",
+                "length",
+                "vacio",
+                "vacía",
+                "vacía",
+            )
+        )
+
+    def _is_retryable_hf_ocr_error(self, exc: Exception | str) -> bool:
+        msg = str(exc or "").lower()
+        return any(
+            token in msg
+            for token in (
+                "timeout",
+                "timed out",
+                "rate",
+                "429",
+                "500",
+                "502",
+                "503",
+                "504",
+                "service_unavailable",
+                "service unavailable",
+                "temporarily",
+                "overloaded",
+                "server unavailable",
+            )
+        )
+
+    @staticmethod
+    def _hf_ocr_retry_delay_seconds(attempt: int) -> int:
+        try:
+            base = int(str(os.getenv("HF_OCR_RETRY_BASE_SECONDS", "8") or "8").strip())
+        except Exception:
+            base = 8
+        return min(90, max(1, base) * (2 ** max(0, int(attempt))))
+
+    def _run_hf_ocr_candidate_attempt(
+        self,
+        *,
+        label: str,
+        model: str,
+        path: Path,
+        timeout_s: int,
+        start_n: int,
+        prompt_text: str,
+        prompt_tag: str,
+        max_tokens: int,
+        retries: int = 2,
+    ) -> Dict[str, Any]:
+        cached = self._get_ocr_candidate_cache_entry(
+            label=label,
+            model=model,
+            prompt_tag=prompt_tag,
+            start_n=start_n,
+        )
+        if cached is not None:
+            entry = dict(cached)
+            entry["cache_hit"] = True
+            return entry
+
+        started = time.perf_counter()
+        raw_text = ""
+        error_text = ""
+        status = "error"
+        try:
+            min_retry_attempts = int(str(os.getenv("HF_OCR_TRANSIENT_RETRIES", "4") or "4").strip())
+        except Exception:
+            min_retry_attempts = 4
+        max_attempts = max(0, int(retries), min_retry_attempts) + 1
+        for attempt_index in range(max_attempts):
+            try:
+                raw_text = self._transcribir_huggingface_single_pass(
+                    model=model,
+                    timeout_s=timeout_s,
+                    label=label,
+                    path=path,
+                    start_n=start_n,
+                    prompt_text=prompt_text,
+                    prompt_tag=prompt_tag,
+                    max_tokens=max_tokens,
+                    update_label_cache=False,
+                )
+                status = "ok"
+                error_text = ""
+                break
+            except Exception as exc:
+                error_text = str(exc or "")
+                if attempt_index < max_attempts - 1 and self._is_retryable_hf_ocr_error(exc):
+                    wait_s = self._hf_ocr_retry_delay_seconds(attempt_index)
+                    self.after(
+                        0,
+                        lambda l=label, a=attempt_index + 1, r=max_attempts - 1, w=wait_s, m=model: self._log(
+                            f"{l}: HF OCR ocupado/temporal ({m}). Reintento {a}/{r} en {w}s..."
+                        ),
+                    )
+                    time.sleep(wait_s)
+                    continue
+                break
+        elapsed_ms = int(max(0.0, (time.perf_counter() - started) * 1000.0))
+        entry = {
+            "status": status,
+            "raw_text": str(raw_text or ""),
+            "error": str(error_text or ""),
+            "elapsed_ms": int(elapsed_ms),
+            "prompt_tag": str(prompt_tag or ""),
+            "max_tokens": int(max_tokens),
+            "cached_at": datetime.now().isoformat(timespec="seconds"),
+            "model": str(model or "").strip(),
+        }
+        if status == "ok" or not self._is_retryable_hf_ocr_error(error_text):
+            self._merge_ocr_candidate_cache_entry(
+                label=label,
+                model=model,
+                prompt_tag=prompt_tag,
+                start_n=start_n,
+                patch=entry,
+            )
+        entry["cache_hit"] = False
+        return entry
+
+    def _transcribir_huggingface_best_candidate(
+        self,
+        *,
+        model: str,
+        timeout_s: int,
+        retries: int,
+        label: str,
+        path: Path,
+        start_n: int,
+        curso: str,
+        tema: str,
+    ) -> Tuple[str, str]:
+        candidate_models = self._resolve_hf_ocr_ensemble_models(model)
+        if not candidate_models:
+            candidate_models = [TRAINED_OCR_VISION_MODEL]
+
+        analyses = []
+        errors: List[Tuple[str, str]] = []
+        overall_started = time.perf_counter()
+        selected_analysis: Optional[Any] = None
+        for idx, candidate_model in enumerate(candidate_models[:3]):
+            is_primary_glm = False
+            prompt_tag = "compact_mathlatex_v2" if is_primary_glm else "rescue_mathlatex_v2"
+            prompt_text = self._get_vision_ocr_prompt(compact=is_primary_glm)
+            max_tokens = 1600 if is_primary_glm else 2200
+            attempt = self._run_hf_ocr_candidate_attempt(
+                label=label,
+                model=candidate_model,
+                path=path,
+                timeout_s=timeout_s,
+                start_n=start_n,
+                prompt_text=prompt_text,
+                prompt_tag=prompt_tag,
+                max_tokens=max_tokens,
+                retries=retries,
+            )
+            cache_note = "cache" if bool(attempt.get("cache_hit")) else "api"
+            if str(attempt.get("status", "") or "") != "ok":
+                reason = str(attempt.get("error", "") or "sin_texto")
+                errors.append((candidate_model, reason))
+                self.after(
+                    0,
+                    lambda l=label, m=candidate_model, p=prompt_tag, e=reason, t=int(attempt.get("elapsed_ms", 0) or 0), s=cache_note: self._log(
+                        f"{l}: OCR ensemble {m} [{p}] fallo ({e}) | tiempo={t}ms | fuente={s}."
+                    ),
+                )
+                if is_primary_glm and self._should_retry_glm_full_prompt(reason=reason):
+                    retry_attempt = self._run_hf_ocr_candidate_attempt(
+                        label=label,
+                        model=candidate_model,
+                        path=path,
+                        timeout_s=timeout_s,
+                        start_n=start_n,
+                        prompt_text=self._get_vision_ocr_prompt(),
+                        prompt_tag="full_mathlatex_v2",
+                        max_tokens=2200,
+                        retries=retries,
+                    )
+                    retry_cache_note = "cache" if bool(retry_attempt.get("cache_hit")) else "api"
+                    if str(retry_attempt.get("status", "") or "") != "ok":
+                        retry_reason = str(retry_attempt.get("error", "") or "sin_texto")
+                        errors.append((f"{candidate_model}[full]", retry_reason))
+                        self.after(
+                            0,
+                            lambda l=label, m=candidate_model, e=retry_reason, t=int(retry_attempt.get("elapsed_ms", 0) or 0), s=retry_cache_note: self._log(
+                                f"{l}: OCR ensemble {m} [full] fallo ({e}) | tiempo={t}ms | fuente={s}."
+                            ),
+                        )
+                    else:
+                        analysis = analyze_ocr_candidate(
+                            model=candidate_model,
+                            raw_text=str(retry_attempt.get("raw_text", "") or ""),
+                            curso=curso,
+                            tema=tema,
+                            start_n=start_n,
+                        )
+                        analyses.append(analysis)
+                        fast_accept, fast_reasons = should_accept_ocr_candidate_fast(
+                            analysis,
+                            start_n=start_n,
+                            min_score=80,
+                        )
+                        if fast_accept:
+                            force_escalation, force_reason = should_escalate_from_primary_candidate(
+                                analysis,
+                                start_n=start_n,
+                            )
+                            if force_escalation:
+                                fast_accept = False
+                                fast_reasons = [force_reason]
+                        decision = "aceptado_sin_escalada" if fast_accept else "escalado"
+                        reason_text = "score_ok" if fast_accept else ",".join(fast_reasons) or "score_bajo"
+                        self._merge_ocr_candidate_cache_entry(
+                            label=label,
+                            model=candidate_model,
+                                prompt_tag="full_mathlatex_v2",
+                            start_n=start_n,
+                            patch={
+                                "score": int(analysis.score),
+                                "parsed_numbers": list(analysis.parsed_numbers),
+                                "header_numbers": list(analysis.header_numbers),
+                                "penalties": list(analysis.penalties),
+                                "bonuses": list(analysis.bonuses),
+                                "decision": decision,
+                                "decision_reason": reason_text,
+                            },
+                        )
+                        self.after(
+                            0,
+                            lambda l=label, a=analysis, r=reason_text, t=int(retry_attempt.get("elapsed_ms", 0) or 0), s=retry_cache_note: self._log(
+                                f"{l}: OCR ensemble {a.model} [full] -> score={a.score} "
+                                f"parsed={a.parsed_numbers or '-'} headers={a.header_numbers or '-'} "
+                                f"penalties={','.join(a.penalties) if a.penalties else '-'} "
+                                f"| tiempo={t}ms | fuente={s} | {'aceptado sin escalada' if r == 'score_ok' else f'escalado por {r}'}"
+                            ),
+                        )
+                        if fast_accept:
+                            selected_analysis = analysis
+                            break
+                continue
+
+            analysis = analyze_ocr_candidate(
+                model=candidate_model,
+                raw_text=str(attempt.get("raw_text", "") or ""),
+                curso=curso,
+                tema=tema,
+                start_n=start_n,
+            )
+            analyses.append(analysis)
+            fast_accept, fast_reasons = should_accept_ocr_candidate_fast(
+                analysis,
+                start_n=start_n,
+                min_score=80,
+            )
+            if fast_accept:
+                force_escalation, force_reason = should_escalate_from_primary_candidate(
+                    analysis,
+                    start_n=start_n,
+                )
+                if force_escalation:
+                    fast_accept = False
+                    fast_reasons = [force_reason]
+            decision = "aceptado_sin_escalada" if fast_accept else "escalado"
+            reason_text = "score_ok" if fast_accept else ",".join(fast_reasons) or "score_bajo"
+            self._merge_ocr_candidate_cache_entry(
+                label=label,
+                model=candidate_model,
+                prompt_tag=prompt_tag,
+                start_n=start_n,
+                patch={
+                    "score": int(analysis.score),
+                    "parsed_numbers": list(analysis.parsed_numbers),
+                    "header_numbers": list(analysis.header_numbers),
+                    "penalties": list(analysis.penalties),
+                    "bonuses": list(analysis.bonuses),
+                    "decision": decision,
+                    "decision_reason": reason_text,
+                },
+            )
+            self.after(
+                0,
+                lambda l=label, a=analysis, p=prompt_tag, r=reason_text, t=int(attempt.get("elapsed_ms", 0) or 0), s=cache_note: self._log(
+                    f"{l}: OCR ensemble {a.model} [{p}] -> score={a.score} "
+                    f"parsed={a.parsed_numbers or '-'} headers={a.header_numbers or '-'} "
+                    f"penalties={','.join(a.penalties) if a.penalties else '-'} "
+                    f"| tiempo={t}ms | fuente={s} | {'aceptado sin escalada' if r == 'score_ok' else f'escalado por {r}'}"
+                ),
+            )
+            if fast_accept:
+                selected_analysis = analysis
+                break
+
+        if selected_analysis is None and analyses:
+            valid_candidates = [
+                candidate
+                for candidate in analyses
+                if is_ocr_candidate_valid(candidate, start_n=start_n)[0]
+            ]
+            if valid_candidates:
+                selected_analysis = select_best_ocr_candidate(valid_candidates, start_n=start_n)
+            else:
+                recoverable_candidates = [
+                    candidate
+                    for candidate in analyses
+                    if is_ocr_candidate_recoverable(candidate, start_n=start_n)[0]
+                ]
+                if recoverable_candidates:
+                    selected_analysis = select_best_ocr_candidate(recoverable_candidates, start_n=start_n)
+                    self.after(
+                        0,
+                        lambda l=label, b=selected_analysis: self._log(
+                            f"{l}: OCR ensemble reutilizo candidato remoto recuperable {b.model} "
+                            f"(score={b.score}, parsed={b.parsed_numbers or '-'})."
+                        ),
+                    )
+
+        if selected_analysis is None:
+            if errors:
+                detail = " | ".join(f"{name}={reason}" for name, reason in errors)
+                raise Exception(f"Sin candidato OCR valido. {detail}")
+            raise Exception("Sin candidato OCR valido.")
+
+        best = selected_analysis
+        best_text = self._canonicalize_faithful_ocr_text(str(best.raw_text or ""), start_n=start_n)
+        self._ocr_raw_first_by_label[str(label)] = str(best_text or "")
+        total_ms = int(max(0.0, (time.perf_counter() - overall_started) * 1000.0))
+        self.after(
+            0,
+            lambda l=label, b=best, ms=total_ms: self._log(
+                f"{l}: OCR ensemble selecciono {b.model} "
+                f"(score={b.score}, parsed={b.parsed_numbers or '-'}). "
+                f"Tiempo total={ms}ms."
+            ),
+        )
+        self._merge_ocr_candidate_cache_entry(
+            label=label,
+            model=best.model,
+            prompt_tag="selected",
+            start_n=start_n,
+            patch={
+                "selected_model": best.model,
+                "selected_score": int(best.score),
+                "selected_parsed_numbers": list(best.parsed_numbers),
+                "selected_raw_text": str(best_text or ""),
+                "selected_at": datetime.now().isoformat(timespec="seconds"),
+                "total_elapsed_ms": int(total_ms),
+            },
+        )
+        return (best_text, best.model)
+
+    def _should_accept_local_ocr_fallback(
+        self,
+        *,
+        text: str,
+        start_n: int,
+        curso: str,
+        tema: str,
+    ) -> Tuple[bool, str]:
+        raw = str(text or "").strip()
+        if not raw:
+            return (False, "vacio")
+        analysis = analyze_ocr_candidate(
+            model="ocr-local",
+            raw_text=raw,
+            curso=curso,
+            tema=tema,
+            start_n=start_n,
+        )
+        if analysis.item_count > 0 and analysis.score >= 30:
+            return (True, f"score={analysis.score}, parsed={analysis.parsed_numbers or '-'}")
+        if analysis.header_numbers and analysis.score >= 24:
+            return (True, f"score={analysis.score}, headers={analysis.header_numbers}")
+        if self._looks_like_repetitive_garbage(raw):
+            return (False, f"score={analysis.score}, basura_repetitiva")
+        if len(re.findall(r"[A-Za-zÁÉÍÓÚáéíóúÑñ0-9]", raw)) < 20:
+            return (False, f"score={analysis.score}, demasiado_corto")
+        return (False, f"score={analysis.score}, parsed={analysis.parsed_numbers or '-'}")
+
+    def _resolve_hf_ocr_fallback_models(self, current_model: str) -> List[str]:
+        current = (current_model or "").strip()
+        ordered: List[str] = []
+
+        preferred = self._resolve_hf_fallback_model()
+        if preferred and preferred != current and preferred not in ordered:
+            ordered.append(preferred)
+
+        if DEFAULT_HF_VISION_MODEL and DEFAULT_HF_VISION_MODEL != current and DEFAULT_HF_VISION_MODEL not in ordered:
+            ordered.append(DEFAULT_HF_VISION_MODEL)
+
+        candidates = list(self._hf_available_vision_models or HF_MODELS)
+        for model_name in candidates:
+            name = (model_name or "").strip()
+            if not name or name == current or name in ordered:
+                continue
+            if name in self._hf_unavailable_vision_models:
+                continue
+            ordered.append(name)
+        return ordered
 
     def _is_hf_dedicated_endpoint_url(self, base_url: str) -> bool:
         return "endpoints.huggingface.cloud" in (base_url or "").strip().lower()
@@ -2884,7 +6116,12 @@ class TranscriptorWindow(tk.Toplevel):
         return any(s in msg for s in signals)
 
     def _resolve_detect_model(self, provider: str, vision_model: str) -> str:
+        provider = self._normalize_provider_label(provider)
         model = (vision_model or "").strip()
+        if provider == PROVIDER_OPENAI:
+            return model or DEFAULT_OPENAI_VISION_MODEL
+        if provider == PROVIDER_OCR:
+            return "ocr-local"
         if model in HF_MODELS:
             return model
         return DEFAULT_HF_VISION_MODEL
@@ -2983,12 +6220,7 @@ class TranscriptorWindow(tk.Toplevel):
             return
         model_path = self._resolve_bbox_detector_model_path()
         if not model_path:
-            self._log("YOLO figura: modelo no configurado (YOLO_FIGURE_MODEL). Se continua sin sugerencias.")
-            return
-        try:
-            from ultralytics import YOLO  # type: ignore  # noqa: F401
-        except Exception:
-            self._log("YOLO figura: ultralytics no disponible. Se continua sin sugerencias.")
+            self._log("YOLO figura: no se pudo resolver el modelo detector. Se continua sin sugerencias.")
             return
 
         for _idx, label, src in sources:
@@ -3033,69 +6265,113 @@ class TranscriptorWindow(tk.Toplevel):
         model_path = self._resolve_bbox_detector_model_path()
         if not model_path:
             return (None, 0.0, False)
+        detections: List[dict] = []
         try:
             from ultralytics import YOLO  # type: ignore
-        except Exception:
-            return (None, 0.0, False)
 
-        try:
-            if self._yolo_detector is None or self._yolo_detector_path != model_path:
-                self._yolo_detector = YOLO(model_path)
-                self._yolo_detector_path = model_path
+            try:
+                if self._yolo_detector is None or self._yolo_detector_path != model_path:
+                    self._yolo_detector = YOLO(model_path)
+                    self._yolo_detector_path = model_path
+                results = self._yolo_detector.predict(  # type: ignore[union-attr]
+                    source=str(path),
+                    verbose=False,
+                    conf=0.01,
+                )
+            except Exception:
+                results = []
+            for res in results or []:
+                boxes = getattr(res, "boxes", None)
+                if boxes is None:
+                    continue
+                xyxy = getattr(boxes, "xyxy", None)
+                conf = getattr(boxes, "conf", None)
+                if xyxy is None or conf is None:
+                    continue
+                try:
+                    rows = xyxy.cpu().tolist()
+                    conf_rows = conf.cpu().tolist()
+                except Exception:
+                    continue
+                try:
+                    img_h, img_w = res.orig_shape  # type: ignore[attr-defined]
+                except Exception:
+                    img_h, img_w = (0, 0)
+                if img_h <= 0 or img_w <= 0:
+                    continue
+                for row, c in zip(rows, conf_rows):
+                    if not isinstance(row, list) or len(row) < 4:
+                        continue
+                    try:
+                        score = float(c or 0.0)
+                        x1, y1, x2, y2 = [float(v) for v in row[:4]]
+                    except Exception:
+                        continue
+                    if x2 <= x1 or y2 <= y1:
+                        continue
+                    detections.append(
+                        {
+                            "bbox_norm": (
+                                max(0.0, min(1.0, x1 / float(img_w))),
+                                max(0.0, min(1.0, y1 / float(img_h))),
+                                max(0.0, min(1.0, x2 / float(img_w))),
+                                max(0.0, min(1.0, y2 / float(img_h))),
+                            ),
+                            "conf": score,
+                        }
+                    )
         except Exception:
-            return (None, 0.0, False)
-
-        try:
-            results = self._yolo_detector.predict(  # type: ignore[union-attr]
-                source=str(path),
-                verbose=False,
-                conf=0.01,
-            )
-        except Exception:
-            return (None, 0.0, False)
-        if not results:
-            return (None, 0.0, False)
+            detections = []
+        if not detections:
+            try:
+                external = getattr(self._segmentador_v2, "_predict_yolo_detections_external", None)
+                if callable(external):
+                    try:
+                        from PIL import Image  # type: ignore
+                        with Image.open(path) as im:
+                            img_w, img_h = im.size
+                    except Exception:
+                        img_w, img_h = (0, 0)
+                    if img_w > 0 and img_h > 0:
+                        rows = external(src=path, model_path=model_path, conf=0.01) or []
+                        for entry in rows:
+                            bbox_raw = entry.get("bbox_px")
+                            if not isinstance(bbox_raw, (list, tuple)) or len(bbox_raw) < 4:
+                                continue
+                            try:
+                                x1, y1, x2, y2 = [float(v) for v in bbox_raw[:4]]
+                                score = float(entry.get("conf", 0.0) or 0.0)
+                            except Exception:
+                                continue
+                            if x2 <= x1 or y2 <= y1:
+                                continue
+                            detections.append(
+                                {
+                                    "bbox_norm": (
+                                        max(0.0, min(1.0, x1 / float(img_w))),
+                                        max(0.0, min(1.0, y1 / float(img_h))),
+                                        max(0.0, min(1.0, x2 / float(img_w))),
+                                        max(0.0, min(1.0, y2 / float(img_h))),
+                                    ),
+                                    "conf": score,
+                                }
+                            )
+            except Exception:
+                detections = []
 
         best_bbox: Optional[Tuple[float, float, float, float]] = None
         best_conf = 0.0
-        for res in results:
-            boxes = getattr(res, "boxes", None)
-            if boxes is None:
-                continue
-            xyxy = getattr(boxes, "xyxy", None)
-            conf = getattr(boxes, "conf", None)
-            if xyxy is None or conf is None:
+        for det in detections:
+            nbox = det.get("bbox_norm")
+            if not isinstance(nbox, tuple) or len(nbox) < 4:
                 continue
             try:
-                rows = xyxy.cpu().tolist()
-                conf_rows = conf.cpu().tolist()
+                score = float(det.get("conf", 0.0) or 0.0)
             except Exception:
-                continue
-            try:
-                img_h, img_w = res.orig_shape  # type: ignore[attr-defined]
-            except Exception:
-                img_h, img_w = (0, 0)
-            if img_h <= 0 or img_w <= 0:
-                continue
-            for row, c in zip(rows, conf_rows):
-                if not isinstance(row, list) or len(row) < 4:
-                    continue
-                try:
-                    score = float(c or 0.0)
-                    x1, y1, x2, y2 = [float(v) for v in row[:4]]
-                except Exception:
-                    continue
-                if x2 <= x1 or y2 <= y1:
-                    continue
-                nbox = (
-                    max(0.0, min(1.0, x1 / float(img_w))),
-                    max(0.0, min(1.0, y1 / float(img_h))),
-                    max(0.0, min(1.0, x2 / float(img_w))),
-                    max(0.0, min(1.0, y2 / float(img_h))),
-                )
-                if score > best_conf:
-                    best_conf = score
-                    best_bbox = nbox
+                score = 0.0
+            if score > best_conf:
+                best_conf = score
+                best_bbox = tuple(float(v) for v in nbox[:4])  # type: ignore[assignment]
         if best_bbox is None:
             return (None, 0.0, False)
         min_conf = self._resolve_figure_min_conf()
@@ -3161,23 +6437,40 @@ class TranscriptorWindow(tk.Toplevel):
         return (None, 0.0, False, "none")
 
     def _resolve_effective_provider(self) -> str:
+        provider = self._normalize_provider_label(self.provider_var.get() or FIXED_PROVIDER)
+        if provider == PROVIDER_OPENAI:
+            if self._resolve_openai_key():
+                return provider
+            self.after(
+                0,
+                lambda: self._log(
+                    "Falta OPENAI_API_KEY. Define la clave en .env.local/.env o en variables de entorno."
+                ),
+            )
+            return provider
+        if provider == PROVIDER_OCR:
+            return provider
         if self._resolve_hf_token():
-            return FIXED_PROVIDER
+            return provider
         self.after(
             0,
             lambda: self._log(
                 "Falta HF_TOKEN. Define el token en .env.local/.env o en variables de entorno."
             ),
         )
-        return FIXED_PROVIDER
+        return provider
 
     def _listar_dbs(self) -> None:
         dbs = self.controller.listar_bases_datos()
-        self.combo_db["values"] = dbs
+        combo_db = getattr(self, "combo_db", None)
+        if self._widget_alive(combo_db):
+            self.combo_db["values"] = dbs
         if self.db_name_var.get() in dbs:
             return
         if dbs:
-            self.db_name_var.set(dbs[0])
+            configured_db = str(os.getenv("DB_NAME", "") or "").strip()
+            preferred = configured_db if configured_db in dbs else dbs[0]
+            self.db_name_var.set(preferred)
 
     def _norm_key(self, value: str) -> str:
         raw = (value or "").strip().lower()
@@ -3397,6 +6690,46 @@ class TranscriptorWindow(tk.Toplevel):
                 # Some Tk builds may not support per-item fg; fail softly.
                 return
 
+    def _refresh_image_list_color_for_source(self, source_path: Path) -> None:
+        if not self._ui_alive():
+            return
+        lb = getattr(self, "list_files", None)
+        if not self._widget_alive(lb):
+            return
+        src = Path(source_path)
+        key = self._seg_v2_source_key(src)
+        default_fg = self.palette.get("text", "#0f172a")
+        color_done = "#16a34a"
+        color_seg_only = "#d97706"
+        color_ocr_only = "#2563eb"
+        try:
+            total = int(self.list_files.size())
+        except Exception:
+            return
+        for i in range(total):
+            try:
+                label = str(self.list_files.get(i))
+            except Exception:
+                continue
+            if not self._is_base_image_label(label):
+                continue
+            candidate = self._file_map.get(label)
+            if not candidate or self._seg_v2_source_key(candidate) != key:
+                continue
+            fg = default_fg
+            ocr_done = label in self._transcribed_by_label
+            if key in self._segmentation_reviewed_sources and ocr_done:
+                fg = color_done
+            elif key in self._segmentation_reviewed_sources:
+                fg = color_seg_only
+            elif ocr_done:
+                fg = color_ocr_only
+            try:
+                self.list_files.itemconfig(i, foreground=fg)
+            except Exception:
+                return
+            break
+
     def _get_selected_labels(self) -> Set[str]:
         selected_labels: Set[str] = set()
         try:
@@ -3412,9 +6745,9 @@ class TranscriptorWindow(tk.Toplevel):
         sources: List[Tuple[int, str, Path]] = []
         seen: Set[str] = set()
         try:
-            v2_root = (self._runs_dir / "v2_segments").resolve()
+            v2_root = Path(self._segmentador_v2.out_root).resolve()
         except Exception:
-            v2_root = self._runs_dir / "v2_segments"
+            v2_root = Path(self._segmentador_v2.out_root)
         try:
             mask_root = (self._runs_dir / "ocr_masked").resolve()
         except Exception:
@@ -3444,8 +6777,11 @@ class TranscriptorWindow(tk.Toplevel):
         return sources
 
     def _mark_source_reviewed(self, source_path: Path) -> None:
-        self._segmentation_reviewed_sources.add(self._seg_v2_source_key(source_path))
-        self._refresh_image_list_colors()
+        key = self._seg_v2_source_key(source_path)
+        already = key in self._segmentation_reviewed_sources
+        self._segmentation_reviewed_sources.add(key)
+        if not already:
+            self._refresh_image_list_color_for_source(source_path)
 
     def _next_unreviewed_source(
         self, *, start_after_idx: int = -1, selected_labels: Optional[Set[str]] = None
@@ -3460,6 +6796,29 @@ class TranscriptorWindow(tk.Toplevel):
             if key not in self._segmentation_reviewed_sources:
                 return (idx, label, src)
         return None
+
+    def _adjacent_review_source(
+        self,
+        *,
+        current_idx: int,
+        direction: int,
+        selected_labels: Optional[Set[str]] = None,
+    ) -> Optional[Tuple[int, str, Path]]:
+        sources = self._collect_review_sources(selected_labels=selected_labels)
+        if not sources:
+            return None
+        if direction > 0:
+            for entry in sources:
+                if entry[0] > current_idx:
+                    return entry
+            return None
+        previous_entry: Optional[Tuple[int, str, Path]] = None
+        for entry in sources:
+            if entry[0] < current_idx:
+                previous_entry = entry
+            else:
+                break
+        return previous_entry
 
     def _refresh_segmentation_done_state(self, *, selected_labels: Optional[Set[str]] = None) -> bool:
         sources = self._collect_review_sources(selected_labels=selected_labels)
@@ -3486,7 +6845,60 @@ class TranscriptorWindow(tk.Toplevel):
                 pending_labels.append(label)
         return (reviewed, total, pending_labels)
 
+    def _source_has_segmentation_v2_cached(self, source_path: Path) -> bool:
+        try:
+            key = self._seg_v2_source_key(source_path)
+        except Exception:
+            key = str(source_path).lower()
+        if key in self._segmentacion_v2_overrides:
+            return True
+        if key in self._segmentacion_v2_runtime_cache:
+            return True
+        try:
+            return bool(self._segmentador_v2._has_cached_segment_decision(Path(source_path)))
+        except Exception:
+            return False
+
+    def _open_segment_editor_from_current_selection(self, *, reset_progress: bool = False) -> None:
+        if reset_progress:
+            self._segmentation_review_done = False
+            self._segmentation_route_active = False
+            self._segmentation_reviewed_sources.clear()
+            self._refresh_image_list_colors()
+        selected_now = self._get_selected_labels()
+        scope_labels: Optional[Set[str]] = set(selected_now) if selected_now else None
+        if scope_labels is not None:
+            self._segmentation_scope_labels = scope_labels
+        elif reset_progress:
+            self._segmentation_scope_labels = None
+        active_scope = self._segmentation_scope_labels
+        sources = self._collect_review_sources(selected_labels=active_scope)
+        if not sources:
+            messagebox.showwarning("Segmentacion V2", "No hay imagenes validas para abrir en el editor.")
+            return
+        selected_indices = list(self.list_files.curselection())
+        target_entry: Optional[Tuple[int, str, Path]] = None
+        if selected_indices:
+            wanted = set(int(v) for v in selected_indices)
+            for entry in sources:
+                if int(entry[0]) in wanted:
+                    target_entry = entry
+                    break
+        if target_entry is None:
+            target_entry = sources[0]
+        target_idx, _target_label, target_path = target_entry
+        self._segmentation_route_active = True
+        if not active_scope:
+            self.list_files.selection_clear(0, "end")
+            self.list_files.selection_set(target_idx)
+        self.list_files.activate(target_idx)
+        self.list_files.see(target_idx)
+        self._open_segment_editor_for_source(target_path)
+
     def _start_segmentation_review(self, *, reset_progress: bool = True) -> None:
+        if self._transcribing:
+            messagebox.showinfo("Segmentacion", "Ya hay un proceso en curso.")
+            return
         if reset_progress:
             self._segmentation_review_done = False
             self._segmentation_route_active = False
@@ -3503,7 +6915,18 @@ class TranscriptorWindow(tk.Toplevel):
         if total <= 0:
             messagebox.showwarning("Segmentacion V2", "Agrega al menos una imagen para segmentar.")
             return
-        self._prefetch_yolo_figure_suggestions(selected_labels=active_scope)
+        sources = self._collect_review_sources(selected_labels=active_scope)
+        if not sources:
+            messagebox.showwarning("Segmentacion V2", "No hay imagenes validas para segmentar.")
+            return
+        if all(self._source_has_segmentation_v2_cached(src) for _idx, _label, src in sources):
+            if active_scope:
+                self._log("Paso 1: reutilizando segmentacion existente en la seleccion actual.")
+            else:
+                self._log("Paso 1: reutilizando segmentacion existente en el lote actual.")
+            self._log("Se abre el editor sin volver a pasar por el modelo. Usa 'Abrir editor segmentos' para entrar directo la proxima vez.")
+            self._open_segment_editor_from_current_selection(reset_progress=False)
+            return
         pending = self._next_unreviewed_source(start_after_idx=-1, selected_labels=active_scope)
         if pending is None:
             if self._refresh_segmentation_done_state(selected_labels=active_scope):
@@ -3542,7 +6965,10 @@ class TranscriptorWindow(tk.Toplevel):
         )
         if pending:
             self._log(f"Pendiente actual: {pending[0]}")
-        self._open_segment_editor_for_source(first_path)
+        self._prefetch_segments_v2_for_review_sources_async(
+            selected_labels=active_scope,
+            open_first_path=first_path,
+        )
 
     def _add_images(self) -> None:
         selected = filedialog.askopenfilenames(
@@ -3647,6 +7073,8 @@ class TranscriptorWindow(tk.Toplevel):
             self.list_files.delete(idx)
             self._transcribed_by_label.pop(str(label), None)
             self._ocr_raw_first_by_label.pop(str(label), None)
+            self._ocr_candidate_cache_by_label.pop(str(label), None)
+            self._ocr_structured_by_label.pop(str(label), None)
             if src is not None:
                 self._yolo_figure_suggestions_by_source.pop(self._seg_v2_source_key(src), None)
             base = str(label)
@@ -3694,25 +7122,12 @@ class TranscriptorWindow(tk.Toplevel):
                 return i
         return -1
 
-    def _open_segment_editor_for_source(self, source_path: Path) -> None:
+    def _open_segment_editor_for_source(self, source_path: Path, *, reuse_top: Optional[tk.Toplevel] = None) -> None:
         if not source_path or not source_path.exists():
             self._log("Segmentacion V2: imagen no disponible para editor.")
             return
         key = self._seg_v2_source_key(source_path)
         using_override = key in self._segmentacion_v2_overrides
-        if self._get_ocr_exclusion_box(source_path) is None:
-            cached = self._get_cached_yolo_suggestion(source_path)
-            if not cached:
-                bbox, conf, has_fig = self._detect_figure_bbox_yolo(path=source_path)
-                self._set_cached_yolo_suggestion(
-                    source_path,
-                    {
-                        "has_figure": bool(has_fig and bbox is not None),
-                        "bbox_norm": bbox,
-                        "conf": conf,
-                        "source": "yolo" if has_fig and bbox is not None else "none",
-                    },
-                )
         segments = self._get_segments_v2_for_source(source_path)
         if using_override:
             self._log(f"Segmentacion V2 fuente {source_path.name}: override_manual.")
@@ -3720,7 +7135,7 @@ class TranscriptorWindow(tk.Toplevel):
             source_mode = str(getattr(self._segmentador_v2, "last_detector_source", "projection_v2") or "projection_v2").strip()
             self._log(f"Segmentacion V2 fuente {source_path.name}: {source_mode}.")
         boxes = [tuple(int(v) for v in seg.bbox) for seg in segments]
-        self._open_segment_editor_v2(source_path=source_path, initial_boxes=boxes)
+        self._open_segment_editor_v2(source_path=source_path, initial_boxes=boxes, reuse_top=reuse_top)
 
     def _seg_v2_source_key(self, source_path: Path) -> str:
         try:
@@ -3767,7 +7182,49 @@ class TranscriptorWindow(tk.Toplevel):
           ENDLEADING
         Returns: (continuation_text, options_dict, cleaned_text_without_leading_block)
         """
-        base = self.controller.normalizar_item_una_linea(self._decode_scan_escapes(text or ""))
+        raw_text = str(text or "").strip()
+        if not raw_text:
+            return ("", {}, "")
+
+        candidate_text = raw_text
+        if candidate_text.startswith("```"):
+            candidate_text = re.sub(r"^```(?:json|JSON)?", "", candidate_text).strip()
+            candidate_text = re.sub(r"```$", "", candidate_text).strip()
+
+        try:
+            payload = json.loads(candidate_text)
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            cont_candidate = str(
+                payload.get("leading_continuation", "")
+                or payload.get("leading_statement", "")
+                or ""
+            ).strip()
+            cont_text = self.controller.normalizar_item_una_linea(self._decode_scan_escapes(cont_candidate))
+
+            options: Dict[str, str] = {}
+            raw_leading_opts = payload.get("leading_options", {})
+            if isinstance(raw_leading_opts, dict):
+                options = self._non_placeholder_options(raw_leading_opts)
+            elif raw_leading_opts:
+                _enu, options = self._extract_options_loose(
+                    self.controller.normalizar_item_una_linea(self._decode_scan_escapes(str(raw_leading_opts)))
+                )
+                options = self._non_placeholder_options(options)
+            if cont_text and not options:
+                enu_candidate, cont_options = self._extract_options_loose(cont_text)
+                cont_options = self._non_placeholder_options(cont_options)
+                if cont_options:
+                    cont_text = self._clean_summary_continuation_text(str(enu_candidate or ""))
+                    options = cont_options
+            if cont_text and not options:
+                cont_text = self._clean_summary_continuation_text(cont_text)
+
+            if cont_text or options:
+                return (cont_text, options, candidate_text)
+
+        base = self.controller.normalizar_item_una_linea(self._decode_scan_escapes(candidate_text))
         if not base:
             return ("", {}, "")
 
@@ -3793,10 +7250,139 @@ class TranscriptorWindow(tk.Toplevel):
             opt_block = self.controller.normalizar_item_una_linea(opt_match.group(1) or "")
             _enu, options = self._extract_options_loose(opt_block)
             work = (work[: opt_match.start()] + " " + work[opt_match.end() :]).strip()
+        if cont_text and not self._non_placeholder_options(options):
+            enu_candidate, cont_options = self._extract_options_loose(cont_text)
+            cont_options = self._non_placeholder_options(cont_options)
+            if cont_options:
+                cont_text = self._clean_summary_continuation_text(str(enu_candidate or ""))
+                options = cont_options
+        if cont_text and not self._non_placeholder_options(options):
+            cont_text = self._clean_summary_continuation_text(cont_text)
 
         work = re.sub(r"(?i)\bENDLEADING\b", " ", work)
         work = re.sub(r"\s+", " ", work).strip()
         return (cont_text, options, work)
+
+    def _extract_structured_leading_figure_hint(self, text: str) -> bool:
+        raw_text = str(text or "").strip()
+        if not raw_text:
+            return False
+        candidate_text = raw_text
+        if candidate_text.startswith("```"):
+            candidate_text = re.sub(r"^```(?:json|JSON)?", "", candidate_text).strip()
+            candidate_text = re.sub(r"```$", "", candidate_text).strip()
+        try:
+            payload = json.loads(candidate_text)
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict):
+            return False
+        return bool(
+            payload.get("leading_has_figure")
+            or payload.get("leading_figure")
+            or payload.get("leading_figure_hint")
+        )
+
+    def _extract_structured_leading_option_labels(self, text: str) -> List[str]:
+        raw_text = str(text or "").strip()
+        if not raw_text:
+            return []
+        candidate_text = raw_text
+        if candidate_text.startswith("```"):
+            candidate_text = re.sub(r"^```(?:json|JSON)?", "", candidate_text).strip()
+            candidate_text = re.sub(r"```$", "", candidate_text).strip()
+        try:
+            payload = json.loads(candidate_text)
+        except Exception:
+            payload = None
+        labels: List[str] = []
+        seen: Set[str] = set()
+        if isinstance(payload, dict):
+            raw_labels = payload.get("leading_option_labels", [])
+            if isinstance(raw_labels, list):
+                for raw_label in raw_labels:
+                    label = self._normalize_binding_slot(str(raw_label or ""))
+                    if label in {"A", "B", "C", "D", "E"} and label not in seen:
+                        seen.add(label)
+                        labels.append(label)
+            raw_options = payload.get("leading_options", {})
+            if isinstance(raw_options, dict):
+                for raw_label in raw_options.keys():
+                    label = self._normalize_binding_slot(str(raw_label or ""))
+                    if label in {"A", "B", "C", "D", "E"} and label not in seen:
+                        seen.add(label)
+                        labels.append(label)
+            if labels:
+                return labels
+
+        base = self.controller.normalizar_item_una_linea(self._decode_scan_escapes(candidate_text))
+        for raw_label in self._extract_option_label_sequence(base):
+            label = self._normalize_binding_slot(str(raw_label or ""))
+            if label in {"A", "B", "C", "D", "E"} and label not in seen:
+                seen.add(label)
+                labels.append(label)
+        return labels
+
+    def _merge_graphic_detector_payload_into_structured_text(
+        self,
+        *,
+        structured_text: str,
+        detector_payload: Dict[str, Any],
+    ) -> str:
+        payload = detector_payload if isinstance(detector_payload, dict) else {}
+        raw_labels = list(payload.get("option_labels_visible", []) or [])
+        labels: List[str] = []
+        seen: Set[str] = set()
+        for raw_label in raw_labels:
+            label = self._normalize_binding_slot(str(raw_label or ""))
+            if label in {"A", "B", "C", "D", "E"} and label not in seen:
+                seen.add(label)
+                labels.append(label)
+        has_graphic_hint = bool(
+            payload.get("has_figure")
+            or payload.get("contains_option_graphs")
+            or str(payload.get("figure_scope", "") or "").strip().lower() in {"options_only", "statement_and_options", "statement"}
+        )
+        if not labels and not has_graphic_hint:
+            return str(structured_text or "")
+
+        candidate_text = str(structured_text or "").strip()
+        if candidate_text.startswith("```"):
+            candidate_text = re.sub(r"^```(?:json|JSON)?", "", candidate_text).strip()
+            candidate_text = re.sub(r"```$", "", candidate_text).strip()
+        try:
+            current_payload = json.loads(candidate_text) if candidate_text else {}
+        except Exception:
+            current_payload = {}
+        if not isinstance(current_payload, dict):
+            current_payload = {}
+
+        merged: Dict[str, Any] = {
+            "leading_continuation": str(current_payload.get("leading_continuation", "") or ""),
+            "leading_options": dict(current_payload.get("leading_options", {}) or {}),
+            "leading_option_labels": list(current_payload.get("leading_option_labels", []) or []),
+            "leading_has_figure": bool(current_payload.get("leading_has_figure", False)),
+            "items": [dict(it) for it in list(current_payload.get("items", []) or []) if isinstance(it, dict)],
+        }
+        if str(merged.get("leading_continuation", "") or "").strip().startswith("[SIN TEXTO]"):
+            merged["leading_continuation"] = ""
+
+        merged_labels: List[str] = []
+        seen_labels: Set[str] = set()
+        for raw_label in list(merged.get("leading_option_labels", []) or []) + labels:
+            label = self._normalize_binding_slot(str(raw_label or ""))
+            if label in {"A", "B", "C", "D", "E"} and label not in seen_labels:
+                seen_labels.add(label)
+                merged_labels.append(label)
+        if not merged_labels and isinstance(merged.get("leading_options"), dict):
+            for raw_label in list(merged["leading_options"].keys()):
+                label = self._normalize_binding_slot(str(raw_label or ""))
+                if label in {"A", "B", "C", "D", "E"} and label not in seen_labels:
+                    seen_labels.add(label)
+                    merged_labels.append(label)
+        merged["leading_option_labels"] = merged_labels
+        merged["leading_has_figure"] = bool(merged.get("leading_has_figure") or has_graphic_hint)
+        return json.dumps(merged, ensure_ascii=False, indent=2)
 
     def _extract_leading_continuation_payload(
         self, text: str, *, force_prefix: bool = False
@@ -3868,6 +7454,7 @@ class TranscriptorWindow(tk.Toplevel):
             rf"(?i)\bITEM\s+{n}\s*:",
             rf"(?i)\\item\s*\[\s*\\textbf\s*\{{\s*{n}\.?\s*\}}\s*\]",
             rf"(?i)\bproblema\b[^0-9]{{0,20}}\b{n}\b",
+            rf"(?<![0-9]){n}\s*[\)\].:](?=\s*[A-Za-zÁÉÍÓÚÜÑáéíóúüñ¿¡])",
         )
         cut: Optional[int] = None
         for pat in patterns:
@@ -3885,6 +7472,17 @@ class TranscriptorWindow(tk.Toplevel):
         if not prefix:
             return ("", base)
         return (prefix, rest)
+
+    def _has_pending_prefix_continuation_signal(self, text: str) -> bool:
+        prefix, _rest = self._extract_leading_continuation_payload(text or "", force_prefix=True)
+        prefix = str(prefix or "").strip()
+        if not prefix:
+            return False
+        enu, opts = self._extract_options_loose(prefix)
+        if opts:
+            return True
+        cleaned = self._clean_summary_continuation_text(str(enu or prefix))
+        return bool(cleaned)
 
     def _normalize_merge_note_text(self, text: str, *, max_len: int = 360) -> str:
         value = self.controller.normalizar_item_una_linea(self._decode_scan_escapes(text or ""))
@@ -3935,6 +7533,452 @@ class TranscriptorWindow(tk.Toplevel):
             or self._extract_structured_item_number(item)
             or fallback
         )
+
+    def _loaded_image_labels_in_order(self) -> List[str]:
+        labels: List[str] = []
+        try:
+            total = int(self.list_files.size())
+        except Exception:
+            total = 0
+        for idx in range(total):
+            try:
+                labels.append(str(self.list_files.get(idx)))
+            except Exception:
+                continue
+        if labels:
+            return labels
+        file_map_labels = [str(label) for label in self._file_map.keys()]
+        if file_map_labels:
+            return file_map_labels
+        return sorted(str(key) for key in self._ocr_raw_first_by_label.keys())
+
+    def _prior_loaded_labels(
+        self,
+        *,
+        current_label: Optional[str],
+        fallback_idx: int,
+    ) -> List[str]:
+        ordered_labels = self._loaded_image_labels_in_order()
+        if not ordered_labels:
+            return []
+        current_key = str(current_label or "").strip()
+        if current_key and current_key in ordered_labels:
+            prior_labels = ordered_labels[: ordered_labels.index(current_key)]
+        else:
+            limit = max(0, int(fallback_idx or 1) - 1)
+            prior_labels = ordered_labels[:limit]
+        return [str(label) for label in prior_labels if str(label).strip()]
+
+    def _advance_number_hint_from_label(self, *, label: str, current_hint: int) -> int:
+        next_hint = max(1, int(current_hint or 1))
+        key = str(label or "").strip()
+        if not key:
+            return next_hint
+
+        structured_text = str(self._ocr_structured_by_label.get(key, "") or "").strip()
+        if structured_text:
+            try:
+                payload = json.loads(structured_text)
+            except Exception:
+                payload = None
+            if isinstance(payload, dict):
+                items = [dict(it) for it in list(payload.get("items", []) or []) if isinstance(it, dict)]
+                if items:
+                    if should_continue_numbering_for_items(items, start_n=next_hint):
+                        return next_hint + len(items)
+                    numbers = []
+                    for raw_item in items:
+                        try:
+                            value = int(raw_item.get("n", 0) or 0)
+                        except Exception:
+                            value = 0
+                        if value > 0:
+                            numbers.append(value)
+                    if numbers:
+                        return max(next_hint, max(numbers) + 1)
+
+        raw_text = str(self._ocr_raw_first_by_label.get(key, "") or "").strip()
+        if not raw_text or raw_text.startswith("[ERROR"):
+            return next_hint
+        try:
+            headers = self._extract_faithful_header_numbers(raw_text)
+        except Exception:
+            headers = []
+        if not headers:
+            return next_hint
+        if next_hint >= 20 and headers[0] < next_hint and headers[0] <= 15:
+            return next_hint + len(headers)
+        return max(next_hint, max(headers) + 1)
+
+    def _extract_faithful_header_numbers(self, text: str) -> List[int]:
+        raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+        if not raw:
+            return []
+        values: List[int] = []
+        seen: Set[int] = set()
+        patterns = (
+            r"(?m)^\s*<\s*(\d{1,4})\s*\.\s*>",
+            r"(?m)^\s*(\d{1,4})\s*[.)](?=\s)",
+            r"(?m)^\s*[\(\[]\s*(\d{1,4})\s*[\)\]](?=\s)",
+        )
+        for pattern in patterns:
+            for match in re.finditer(pattern, raw):
+                try:
+                    value = int(match.group(1))
+                except Exception:
+                    continue
+                if value <= 0 or value in seen:
+                    continue
+                seen.add(value)
+                values.append(value)
+        return values
+
+    def _rolling_number_hint_from_prior_labels(
+        self,
+        *,
+        current_label: Optional[str],
+        fallback_idx: int,
+    ) -> Tuple[int, bool]:
+        rolling_hint = 1
+        advanced = False
+        for label in self._prior_loaded_labels(current_label=current_label, fallback_idx=fallback_idx):
+            updated_hint = self._advance_number_hint_from_label(label=label, current_hint=rolling_hint)
+            if updated_hint != rolling_hint:
+                advanced = True
+            rolling_hint = updated_hint
+        return (max(1, int(rolling_hint or 1)), advanced)
+
+    def _next_item_number_hint(
+        self,
+        pending_idx: Optional[int],
+        fallback_idx: int,
+        *,
+        current_label: Optional[str] = None,
+    ) -> int:
+        pending_num = self._pending_item_number(pending_idx, fallback=0)
+        if pending_num > 0:
+            return pending_num + 1
+
+        rolling_hint, has_prior_label_signal = self._rolling_number_hint_from_prior_labels(
+            current_label=current_label,
+            fallback_idx=fallback_idx,
+        )
+        if has_prior_label_signal:
+            return rolling_hint
+
+        max_num = 0
+        for idx in range(len(self._items)):
+            current_num = self._pending_item_number(idx, fallback=0)
+            if current_num > max_num:
+                max_num = current_num
+        if max_num <= 0:
+            max_num = max(0, int(rolling_hint) - 1)
+        if max_num > 0:
+            return max_num + 1
+        return max(1, int(fallback_idx or 1))
+
+    def _rewrite_structured_payload_items(
+        self,
+        *,
+        structured_text: str,
+        structured_items: List[Dict[str, Any]],
+    ) -> str:
+        raw = str(structured_text or "").strip()
+        if not raw:
+            return raw
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            return raw
+        if not isinstance(payload, dict):
+            return raw
+        payload["items"] = [dict(it) for it in structured_items if isinstance(it, dict)]
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    def _repair_structured_result_against_raw_ocr(
+        self,
+        *,
+        label: str,
+        structured_text: str,
+        structured_items: List[Dict[str, Any]],
+        raw_output: str,
+        curso: str,
+        tema: str,
+        start_number_hint: int,
+    ) -> Tuple[str, List[Dict[str, Any]], List[str]]:
+        items = [dict(it) for it in list(structured_items or []) if isinstance(it, dict)]
+        raw = str(raw_output or "").strip()
+        if not items or not raw:
+            return (str(structured_text or ""), items, [])
+        if raw.startswith("{"):
+            return (str(structured_text or ""), items, [])
+        if raw.startswith("["):
+            try:
+                parsed_raw = json.loads(raw)
+            except Exception:
+                parsed_raw = None
+            if isinstance(parsed_raw, (dict, list)):
+                return (str(structured_text or ""), items, [])
+
+        repaired_items = _merge_structured_items_with_local_ocr(
+            model_items=items,
+            raw_output=raw,
+            curso=curso,
+            tema=tema,
+            start_n=max(1, int(start_number_hint or 1)),
+        )
+        if not repaired_items:
+            return (str(structured_text or ""), items, [])
+
+        old_signature = json.dumps(items, ensure_ascii=False, sort_keys=True)
+        new_signature = json.dumps(repaired_items, ensure_ascii=False, sort_keys=True)
+        if old_signature == new_signature:
+            return (str(structured_text or ""), items, [])
+
+        rewritten_text = self._rewrite_structured_payload_items(
+            structured_text=str(structured_text or ""),
+            structured_items=repaired_items,
+        )
+        notes = [f"{label}: JSON cacheado reparado contra OCR fiel antes de renderizar."]
+        return (rewritten_text, repaired_items, notes)
+
+    def _enrich_structured_result_with_segmentation(
+        self,
+        *,
+        label: str,
+        path: Path,
+        structured_text: str,
+        structured_items: List[Dict[str, Any]],
+    ) -> Tuple[str, List[Dict[str, Any]], List[str]]:
+        items = [dict(it) for it in list(structured_items or []) if isinstance(it, dict)]
+        if not items:
+            return (str(structured_text or ""), items, [])
+
+        try:
+            segment_count = len(self._get_segment_boxes_for_ocr_flow(path))
+        except Exception:
+            segment_count = 0
+        if segment_count <= 0:
+            return (str(structured_text or ""), items, [])
+
+        plan: Dict[int, int] = {}
+        item_count = len(items)
+        if item_count == 1:
+            plan[0] = 0
+        elif item_count == segment_count:
+            for idx in range(item_count):
+                plan[idx] = idx
+        else:
+            scored: List[Tuple[int, int]] = []
+            for idx, item in enumerate(items):
+                statement = self._decode_scan_escapes(str(item.get("statement", "") or ""))
+                score = self._item_image_hint_score(statement)
+                if score > 0:
+                    scored.append((score, idx))
+            scored.sort(key=lambda row: (-row[0], row[1]))
+            for rel_idx, (_score, item_idx) in enumerate(scored[:segment_count]):
+                plan[item_idx] = rel_idx
+
+        if not plan:
+            return (str(structured_text or ""), items, [])
+
+        changed_nums: List[int] = []
+        for item_idx in sorted(plan):
+            if item_idx < 0 or item_idx >= len(items):
+                continue
+            item = dict(items[item_idx])
+            try:
+                n_val = int(item.get("n", 0) or 0)
+            except Exception:
+                n_val = 0
+            if n_val <= 0:
+                continue
+            was_figure = bool(item.get("has_figure", False))
+            old_tag = str(item.get("figure_tag", "") or "").strip()
+            item["has_figure"] = True
+            item["figure_tag"] = old_tag or f"img-{n_val}"
+            items[item_idx] = item
+            if (not was_figure) or (not old_tag):
+                changed_nums.append(int(n_val))
+
+        if not changed_nums:
+            return (str(structured_text or ""), items, [])
+
+        rewritten_text = self._rewrite_structured_payload_items(
+            structured_text=str(structured_text or ""),
+            structured_items=items,
+        )
+        preview = ", ".join(str(n) for n in changed_nums[:8])
+        extra = "" if len(changed_nums) <= 8 else f" (+{len(changed_nums) - 8} mas)"
+        notes = [
+            f"{label}: JSON estructurado enriquecido con segmentacion -> Imagen en item(s) {preview}{extra}."
+        ]
+        return (rewritten_text, items, notes)
+
+    def _normalize_small_number_outliers_in_structured_result(
+        self,
+        *,
+        label: str,
+        structured_text: str,
+        structured_items: List[Dict[str, Any]],
+        start_number_hint: int,
+    ) -> Tuple[str, List[Dict[str, Any]], List[str]]:
+        items = [dict(it) for it in list(structured_items or []) if isinstance(it, dict)]
+        if not items:
+            return (str(structured_text or ""), items, [])
+
+        expected = max(1, int(start_number_hint or 1))
+        adjusted_items: List[Dict[str, Any]] = []
+        mapping: List[Tuple[int, int]] = []
+
+        for raw_item in items:
+            item = dict(raw_item)
+            try:
+                old_n = int(item.get("n", 0) or 0)
+            except Exception:
+                old_n = 0
+            new_n = normalize_small_number_outlier(raw_num=old_n, start_n=expected)
+            if new_n > 0 and new_n != old_n:
+                item["n"] = int(new_n)
+                if bool(item.get("has_figure")):
+                    item["figure_tag"] = f"img-{new_n}"
+                mapping.append((old_n, new_n))
+            adjusted_items.append(item)
+            try:
+                current_n = int(item.get("n", 0) or 0)
+            except Exception:
+                current_n = 0
+            if current_n > 0:
+                expected = current_n + 1
+
+        if not mapping:
+            return (str(structured_text or ""), adjusted_items, [])
+
+        rewritten_text = self._rewrite_structured_payload_items(
+            structured_text=str(structured_text or ""),
+            structured_items=adjusted_items,
+        )
+        compact_mapping = [f"{old}->{new}" for (old, new) in mapping if old > 0 and old != new]
+        preview = ", ".join(compact_mapping[:6])
+        extra = "" if len(compact_mapping) <= 6 else f" (+{len(compact_mapping) - 6} mas)"
+        notes = [f"{label}: encabezados OCR atipicos saneados ({preview}{extra})."]
+        return (rewritten_text, adjusted_items, notes)
+
+    def _apply_continuous_numbering_to_structured_result(
+        self,
+        *,
+        label: str,
+        structured_text: str,
+        structured_items: List[Dict[str, Any]],
+        start_number_hint: int,
+    ) -> Tuple[str, List[Dict[str, Any]], List[str]]:
+        items = [dict(it) for it in list(structured_items or []) if isinstance(it, dict)]
+        if not items:
+            return (str(structured_text or ""), items, [])
+        if not should_continue_numbering_for_items(items, start_n=start_number_hint):
+            return (str(structured_text or ""), items, [])
+
+        renumbered_items, mapping = renumber_items_continuously(items, start_n=start_number_hint)
+        rewritten_text = self._rewrite_structured_payload_items(
+            structured_text=str(structured_text or ""),
+            structured_items=renumbered_items,
+        )
+        compact_mapping = [f"{old}->{new}" for (old, new) in mapping if old > 0 and old != new]
+        notes: List[str] = []
+        if compact_mapping:
+            preview = ", ".join(compact_mapping[:6])
+            extra = "" if len(compact_mapping) <= 6 else f" (+{len(compact_mapping) - 6} mas)"
+            notes.append(f"{label}: reinicio detectado; numeracion continua aplicada ({preview}{extra}).")
+        else:
+            notes.append(f"{label}: reinicio detectado; numeracion continua aplicada desde {start_number_hint}.")
+        return (rewritten_text, renumbered_items, notes)
+
+    def _collapse_fragmented_structured_items(
+        self,
+        *,
+        label: str,
+        structured_text: str,
+        structured_items: List[Dict[str, Any]],
+    ) -> Tuple[str, List[Dict[str, Any]], List[str]]:
+        items = [dict(it) for it in list(structured_items or []) if isinstance(it, dict)]
+        if len(items) < 2:
+            return (str(structured_text or ""), items, [])
+
+        collapsed_items: List[Dict[str, Any]] = []
+        notes: List[str] = []
+        idx = 0
+
+        while idx < len(items):
+            current = dict(items[idx])
+            idx += 1
+            while idx < len(items):
+                following = dict(items[idx])
+                try:
+                    current_num = int(current.get("n", 0) or 0)
+                except Exception:
+                    current_num = 0
+                try:
+                    following_num = int(following.get("n", 0) or 0)
+                except Exception:
+                    following_num = 0
+
+                current_statement = self.controller.normalizar_item_una_linea(
+                    self._decode_scan_escapes(str(current.get("statement", "") or ""))
+                )
+                following_statement = self.controller.normalizar_item_una_linea(
+                    self._decode_scan_escapes(str(following.get("statement", "") or ""))
+                )
+                current_options = self._non_placeholder_options(current.get("options"))
+                following_options = self._non_placeholder_options(following.get("options"))
+                should_merge = should_merge_fragmented_item_into_previous(
+                    previous_num=current_num,
+                    previous_statement=current_statement,
+                    previous_options=current_options,
+                    incoming_num=following_num,
+                    incoming_statement=following_statement,
+                    incoming_options=following_options,
+                )
+                if not should_merge:
+                    break
+
+                merged_statement = merge_statement_fragments(current_statement, following_statement)
+                if merged_statement:
+                    current["statement"] = merged_statement
+                elif following_statement:
+                    current["statement"] = following_statement
+
+                merged_options = dict(current.get("options", {}) or {})
+                for opt_label, opt_value in following_options.items():
+                    current_value = str(merged_options.get(opt_label, "") or "").strip()
+                    if (not current_value) or self._is_placeholder_option_value(current_value):
+                        merged_options[opt_label] = opt_value
+                current["options"] = merged_options
+                current["has_figure"] = bool(current.get("has_figure", False)) or bool(
+                    following.get("has_figure", False)
+                )
+                current["needs_review"] = bool(current.get("needs_review", False)) or bool(
+                    following.get("needs_review", False)
+                )
+                if bool(current.get("has_figure")) and not str(current.get("figure_tag", "") or "").strip():
+                    current["figure_tag"] = f"img-{current_num}" if current_num > 0 else ""
+
+                incoming_display = following_num if following_num > 0 else "?"
+                current_display = current_num if current_num > 0 else "?"
+                notes.append(
+                    f"{label}: fragmento estructurado fusionado {current_display} <- {incoming_display}."
+                )
+                idx += 1
+
+            collapsed_items.append(current)
+
+        if len(collapsed_items) == len(items):
+            return (str(structured_text or ""), items, [])
+
+        rewritten_text = self._rewrite_structured_payload_items(
+            structured_text=str(structured_text or ""),
+            structured_items=collapsed_items,
+        )
+        return (rewritten_text, collapsed_items, notes)
 
     def _attach_segment_to_existing_item(
         self,
@@ -4191,6 +8235,138 @@ class TranscriptorWindow(tk.Toplevel):
             return None
         return tuple(int(v) for v in bbox)  # type: ignore[return-value]
 
+    def _run_segment_box_picker_ui(
+        self,
+        image_path: Path,
+    ) -> Optional[Tuple[int, int, int, int]]:
+        try:
+            from PIL import Image, ImageTk  # type: ignore
+        except Exception:
+            messagebox.showwarning("Nuevo segmento", "Falta Pillow. Instala: python -m pip install pillow")
+            return None
+
+        try:
+            image = Image.open(image_path)
+        except Exception as exc:
+            messagebox.showerror("Nuevo segmento", f"No se pudo abrir la imagen:\n{exc}")
+            return None
+
+        max_w, max_h = 1280, 820
+        scale = min(max_w / max(image.width, 1), max_h / max(image.height, 1), 1.0)
+        disp_w = max(1, int(round(image.width * scale)))
+        disp_h = max(1, int(round(image.height * scale)))
+        preview_im = image.resize((disp_w, disp_h)) if scale < 1.0 else image.copy()
+
+        top = tk.Toplevel(self)
+        top.title(f"Nuevo segmento - {image_path.name}")
+        fixed_w, fixed_h = 1180, 860
+        top.geometry(f"{fixed_w}x{fixed_h}")
+        top.minsize(fixed_w, fixed_h)
+        top.maxsize(fixed_w, fixed_h)
+        top.transient(self)
+        top.grab_set()
+
+        frm = ttk.Frame(top, padding=10)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(frm, text="Dibuja el nuevo cuadro del segmento con el mouse.").pack(anchor="w")
+
+        canvas_wrap = ttk.Frame(frm)
+        canvas_wrap.pack(fill="both", expand=True, pady=(8, 0))
+        canvas = tk.Canvas(
+            canvas_wrap,
+            width=min(disp_w, fixed_w - 70),
+            height=min(disp_h, fixed_h - 180),
+            bg="#111827",
+            highlightthickness=1,
+            highlightbackground="#374151",
+        )
+        canvas_scroll_y = ttk.Scrollbar(canvas_wrap, orient="vertical", command=canvas.yview)
+        canvas_scroll_x = ttk.Scrollbar(canvas_wrap, orient="horizontal", command=canvas.xview)
+        canvas.configure(yscrollcommand=canvas_scroll_y.set, xscrollcommand=canvas_scroll_x.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        canvas_scroll_y.grid(row=0, column=1, sticky="ns")
+        canvas_scroll_x.grid(row=1, column=0, sticky="ew")
+        canvas_wrap.grid_rowconfigure(0, weight=1)
+        canvas_wrap.grid_columnconfigure(0, weight=1)
+        tk_img = ImageTk.PhotoImage(preview_im)
+        canvas.create_image(0, 0, anchor="nw", image=tk_img)
+        canvas.image = tk_img
+        canvas.configure(scrollregion=(0, 0, disp_w, disp_h))
+
+        state: Dict[str, object] = {"x0": None, "y0": None, "x1": None, "y1": None, "rect": None}
+        result: Dict[str, object] = {"bbox": None}
+
+        def on_down(event) -> None:
+            state["x0"] = max(0, min(disp_w, int(event.x)))
+            state["y0"] = max(0, min(disp_h, int(event.y)))
+            state["x1"] = state["x0"]
+            state["y1"] = state["y0"]
+            if state.get("rect"):
+                try:
+                    canvas.delete(state["rect"])  # type: ignore[arg-type]
+                except Exception:
+                    pass
+            state["rect"] = canvas.create_rectangle(
+                int(state["x0"]),
+                int(state["y0"]),
+                int(state["x1"]),
+                int(state["y1"]),
+                outline="#2563eb",
+                width=2,
+            )
+
+        def on_move(event) -> None:
+            if state.get("x0") is None or state.get("rect") is None:
+                return
+            state["x1"] = max(0, min(disp_w, int(event.x)))
+            state["y1"] = max(0, min(disp_h, int(event.y)))
+            canvas.coords(
+                state["rect"],  # type: ignore[arg-type]
+                int(state["x0"]),
+                int(state["y0"]),
+                int(state["x1"]),
+                int(state["y1"]),
+            )
+
+        canvas.bind("<Button-1>", on_down)
+        canvas.bind("<B1-Motion>", on_move)
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(8, 0))
+
+        def on_cancel() -> None:
+            top.destroy()
+
+        def on_accept() -> None:
+            x0 = state.get("x0")
+            y0 = state.get("y0")
+            x1 = state.get("x1")
+            y1 = state.get("y1")
+            if None in (x0, y0, x1, y1):
+                messagebox.showwarning("Nuevo segmento", "Dibuja un rectangulo para el nuevo segmento.")
+                return
+            xa, xb = sorted([int(x0), int(x1)])
+            ya, yb = sorted([int(y0), int(y1)])
+            if (xb - xa) < 8 or (yb - ya) < 8:
+                messagebox.showwarning("Nuevo segmento", "Cuadro muy pequeno; dibuja un area mayor.")
+                return
+            result["bbox"] = (
+                max(0, min(image.width, int(round(xa / max(scale, 1e-8))))),
+                max(0, min(image.height, int(round(ya / max(scale, 1e-8))))),
+                max(0, min(image.width, int(round(xb / max(scale, 1e-8))))),
+                max(0, min(image.height, int(round(yb / max(scale, 1e-8))))),
+            )
+            top.destroy()
+
+        ttk.Button(btns, text="Cancelar", command=on_cancel, style="Ghost.TButton").pack(side="right")
+        ttk.Button(btns, text="Crear cuadro", command=on_accept, style="Accent.TButton").pack(side="right", padx=(0, 8))
+
+        top.wait_window()
+        bbox = result.get("bbox")
+        if not bbox:
+            return None
+        return tuple(int(v) for v in bbox)  # type: ignore[return-value]
+
     def _set_ocr_exclusion_box_selected(self) -> None:
         sel = list(self.list_files.curselection())
         if not sel:
@@ -4359,6 +8535,8 @@ class TranscriptorWindow(tk.Toplevel):
         source_path: Path,
         boxes: List[Tuple[int, int, int, int]],
         tag: str,
+        detector_payload: Optional[Dict[str, Any]] = None,
+        persist_manifest: bool = True,
     ) -> List[SegmentoProblemaV2]:
         try:
             from PIL import Image  # type: ignore
@@ -4367,34 +8545,95 @@ class TranscriptorWindow(tk.Toplevel):
             return []
 
         src = Path(source_path)
-        if not src.exists() or not boxes:
+        if not src.exists():
             return []
+        if not boxes:
+            result: List[SegmentoProblemaV2] = []
+            if persist_manifest:
+                try:
+                    self._segmentador_v2.persist_segments_manifest(
+                        src=src,
+                        segments=result,
+                        detector_payload=detector_payload,
+                    )
+                except Exception:
+                    pass
+            try:
+                self._segmentacion_v2_runtime_cache[self._seg_v2_source_key(src)] = []
+            except Exception:
+                pass
+            return result
         try:
             im = Image.open(src)
         except Exception:
             return []
 
         w, h = im.size
-        out_dir = self._runs_dir / "v2_segments" / src.stem
+        out_dir = Path(self._segmentador_v2.out_root) / src.stem
         out_dir.mkdir(parents=True, exist_ok=True)
         result: List[SegmentoProblemaV2] = []
-        for i, b in enumerate(boxes, start=1):
-            x1, y1, x2, y2 = [int(v) for v in b]
-            x1 = max(0, min(w - 1, x1))
-            y1 = max(0, min(h - 1, y1))
-            x2 = max(x1 + 1, min(w, x2))
-            y2 = max(y1 + 1, min(h, y2))
-            if (x2 - x1) < 16 or (y2 - y1) < 16:
-                continue
-            crop = im.crop((x1, y1, x2, y2))
-            seg_path = out_dir / f"{src.stem}_{tag}_{i:02d}.png"
-            if seg_path.exists():
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                seg_path = out_dir / f"{src.stem}_{tag}_{i:02d}_{ts}.png"
+        boxes = self._sort_boxes_reading_order(boxes)
+        try:
+            for i, b in enumerate(boxes, start=1):
+                x1, y1, x2, y2 = [int(v) for v in b]
+                x1 = max(0, min(w - 1, x1))
+                y1 = max(0, min(h - 1, y1))
+                x2 = max(x1 + 1, min(w, x2))
+                y2 = max(y1 + 1, min(h, y2))
+                if (x2 - x1) < 16 or (y2 - y1) < 16:
+                    continue
+                crop = im.crop((x1, y1, x2, y2))
+                seg_path = out_dir / f"{src.stem}_{tag}_{i:02d}.png"
+                try:
+                    crop.save(seg_path, format="PNG")
+                except Exception:
+                    continue
+                result.append(
+                    SegmentoProblemaV2(
+                        idx=i,
+                        bbox=(x1, y1, x2, y2),
+                        image_path=seg_path,
+                        source_path=src,
+                    )
+                )
+        finally:
             try:
-                crop.save(seg_path, format="PNG")
+                im.close()
+            except Exception:
+                pass
+        if persist_manifest:
+            try:
+                self._segmentador_v2.persist_segments_manifest(
+                    src=src,
+                    segments=result,
+                    detector_payload=detector_payload,
+                )
+            except Exception:
+                pass
+        try:
+            self._segmentacion_v2_runtime_cache[self._seg_v2_source_key(src)] = list(result)
+        except Exception:
+            pass
+        return result
+
+    def _build_runtime_segments_from_boxes(
+        self,
+        *,
+        source_path: Path,
+        boxes: List[Tuple[int, int, int, int]],
+        tag: str,
+    ) -> List[SegmentoProblemaV2]:
+        src = Path(source_path)
+        out_dir = Path(self._segmentador_v2.out_root) / src.stem
+        result: List[SegmentoProblemaV2] = []
+        for i, b in enumerate(self._sort_boxes_reading_order(boxes), start=1):
+            try:
+                x1, y1, x2, y2 = [int(v) for v in b]
             except Exception:
                 continue
+            if (x2 - x1) < 16 or (y2 - y1) < 16:
+                continue
+            seg_path = out_dir / f"{src.stem}_{tag}_{i:02d}.png"
             result.append(
                 SegmentoProblemaV2(
                     idx=i,
@@ -4405,17 +8644,360 @@ class TranscriptorWindow(tk.Toplevel):
             )
         return result
 
+    def _get_segment_editor_preview(self, source_path: Path) -> Optional[Dict[str, Any]]:
+        try:
+            from PIL import Image  # type: ignore
+        except Exception:
+            return None
+
+        src = Path(source_path)
+        try:
+            stat = src.stat()
+            signature = (int(getattr(stat, "st_mtime_ns", 0)), int(getattr(stat, "st_size", 0)))
+        except Exception:
+            signature = None
+        key = str(src.resolve()).lower()
+        cached = self._segment_editor_preview_cache.get(key)
+        if cached is not None and cached.get("signature") == signature:
+            try:
+                if key in self._segment_editor_preview_cache_order:
+                    self._segment_editor_preview_cache_order.remove(key)
+            except Exception:
+                pass
+            self._segment_editor_preview_cache_order.append(key)
+            return cached
+
+        try:
+            with Image.open(src) as opened:
+                src_img = opened.convert("RGB")
+        except Exception:
+            return None
+
+        ow, oh = src_img.size
+        if ow <= 1 or oh <= 1:
+            return None
+        screen_w = max(1024, int(self.winfo_screenwidth() or 1920))
+        screen_h = max(700, int(self.winfo_screenheight() or 1080))
+        max_w = max(900, screen_w - 260)
+        max_h = max(440, screen_h - 420)
+        scale = min(1.0, max_w / float(ow), max_h / float(oh))
+        dw = max(1, int(round(ow * scale)))
+        dh = max(1, int(round(oh * scale)))
+        disp = src_img.resize((dw, dh), Image.Resampling.LANCZOS) if scale < 1.0 else src_img.copy()
+        payload = {
+            "signature": signature,
+            "ow": int(ow),
+            "oh": int(oh),
+            "scale": float(scale),
+            "dw": int(dw),
+            "dh": int(dh),
+            "screen_w": int(screen_w),
+            "screen_h": int(screen_h),
+            "max_w": int(max_w),
+            "max_h": int(max_h),
+            "disp": disp,
+            "tk_img": None,
+        }
+        self._segment_editor_preview_cache[key] = payload
+        try:
+            if key in self._segment_editor_preview_cache_order:
+                self._segment_editor_preview_cache_order.remove(key)
+        except Exception:
+            pass
+        self._segment_editor_preview_cache_order.append(key)
+        while len(self._segment_editor_preview_cache_order) > int(self._segment_editor_preview_cache_limit):
+            oldest = self._segment_editor_preview_cache_order.pop(0)
+            if oldest == key:
+                continue
+            self._segment_editor_preview_cache.pop(oldest, None)
+        return payload
+
+    def _flush_pending_segment_persists(self) -> None:
+        pending_items = list(self._segmentacion_v2_pending_persist.items())
+        if not pending_items:
+            return
+        flushed = 0
+        for key, source_path in pending_items:
+            try:
+                boxes = list(self._segmentacion_v2_overrides.get(key, []) or [])
+                audit = self._update_segment_detector_audit_for_source(
+                    source_path=source_path,
+                    final_boxes=boxes,
+                )
+                self._save_v2_segments_from_boxes(
+                    source_path=source_path,
+                    boxes=boxes,
+                    tag="custom",
+                    detector_payload=audit,
+                    persist_manifest=True,
+                )
+                self._segmentacion_v2_pending_persist.pop(key, None)
+                flushed += 1
+            except Exception:
+                continue
+        if flushed > 0:
+            self._log(f"Segmentacion V2: {flushed} imagen(es) persistidas al finalizar la revision.")
+
+    def _prefetch_segments_v2_for_review_sources(self, selected_labels: Optional[Set[str]] = None) -> None:
+        sources = self._collect_review_sources(selected_labels=selected_labels)
+        if not sources:
+            return
+        total = len(sources)
+        processed = 0
+        hits = 0
+        self._log(f"Segmentacion V2: precalculando detecciones para {total} imagen(es)...")
+        for _idx, label, src in sources:
+            if not src.exists():
+                continue
+            processed += 1
+            key = self._seg_v2_source_key(src)
+            if key in self._segmentacion_v2_runtime_cache:
+                continue
+            segments = self._get_segments_v2_for_source(src)
+            if segments:
+                hits += 1
+            try:
+                self._segmentacion_v2_runtime_cache[key] = list(segments or [])
+            except Exception:
+                pass
+            if processed % 10 == 0 or processed == total:
+                self._log(
+                    f"Segmentacion V2: precalculo {processed}/{total} | con segmentos={hits}"
+                )
+
+    def _prefetch_segments_v2_for_review_sources_async(
+        self,
+        *,
+        selected_labels: Optional[Set[str]] = None,
+        open_first_path: Optional[Path] = None,
+    ) -> None:
+        sources = self._collect_review_sources(selected_labels=selected_labels)
+        if not sources:
+            return
+        if self._segmentacion_v2_prefetch_active:
+            self._log("Segmentacion V2: ya hay un precalculo en segundo plano.")
+            return
+
+        ordered_sources = list(sources)
+        if open_first_path is not None:
+            first_key = self._seg_v2_source_key(open_first_path)
+            ordered_sources.sort(key=lambda row: 0 if self._seg_v2_source_key(row[2]) == first_key else 1)
+
+        total = len(ordered_sources)
+        self._segmentacion_v2_prefetch_active = True
+        self._log(f"Segmentacion V2: precalculo en segundo plano para {total} imagen(es)...")
+
+        def _apply_result(
+            *,
+            src: Path,
+            label: str,
+            segments: List[SegmentoProblemaV2],
+            detector_payload: Dict[str, Any],
+            detector_source: str,
+            processed: int,
+            opened_first: bool,
+        ) -> None:
+            if not self._ui_alive():
+                return
+            key = self._seg_v2_source_key(src)
+            self._segmentacion_v2_runtime_cache[key] = list(segments or [])
+            if detector_payload:
+                final_boxes: List[Tuple[int, int, int, int]] = []
+                for seg in segments or []:
+                    try:
+                        final_boxes.append(tuple(int(v) for v in getattr(seg, "bbox", ())[:4]))
+                    except Exception:
+                        continue
+                self._update_segment_detector_audit_for_source(
+                    source_path=src,
+                    final_boxes=final_boxes,
+                    predicted_boxes=list(detector_payload.get("predicted_boxes", []) or []),
+                    detector_source=str(detector_payload.get("detector_source", detector_source) or detector_source),
+                    detector_model=str(detector_payload.get("detector_model", "") or ""),
+                    max_conf=float(detector_payload.get("max_conf", 0.0) or 0.0),
+                    avg_conf=float(detector_payload.get("avg_conf", 0.0) or 0.0),
+                )
+            if open_first_path is not None and not opened_first and self._seg_v2_source_key(open_first_path) == key:
+                self._open_segment_editor_for_source(src)
+            if processed % 10 == 0 or processed == total:
+                self._log(f"Segmentacion V2: precalculo fondo {processed}/{total}. Ultima: {label}")
+
+        def _finish() -> None:
+            if not self._ui_alive():
+                return
+            self._segmentacion_v2_prefetch_active = False
+            self._log("Segmentacion V2: precalculo en segundo plano finalizado.")
+
+        def _worker() -> None:
+            worker_segmentador = SegmentadorProblemasV2(Path(self._segmentador_v2.out_root))
+            opened_first = False
+            for processed, (_idx, label, src) in enumerate(ordered_sources, start=1):
+                segments: List[SegmentoProblemaV2] = []
+                detector_payload: Dict[str, Any] = {}
+                detector_source = "cache"
+                try:
+                    key = self._seg_v2_source_key(src)
+                    cached_runtime = self._segmentacion_v2_runtime_cache.get(key)
+                    if cached_runtime is not None:
+                        segments = list(cached_runtime)
+                        detector_source = "runtime_cache"
+                    elif key in self._segmentacion_v2_overrides:
+                        segments = self._build_runtime_segments_from_boxes(
+                            source_path=src,
+                            boxes=list(self._segmentacion_v2_overrides.get(key, []) or []),
+                            tag="custom",
+                        )
+                        detector_source = "override_manual"
+                    else:
+                        segments = worker_segmentador.segmentar(src)
+                        detector_payload = dict(getattr(worker_segmentador, "last_detector_payload", {}) or {})
+                        detector_source = str(getattr(worker_segmentador, "last_detector_source", "yolo") or "yolo")
+                except Exception:
+                    segments = []
+                    detector_payload = {}
+                    detector_source = "error"
+
+                should_open_first = (
+                    open_first_path is not None
+                    and not opened_first
+                    and self._seg_v2_source_key(open_first_path) == self._seg_v2_source_key(src)
+                )
+                if should_open_first:
+                    opened_first = True
+                try:
+                    self.after(
+                        0,
+                        lambda s=src, l=label, segs=list(segments), payload=dict(detector_payload), source=detector_source, n=processed, opened=not should_open_first: _apply_result(
+                            src=s,
+                            label=l,
+                            segments=segs,
+                            detector_payload=payload,
+                            detector_source=source,
+                            processed=n,
+                            opened_first=opened,
+                        ),
+                    )
+                except Exception:
+                    pass
+            try:
+                self.after(0, _finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _get_segments_v2_for_source(self, source_path: Path) -> List[SegmentoProblemaV2]:
         key = self._seg_v2_source_key(source_path)
+        cached_runtime = self._segmentacion_v2_runtime_cache.get(key)
+        if cached_runtime is not None:
+            return list(cached_runtime)
         # If an override exists (even empty), respect it exactly and do not fallback.
         if key in self._segmentacion_v2_overrides:
             override_boxes = self._segmentacion_v2_overrides.get(key, [])
-            return self._save_v2_segments_from_boxes(
+            self._update_segment_detector_audit_for_source(
+                source_path=source_path,
+                final_boxes=list(override_boxes or []),
+            )
+            result = self._build_runtime_segments_from_boxes(
                 source_path=source_path,
                 boxes=override_boxes,
                 tag="custom",
             )
-        return self._segmentador_v2.segmentar(source_path)
+            self._segmentacion_v2_runtime_cache[key] = list(result)
+            return result
+        segments = self._segmentador_v2.segmentar(source_path)
+        detector_payload_raw = getattr(self._segmentador_v2, "last_detector_payload", {}) or {}
+        if isinstance(detector_payload_raw, dict):
+            final_boxes: List[Tuple[int, int, int, int]] = []
+            for seg in segments:
+                try:
+                    final_boxes.append(tuple(int(v) for v in getattr(seg, "bbox", ())[:4]))
+                except Exception:
+                    continue
+            detector_payload = self._update_segment_detector_audit_for_source(
+                source_path=source_path,
+                final_boxes=final_boxes,
+                predicted_boxes=list(detector_payload_raw.get("predicted_boxes", []) or []),
+                detector_source=str(
+                    detector_payload_raw.get("detector_source", getattr(self._segmentador_v2, "last_detector_source", "yolo"))
+                    or getattr(self._segmentador_v2, "last_detector_source", "yolo")
+                ),
+                detector_model=str(detector_payload_raw.get("detector_model", "") or ""),
+                max_conf=float(detector_payload_raw.get("max_conf", 0.0) or 0.0),
+                avg_conf=float(detector_payload_raw.get("avg_conf", 0.0) or 0.0),
+            )
+            try:
+                self._segmentador_v2.persist_segments_manifest(
+                    src=source_path,
+                    segments=segments,
+                    detector_payload=detector_payload,
+                )
+            except Exception:
+                pass
+        self._segmentacion_v2_runtime_cache[key] = list(segments or [])
+        return segments
+
+    def _get_segment_boxes_for_ocr_flow(self, source_path: Path) -> List[Tuple[int, int, int, int]]:
+        def _boxes_from_segments(segments: List[SegmentoProblemaV2]) -> List[Tuple[int, int, int, int]]:
+            out: List[Tuple[int, int, int, int]] = []
+            for seg in list(segments or []):
+                try:
+                    x1, y1, x2, y2 = [int(v) for v in getattr(seg, "bbox", ()) or ()]
+                except Exception:
+                    continue
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                out.append((x1, y1, x2, y2))
+            return out
+
+        boxes = _boxes_from_segments(self._get_segments_v2_for_source(source_path))
+        if boxes:
+            return self._sort_boxes_reading_order(boxes)
+
+        try:
+            cached_loader = getattr(self._segmentador_v2, "_load_existing_segments", None)
+            cached_segments = cached_loader(source_path) if callable(cached_loader) else []
+        except Exception:
+            cached_segments = []
+        boxes = _boxes_from_segments(cached_segments)
+        if boxes:
+            self._log(
+                f"{source_path.name}: OCR directo reutiliza {len(boxes)} segmento(s) persistidos del manifest/cache."
+            )
+            return self._sort_boxes_reading_order(boxes)
+
+        figure_boxes: List[Tuple[int, int, int, int]] = []
+        for entry in self._get_figure_boxes(source_path):
+            if not isinstance(entry, dict):
+                continue
+            bbox_raw = entry.get("bbox_px")
+            if not isinstance(bbox_raw, (list, tuple)) or len(bbox_raw) < 4:
+                continue
+            try:
+                x1, y1, x2, y2 = [int(v) for v in bbox_raw[:4]]
+            except Exception:
+                continue
+            if x2 <= x1 or y2 <= y1:
+                continue
+            figure_boxes.append((x1, y1, x2, y2))
+        if figure_boxes:
+            self._log(
+                f"{source_path.name}: OCR directo reutiliza {len(figure_boxes)} caja(s) de figura manual como fallback."
+            )
+        return self._sort_boxes_reading_order(figure_boxes)
+
+    def _has_reusable_transcription_cache(self, label: str) -> bool:
+        key = str(label)
+        status = str(self._transcribed_by_label.get(key, "") or "").strip().upper()
+        raw = str(self._ocr_raw_first_by_label.get(key, "") or "").strip()
+        structured = str(self._ocr_structured_by_label.get(key, "") or "").strip()
+        if status == "SKIPPED_KEY":
+            return bool(structured or raw)
+        if structured:
+            return True
+        if raw and not raw.startswith("[ERROR"):
+            return True
+        return False
 
     def _segmentar_v2_selected(self) -> None:
         sel = list(self.list_files.curselection())
@@ -4571,15 +9153,22 @@ class TranscriptorWindow(tk.Toplevel):
 
         controls = ttk.Frame(wrapper)
         controls.pack(fill="x", pady=(0, 8))
+        controls.columnconfigure(0, weight=1)
 
-        ttk.Label(controls, text="Item destino").pack(side="left")
+        controls_top = ttk.Frame(controls)
+        controls_top.grid(row=0, column=0, sticky="ew")
+        controls_status = ttk.Frame(controls)
+        controls_status.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        controls_status.columnconfigure(0, weight=1)
+
+        ttk.Label(controls_top, text="Item destino").pack(side="left")
         item_var = tk.StringVar(value="")
-        item_combo = ttk.Combobox(controls, textvariable=item_var, state="normal", width=18)
+        item_combo = ttk.Combobox(controls_top, textvariable=item_var, state="normal", width=18)
         item_combo.pack(side="left", padx=(8, 8))
-        ttk.Label(controls, text="Slot/etiqueta").pack(side="left")
+        ttk.Label(controls_top, text="Slot/etiqueta").pack(side="left")
         slot_var = tk.StringVar(value="ENUNCIADO")
         slot_combo = ttk.Combobox(
-            controls,
+            controls_top,
             textvariable=slot_var,
             state="normal",
             width=14,
@@ -4588,25 +9177,93 @@ class TranscriptorWindow(tk.Toplevel):
         slot_combo.pack(side="left", padx=(8, 8))
 
         status_var = tk.StringVar(value="Selecciona un recorte y asigna item + slot (puedes escribir valores manuales).")
-        ttk.Label(controls, textvariable=status_var, style="SubHeader.TLabel").pack(side="right")
+        status_lbl = ttk.Label(controls_status, textvariable=status_var, style="SubHeader.TLabel")
+        status_lbl.grid(row=0, column=0, sticky="w")
 
-        frame = ttk.Frame(wrapper)
+        frame = ttk.Panedwindow(wrapper, orient="horizontal")
         frame.pack(fill="both", expand=True)
-        frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(0, weight=1)
+
+        assign_panel = ttk.LabelFrame(frame, text="Asignaciones")
+        assign_panel.columnconfigure(0, weight=1)
+        assign_panel.rowconfigure(1, weight=1)
+        frame.add(assign_panel, weight=0)
+
+        preview_frame = ttk.Frame(frame)
+        preview_frame.columnconfigure(0, weight=1)
+        preview_frame.rowconfigure(1, weight=1)
+        frame.add(preview_frame, weight=1)
+
+        preview_controls = ttk.Frame(preview_frame)
+        preview_controls.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        preview_controls.columnconfigure(0, weight=1)
+
+        preview_mode_var = tk.StringVar(value="Vista compacta: se muestra solo el segmento seleccionado.")
+        ttk.Label(preview_controls, textvariable=preview_mode_var, style="SubHeader.TLabel").grid(
+            row=0, column=0, sticky="w", padx=(0, 8)
+        )
+
+        ttk.Label(
+            assign_panel,
+            text="Segmento ----> item-N",
+            style="SubHeader.TLabel",
+        ).grid(row=0, column=0, sticky="w", padx=8, pady=(8, 6))
+
+        assignment_tree = ttk.Treeview(
+            assign_panel,
+            columns=("segmento", "item", "slot"),
+            show="headings",
+            height=18,
+            selectmode="extended",
+        )
+        assignment_tree.heading("segmento", text="Segmento")
+        assignment_tree.heading("item", text="Item")
+        assignment_tree.heading("slot", text="Slot")
+        assignment_tree.column("segmento", width=180, anchor="w")
+        assignment_tree.column("item", width=72, anchor="center")
+        assignment_tree.column("slot", width=90, anchor="center")
+        assignment_tree.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+
+        assignment_ysb = ttk.Scrollbar(assign_panel, orient="vertical", command=assignment_tree.yview)
+        assignment_ysb.grid(row=1, column=1, sticky="ns", padx=(0, 8), pady=(0, 8))
+        assignment_tree.configure(yscrollcommand=assignment_ysb.set)
+
+        assignment_actions = ttk.Frame(assign_panel)
+        assignment_actions.grid(row=2, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 8))
+
+        assignment_hint_var = tk.StringVar(
+            value="Selecciona una fila, cambia item/slot arriba y aplica el cambio."
+        )
+        ttk.Label(assign_panel, textvariable=assignment_hint_var).grid(
+            row=3, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 8)
+        )
+
+        ttk.Label(
+            assign_panel,
+            text="Modo texto: una linea por segmento, por ejemplo `fuente seg-1 -> item-257 slot=ENUNCIADO`",
+            style="SubHeader.TLabel",
+        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 4))
+
+        assignment_text = tk.Text(assign_panel, height=8, wrap="none")
+        assignment_text.grid(row=5, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        assignment_text_ysb = ttk.Scrollbar(assign_panel, orient="vertical", command=assignment_text.yview)
+        assignment_text_ysb.grid(row=5, column=1, sticky="ns", padx=(0, 8), pady=(0, 8))
+        assignment_text.configure(yscrollcommand=assignment_text_ysb.set)
+
+        assignment_text_actions = ttk.Frame(assign_panel)
+        assignment_text_actions.grid(row=6, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 8))
 
         canvas = tk.Canvas(
-            frame,
+            preview_frame,
             bg=self.palette["surface"],
             highlightthickness=1,
             highlightbackground=self.palette["border"],
         )
-        ysb = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
-        xsb = ttk.Scrollbar(frame, orient="horizontal", command=canvas.xview)
+        ysb = ttk.Scrollbar(preview_frame, orient="vertical", command=canvas.yview)
+        xsb = ttk.Scrollbar(preview_frame, orient="horizontal", command=canvas.xview)
         canvas.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
-        canvas.grid(row=0, column=0, sticky="nsew")
-        ysb.grid(row=0, column=1, sticky="ns")
-        xsb.grid(row=1, column=0, sticky="ew")
+        canvas.grid(row=1, column=0, sticky="nsew")
+        ysb.grid(row=1, column=1, sticky="ns")
+        xsb.grid(row=2, column=0, sticky="ew")
 
         inner = ttk.Frame(canvas)
         inner_id = canvas.create_window((0, 0), window=inner, anchor="nw")
@@ -4624,8 +9281,60 @@ class TranscriptorWindow(tk.Toplevel):
             except Exception:
                 return
 
+        def _refresh_scrollregion() -> None:
+            try:
+                inner.update_idletasks()
+            except Exception:
+                pass
+            try:
+                bbox = canvas.bbox("all")
+                if bbox:
+                    canvas.configure(scrollregion=bbox)
+            except Exception:
+                pass
+
         inner.bind("<Configure>", _on_inner_configure)
         canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _scroll_canvas(dx_units: int = 0, dy_units: int = 0) -> str:
+            try:
+                if dx_units:
+                    canvas.xview_scroll(int(dx_units), "units")
+                if dy_units:
+                    canvas.yview_scroll(int(dy_units), "units")
+            except Exception:
+                pass
+            return "break"
+
+        def _on_crop_mousewheel(event) -> str:
+            try:
+                delta = int(getattr(event, "delta", 0) or 0)
+            except Exception:
+                delta = 0
+            step = -1 if delta > 0 else 1
+            if delta == 0:
+                step = -1 if getattr(event, "num", 0) == 4 else 1
+            if bool(getattr(event, "state", 0) & 0x1):
+                return _scroll_canvas(dx_units=step)
+            return _scroll_canvas(dy_units=step)
+
+        def _bind_scroll_support(widget) -> None:
+            try:
+                widget.bind("<MouseWheel>", _on_crop_mousewheel, add="+")
+                widget.bind("<Shift-MouseWheel>", _on_crop_mousewheel, add="+")
+                widget.bind("<Button-4>", lambda _e: _scroll_canvas(dy_units=-1), add="+")
+                widget.bind("<Button-5>", lambda _e: _scroll_canvas(dy_units=1), add="+")
+                widget.bind("<Shift-Button-4>", lambda _e: _scroll_canvas(dx_units=-1), add="+")
+                widget.bind("<Shift-Button-5>", lambda _e: _scroll_canvas(dx_units=1), add="+")
+            except Exception:
+                return
+
+        _bind_scroll_support(top)
+        _bind_scroll_support(wrapper)
+        _bind_scroll_support(controls)
+        _bind_scroll_support(frame)
+        _bind_scroll_support(canvas)
+        _bind_scroll_support(inner)
 
         def _parse_item_num(raw: str) -> int:
             txt = str(raw or "").strip()
@@ -4671,8 +9380,114 @@ class TranscriptorWindow(tk.Toplevel):
         card_widgets: Dict[str, tk.Frame] = {}
         card_info_vars: Dict[str, tk.StringVar] = {}
         card_payloads: Dict[str, Dict[str, Any]] = {}
+        assignment_tree_rows: Dict[str, str] = {}
+        assignment_tree_seg_by_row: Dict[str, str] = {}
+        assignment_label_to_seg: Dict[str, str] = {}
+        assignment_text_scope: Dict[str, List[str]] = {"seg_keys": []}
+        assignment_tree_sync_state: Dict[str, bool] = {"internal": False}
         source_item_values: Dict[str, List[str]] = {}
         selected_key: Dict[str, str] = {"value": ""}
+        source_order_by_key: Dict[str, int] = {
+            self._seg_v2_source_key(src): int(idx)
+            for idx, _label, src in sources
+            if isinstance(src, Path)
+        }
+
+        def _segment_display_label(seg_key: str, payload: Dict[str, Any] | None = None) -> str:
+            payload = payload if isinstance(payload, dict) else card_payloads.get(seg_key, {})
+            if not isinstance(payload, dict):
+                return str(seg_key or "").strip()
+            src_name = str(payload.get("source_name", "") or "")
+            seg_idx = int(self._safe_int(payload.get("seg_idx", 0), 0))
+            return f"{src_name} seg-{seg_idx + 1}"
+
+        def _refresh_assignment_tree_row(seg_key: str) -> None:
+            payload = card_payloads.get(seg_key, {})
+            if not isinstance(payload, dict):
+                return
+            segment_label = _segment_display_label(seg_key, payload)
+            binding = payload.get("binding", {})
+            item_txt = ""
+            slot_txt = ""
+            if isinstance(binding, dict):
+                item_num = int(self._safe_int(binding.get("item_num", 0), 0))
+                slot_txt = self._normalize_binding_slot(str(binding.get("slot", "ENUNCIADO") or "ENUNCIADO"))
+                if item_num > 0:
+                    item_txt = f"item-{item_num}"
+            values = (segment_label, item_txt or "-", slot_txt or "-")
+            row_id = assignment_tree_rows.get(seg_key)
+            if row_id and assignment_tree.exists(row_id):
+                assignment_tree.item(row_id, values=values)
+            else:
+                row_id = assignment_tree.insert("", "end", values=values)
+                assignment_tree_rows[seg_key] = row_id
+                assignment_tree_seg_by_row[row_id] = seg_key
+            assignment_label_to_seg[segment_label] = seg_key
+
+        def _refresh_assignment_tree_all() -> None:
+            for seg_key in list(card_payloads.keys()):
+                _refresh_assignment_tree_row(seg_key)
+
+        def _sync_tree_selection(seg_key: str) -> None:
+            row_id = assignment_tree_rows.get(seg_key, "")
+            if row_id and assignment_tree.exists(row_id):
+                try:
+                    current = assignment_tree.selection()
+                    if current and row_id in current:
+                        return
+                    assignment_tree_sync_state["internal"] = True
+                    assignment_tree.selection_set(row_id)
+                except Exception:
+                    pass
+                finally:
+                    assignment_tree_sync_state["internal"] = False
+
+        def _selected_tree_seg_keys() -> List[str]:
+            selected_rows = list(assignment_tree.selection() or ())
+            seg_keys: List[str] = []
+            seen: Set[str] = set()
+            for row_id in selected_rows:
+                seg_key = str(assignment_tree_seg_by_row.get(str(row_id), "") or "").strip()
+                if seg_key and seg_key not in seen:
+                    seen.add(seg_key)
+                    seg_keys.append(seg_key)
+            return seg_keys
+
+        def _assignment_text_lines(seg_keys: List[str] | None = None) -> List[str]:
+            lines: List[str] = []
+            ordered_seg_keys = list(seg_keys or [])
+            if not ordered_seg_keys:
+                ordered_seg_keys = list(assignment_tree_rows.keys())
+            for seg_key in ordered_seg_keys:
+                row_id = assignment_tree_rows.get(seg_key, "")
+                if not row_id or not assignment_tree.exists(row_id):
+                    continue
+                vals = assignment_tree.item(row_id, "values") or ()
+                segment_label = str(vals[0] or _segment_display_label(seg_key)).strip() if len(vals) > 0 else _segment_display_label(seg_key)
+                item_txt = str(vals[1] or "-").strip() if len(vals) > 1 else "-"
+                slot_txt = str(vals[2] or "ENUNCIADO").strip() if len(vals) > 2 else "ENUNCIADO"
+                if not item_txt or item_txt == "-":
+                    lines.append(f"{segment_label} -> -")
+                else:
+                    slot_piece = f" slot={slot_txt}" if slot_txt and slot_txt != "-" else ""
+                    lines.append(f"{segment_label} -> {item_txt}{slot_piece}")
+            return lines
+
+        def _sync_assignment_text_widget(seg_keys: List[str] | None = None) -> None:
+            active_scope = list(seg_keys or [])
+            assignment_text_scope["seg_keys"] = active_scope
+            try:
+                current = assignment_text.get("1.0", "end-1c")
+            except Exception:
+                current = ""
+            updated = "\n".join(_assignment_text_lines(active_scope))
+            if current == updated:
+                return
+            try:
+                assignment_text.delete("1.0", "end")
+                assignment_text.insert("1.0", updated)
+            except Exception:
+                return
 
         def _refresh_item_combo(source_stem: str = "") -> None:
             values = list(source_item_values.get(source_stem, [])) if source_stem else []
@@ -4687,7 +9502,14 @@ class TranscriptorWindow(tk.Toplevel):
             elif not values:
                 item_var.set("")
 
-        def _set_card_selected(seg_key: str) -> None:
+        def _set_preview_mode_label() -> None:
+            mode = str(preview_render_state.get("display_mode") or "selected")
+            if mode == "full":
+                preview_mode_var.set("Vista completa: mostrando todos los segmentos de la fuente seleccionada.")
+            else:
+                preview_mode_var.set("Vista compacta: se muestra solo el segmento seleccionado.")
+
+        def _apply_card_selection_styles(seg_key: str) -> None:
             base_border = self.palette.get("border", "#334155")
             active_border = "#2563eb"
             for key, widget in card_widgets.items():
@@ -4696,8 +9518,19 @@ class TranscriptorWindow(tk.Toplevel):
                     widget.configure(highlightbackground=color, highlightcolor=color)
                 except Exception:
                     continue
-            selected_key["value"] = seg_key
+
+        def _set_card_selected(seg_key: str) -> None:
             payload = card_payloads.get(seg_key, {})
+            source_path = payload.get("source_path") if isinstance(payload, dict) else None
+            source_key = self._seg_v2_source_key(source_path) if isinstance(source_path, Path) else ""
+            selected_key["value"] = seg_key
+            if source_key:
+                if str(preview_render_state.get("display_mode") or "selected") == "full":
+                    _render_source_preview(source_key, select_seg_key=seg_key, full_source=True)
+                else:
+                    _render_source_preview(source_key, select_seg_key=seg_key, full_source=False)
+            _apply_card_selection_styles(seg_key)
+            _sync_tree_selection(seg_key)
             src_name = str(payload.get("source_name", "") or "")
             source_stem = str(payload.get("source_stem", "") or "").strip()
             seg_idx = int(payload.get("seg_idx", 0) or 0)
@@ -4715,32 +9548,81 @@ class TranscriptorWindow(tk.Toplevel):
                     return
             status_var.set(f"Seleccionado: {src_name} seg-{seg_idx + 1}")
 
-        def _assign_selected_crop() -> None:
-            seg_key = str(selected_key.get("value", "") or "").strip()
+        def _refresh_after_binding_updates(selected_seg_key: str = "") -> None:
+            try:
+                self._sync_runtime_items_with_current_bindings()
+            except Exception:
+                pass
+            self._render_output_from_items()
+            self._refresh_training_pairs_from_items()
+            try:
+                self._sync_preview_images_from_items()
+            except Exception:
+                pass
+            try:
+                self.update_idletasks()
+            except Exception:
+                pass
+            try:
+                self.after_idle(lambda: self._push_preview_text(force=True))
+            except Exception:
+                pass
+            current_selected = str(selected_seg_key or selected_key.get("value", "") or "").strip()
+            if current_selected in card_payloads:
+                _set_card_selected(current_selected)
+
+        def _apply_binding_for_seg(
+            seg_key: str,
+            item_num: int,
+            slot_name: str,
+            *,
+            silent: bool = False,
+            refresh_runtime: bool = True,
+            sync_text: bool = True,
+        ) -> bool:
+            seg_key = str(seg_key or "").strip()
             if not seg_key or seg_key not in card_payloads:
-                messagebox.showwarning("Recortes", "Selecciona un recorte primero.")
-                return
-            item_num = _parse_item_num(item_var.get())
-            if item_num <= 0:
-                messagebox.showwarning("Recortes", "Selecciona un item destino valido.")
-                return
-            slot_name = self._normalize_binding_slot(str(slot_var.get() or "ENUNCIADO"))
+                if not silent:
+                    messagebox.showwarning("Recortes", "Selecciona un recorte primero.")
+                return False
+            if int(item_num) <= 0:
+                if not silent:
+                    messagebox.showwarning("Recortes", "Selecciona un item destino valido.")
+                return False
+            slot_name = self._normalize_binding_slot(str(slot_name or "ENUNCIADO"))
             payload = card_payloads[seg_key]
             src_path = payload.get("source_path")
             bbox_px = payload.get("bbox_px")
             # Nota: seg_idx puede ser 0 (primer segmento), no usar "or -1".
             seg_idx = self._safe_int(payload.get("seg_idx", -1), -1)
             if not isinstance(src_path, Path) or not isinstance(bbox_px, tuple) or len(bbox_px) != 4:
-                messagebox.showerror("Recortes", "No se pudo resolver el recorte seleccionado.")
-                return
+                if not silent:
+                    messagebox.showerror("Recortes", "No se pudo resolver el recorte seleccionado.")
+                return False
             if seg_idx < 0:
-                messagebox.showerror("Recortes", "Indice de segmento invalido.")
-                return
+                if not silent:
+                    messagebox.showerror("Recortes", "Indice de segmento invalido.")
+                return False
 
             bbox_norm = self._box_px_to_norm(path=src_path, box_px=bbox_px)
             if bbox_norm is None:
-                messagebox.showerror("Recortes", "BBox invalido para ese recorte.")
-                return
+                if not silent:
+                    messagebox.showerror("Recortes", "BBox invalido para ese recorte.")
+                return False
+
+            current_binding = payload.get("binding", {})
+            if isinstance(current_binding, dict):
+                current_item_num = int(self._safe_int(current_binding.get("item_num", 0), 0))
+                current_slot_name = self._normalize_binding_slot(str(current_binding.get("slot", "ENUNCIADO") or "ENUNCIADO"))
+                if current_item_num > 0 and (
+                    current_item_num != int(item_num) or current_slot_name != slot_name
+                ):
+                    _remove_binding_for_seg(
+                        seg_key,
+                        silent=True,
+                        refresh_runtime=False,
+                        sync_text=False,
+                    )
 
             marker_name = self._build_binding_marker_name(item_num=item_num, slot=slot_name)
             crop_saved = self._save_figure_crop(
@@ -4749,8 +9631,9 @@ class TranscriptorWindow(tk.Toplevel):
                 bbox_norm=bbox_norm,
             )
             if not crop_saved:
-                messagebox.showerror("Recortes", "No se pudo guardar el recorte.")
-                return
+                if not silent:
+                    messagebox.showerror("Recortes", "No se pudo guardar el recorte.")
+                return False
 
             self._set_segment_item_binding(
                 source_path=src_path,
@@ -4769,7 +9652,7 @@ class TranscriptorWindow(tk.Toplevel):
                 item_text = str(entry[1] or "") if len(entry) > 1 else ""
                 img_paths = list(entry[2] or []) if len(entry) > 2 else []
                 num = self.controller.parsear_numero_original(item_text) or 0
-                if archivo == source_stem and num == item_num:
+                if self._source_stems_match(archivo, source_stem) and num == item_num:
                     item_text = self._insert_explicit_marker_in_slot(
                         text=item_text,
                         marker_name=marker_name,
@@ -4790,8 +9673,8 @@ class TranscriptorWindow(tk.Toplevel):
 
             self._preview_images[marker_name] = crop_saved
             self._missing_marker_warned.discard(marker_name)
-            self._render_output_from_items()
-            self._refresh_training_pairs_from_items()
+            if refresh_runtime:
+                _refresh_after_binding_updates(seg_key)
 
             info_var = card_info_vars.get(seg_key)
             if info_var is not None:
@@ -4800,7 +9683,11 @@ class TranscriptorWindow(tk.Toplevel):
                 "item_num": int(item_num),
                 "slot": slot_name,
                 "marker_name": marker_name,
+                "crop_path": crop_saved,
             }
+            _refresh_assignment_tree_row(seg_key)
+            if sync_text:
+                _sync_assignment_text_widget(list(assignment_text_scope.get("seg_keys", []) or []))
 
             if linked == 0:
                 status_var.set(f"Asignado seg-{seg_idx + 1} -> item={item_num} slot={slot_name} (sin item en salida)")
@@ -4813,27 +9700,771 @@ class TranscriptorWindow(tk.Toplevel):
                     f"binding_applied item={item_num} slots=[{slot_name}] marker={marker_name} crop={crop_saved} items={linked}"
                 )
             _refresh_item_combo(source_stem)
+            return True
+
+        def _assign_selected_crop() -> None:
+            seg_key = str(selected_key.get("value", "") or "").strip()
+            item_num = _parse_item_num(item_var.get())
+            slot_name = self._normalize_binding_slot(str(slot_var.get() or "ENUNCIADO"))
+            _apply_binding_for_seg(seg_key, item_num, slot_name, silent=False)
+
+        def _remove_marker_token(text: str, marker_name: str) -> str:
+            raw = str(text or "").strip()
+            mk = str(marker_name or "").strip()
+            if not raw or not mk:
+                return raw
+            pattern = re.compile(rf"\s*\[\[\s*Imagen\s*=\s*{re.escape(mk)}\s*\]\]\s*", re.IGNORECASE)
+            cleaned = pattern.sub(" ", raw)
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
+            cleaned = self._normalize_math_delimiters(self.controller.normalizar_item_una_linea(cleaned))
+            return cleaned
+
+        def _rebuild_item_image_paths(*, item_text: str, fallback_paths: List[str]) -> List[str]:
+            rebuilt_paths: List[str] = []
+            seen_paths: Set[str] = set()
+            for mk in self._extract_image_marker_names(item_text):
+                mk_text = str(mk or "").strip()
+                if not mk_text:
+                    continue
+                candidate = str(self._preview_images.get(mk_text) or "").strip()
+                if not candidate:
+                    candidate = str(self._find_crop_by_marker_name(mk_text) or "").strip()
+                if candidate and candidate not in seen_paths:
+                    seen_paths.add(candidate)
+                    rebuilt_paths.append(candidate)
+            if rebuilt_paths:
+                return rebuilt_paths
+            clean_fallback: List[str] = []
+            for path_txt in fallback_paths:
+                p_txt = str(path_txt or "").strip()
+                if p_txt and p_txt not in clean_fallback:
+                    clean_fallback.append(p_txt)
+            return clean_fallback
+
+        def _remove_binding_for_seg(
+            seg_key: str,
+            *,
+            silent: bool = False,
+            refresh_runtime: bool = True,
+            sync_text: bool = True,
+        ) -> bool:
+            seg_key = str(seg_key or "").strip()
+            if not seg_key or seg_key not in card_payloads:
+                if not silent:
+                    messagebox.showwarning("Recortes", "Selecciona un recorte primero.")
+                return False
+            payload = card_payloads[seg_key]
+            binding = payload.get("binding", {})
+            if not isinstance(binding, dict) or int(self._safe_int(binding.get("item_num", 0), 0)) <= 0:
+                if not silent:
+                    messagebox.showinfo("Recortes", "El recorte seleccionado no tiene asignacion activa.")
+                return False
+
+            src_path = payload.get("source_path")
+            seg_idx = self._safe_int(payload.get("seg_idx", -1), -1)
+            if not isinstance(src_path, Path) or seg_idx < 0:
+                if not silent:
+                    messagebox.showerror("Recortes", "No se pudo resolver la asignacion seleccionada.")
+                return False
+
+            item_num = int(self._safe_int(binding.get("item_num", 0), 0))
+            slot_name = self._normalize_binding_slot(str(binding.get("slot", "ENUNCIADO") or "ENUNCIADO"))
+            marker_name = str(binding.get("marker_name", "") or "").strip()
+            crop_path = str(binding.get("crop_path", "") or "").strip()
+            source_key = self._seg_v2_source_key(src_path)
+            bucket = self._get_segment_bindings_by_source_key(source_key)
+            bucket.pop(int(seg_idx), None)
+            self._set_segment_bindings_by_source_key(source_key, bucket)
+
+            rebuilt_items: List[Tuple[str, str, List[str]]] = []
+            linked = 0
+            source_stem = str(src_path.stem or "").strip()
+            for entry in self._items:
+                archivo = str(entry[0] or "").strip() if len(entry) > 0 else ""
+                item_text = str(entry[1] or "") if len(entry) > 1 else ""
+                img_paths = list(entry[2] or []) if len(entry) > 2 else []
+                num = self.controller.parsear_numero_original(item_text) or 0
+                if self._source_stems_match(archivo, source_stem) and num == item_num:
+                    updated_text = _remove_marker_token(item_text, marker_name)
+                    filtered_paths = [
+                        str(p or "").strip()
+                        for p in img_paths
+                        if str(p or "").strip() and str(p or "").strip() != crop_path
+                    ]
+                    img_paths = _rebuild_item_image_paths(item_text=updated_text, fallback_paths=filtered_paths)
+                    item_text = updated_text
+                    linked += 1
+                rebuilt_items.append((archivo, item_text, img_paths))
+            self._items = rebuilt_items
+
+            if marker_name:
+                self._preview_images.pop(marker_name, None)
+                self._missing_marker_warned.discard(marker_name)
+            if refresh_runtime:
+                _refresh_after_binding_updates(seg_key)
+
+            payload["binding"] = {}
+            info_var = card_info_vars.get(seg_key)
+            if info_var is not None:
+                info_var.set("Sin asignacion")
+            _refresh_assignment_tree_row(seg_key)
+            if sync_text:
+                _sync_assignment_text_widget(list(assignment_text_scope.get("seg_keys", []) or []))
+            status_var.set(f"Asignacion eliminada: seg-{seg_idx + 1} | item={item_num} slot={slot_name}")
+            self._log(
+                f"binding_removed source={src_path.name} seg={seg_idx} item={item_num} slot={slot_name} marker={marker_name} items={linked}"
+            )
+            return True
+
+        def _remove_selected_binding() -> None:
+            seg_key = str(selected_key.get("value", "") or "").strip()
+            _remove_binding_for_seg(seg_key, silent=False)
+
+        def _renumber_visible_bindings() -> None:
+            start_item = _parse_item_num(item_var.get())
+            if start_item <= 0:
+                messagebox.showwarning("Recortes", "Escribe un item inicial valido para renumerar.")
+                return
+            target_slot = self._normalize_binding_slot(str(slot_var.get() or "ENUNCIADO"))
+            ordered_payloads = sorted(
+                (payload for payload in card_payloads.values() if isinstance(payload, dict)),
+                key=lambda payload: (
+                    int(payload.get("source_order", 10**9) or 10**9),
+                    str(payload.get("source_name", "") or ""),
+                    int(self._safe_int(payload.get("seg_idx", 0), 0)),
+                ),
+            )
+            if not ordered_payloads:
+                messagebox.showinfo("Recortes", "No hay recortes visibles para renumerar.")
+                return
+
+            assignments: List[Dict[str, Any]] = []
+            old_markers: Set[str] = set()
+            old_crop_paths: Set[str] = set()
+            affected_sources: Set[str] = set()
+
+            for offset, payload in enumerate(ordered_payloads):
+                src_path = payload.get("source_path")
+                bbox_px = payload.get("bbox_px")
+                seg_idx = self._safe_int(payload.get("seg_idx", -1), -1)
+                if not isinstance(src_path, Path) or not isinstance(bbox_px, tuple) or len(bbox_px) != 4 or seg_idx < 0:
+                    continue
+                source_key = self._seg_v2_source_key(src_path)
+                source_stem = str(payload.get("source_stem", "") or "").strip() or str(src_path.stem or "").strip()
+                new_item_num = int(start_item + offset)
+                new_marker_name = self._build_binding_marker_name(item_num=new_item_num, slot=target_slot)
+                binding = payload.get("binding", {})
+                old_marker_name = ""
+                old_crop_path = ""
+                if isinstance(binding, dict):
+                    old_marker_name = str(binding.get("marker_name", "") or "").strip()
+                    old_crop_path = str(binding.get("crop_path", "") or "").strip()
+                if old_marker_name:
+                    old_markers.add(old_marker_name)
+                if old_crop_path:
+                    old_crop_paths.add(old_crop_path)
+
+                bbox_norm = self._box_px_to_norm(path=src_path, box_px=bbox_px)
+                crop_saved = ""
+                if bbox_norm is not None:
+                    crop_saved = str(
+                        self._save_figure_crop(
+                            image_path=src_path,
+                            marker_name=new_marker_name,
+                            bbox_norm=bbox_norm,
+                        )
+                        or ""
+                    ).strip()
+                assignments.append(
+                    {
+                        "source_path": src_path,
+                        "source_key": source_key,
+                        "source_stem": source_stem,
+                        "seg_idx": int(seg_idx),
+                        "item_num": int(new_item_num),
+                        "slot": target_slot,
+                        "marker_name": new_marker_name,
+                        "crop_path": crop_saved,
+                    }
+                )
+                affected_sources.add(source_key)
+
+            if not assignments:
+                messagebox.showwarning("Recortes", "No se pudo preparar la renumeracion de los recortes visibles.")
+                return
+
+            assignments_by_source_seg: Dict[Tuple[str, int], Dict[str, Any]] = {}
+            assignments_by_item: Dict[Tuple[str, int], List[Dict[str, Any]]] = {}
+            for assignment in assignments:
+                assignments_by_source_seg[(str(assignment["source_key"]), int(assignment["seg_idx"]))] = assignment
+                item_key = (str(assignment["source_stem"]), int(assignment["item_num"]))
+                assignments_by_item.setdefault(item_key, []).append(assignment)
+
+            # Rebuild binding buckets: preserve non-visible segments, replace visible ones.
+            for source_key in list(affected_sources):
+                existing_bucket = self._get_segment_bindings_by_source_key(source_key)
+                new_bucket: Dict[int, Dict[str, Any]] = {}
+                for seg_idx_existing, payload_existing in existing_bucket.items():
+                    if (source_key, int(seg_idx_existing)) in assignments_by_source_seg:
+                        continue
+                    if isinstance(payload_existing, dict):
+                        new_bucket[int(seg_idx_existing)] = dict(payload_existing)
+                for assignment in assignments:
+                    if str(assignment["source_key"]) != str(source_key):
+                        continue
+                    new_bucket[int(assignment["seg_idx"])] = {
+                        "item_num": int(assignment["item_num"]),
+                        "slot": str(assignment["slot"]),
+                        "marker_name": str(assignment["marker_name"]),
+                        "crop_path": str(assignment["crop_path"]),
+                        "confirmed": True,
+                        "updated_at": datetime.now().isoformat(timespec="seconds"),
+                    }
+                self._set_segment_bindings_by_source_key(source_key, new_bucket)
+
+            rebuilt_items: List[Tuple[str, str, List[str]]] = []
+            linked_items = 0
+            for entry in self._items:
+                archivo = str(entry[0] or "").strip() if len(entry) > 0 else ""
+                item_text = str(entry[1] or "") if len(entry) > 1 else ""
+                img_paths = list(entry[2] or []) if len(entry) > 2 else []
+                item_num = self.controller.parsear_numero_original(item_text) or 0
+
+                if archivo in {str(a["source_stem"]) for a in assignments}:
+                    for old_marker_name in list(old_markers):
+                        if old_marker_name:
+                            item_text = _remove_marker_token(item_text, old_marker_name)
+                    img_paths = [
+                        str(p or "").strip()
+                        for p in img_paths
+                        if str(p or "").strip() and str(p or "").strip() not in old_crop_paths
+                    ]
+
+                item_key = (archivo, int(item_num))
+                target_assignments = assignments_by_item.get(item_key, [])
+                if target_assignments:
+                    for assignment in sorted(
+                        target_assignments,
+                        key=lambda row: (0 if str(row.get("slot")) == "ENUNCIADO" else 1, str(row.get("slot", ""))),
+                    ):
+                        item_text = self._insert_explicit_marker_in_slot(
+                            text=item_text,
+                            marker_name=str(assignment["marker_name"]),
+                            slot=str(assignment["slot"]),
+                            path=assignment["source_path"],
+                            numero=int(assignment["item_num"]),
+                        )
+                        crop_saved = str(assignment.get("crop_path", "") or "").strip()
+                        if crop_saved and crop_saved not in img_paths:
+                            img_paths.append(crop_saved)
+                    item_text = self._move_image_marker_before_options(item_text)
+                    item_text = self._normalize_math_delimiters(self.controller.normalizar_item_una_linea(item_text))
+                    linked_items += 1
+                img_paths = _rebuild_item_image_paths(item_text=item_text, fallback_paths=img_paths)
+                rebuilt_items.append((archivo, item_text, img_paths))
+
+            self._items = rebuilt_items
+
+            refreshed_preview: Dict[str, str] = {}
+            for mk, path_txt in list(self._preview_images.items()):
+                mk_text = str(mk or "").strip()
+                if mk_text and mk_text not in old_markers:
+                    refreshed_preview[mk_text] = str(path_txt or "").strip()
+            for assignment in assignments:
+                marker_name = str(assignment["marker_name"] or "").strip()
+                crop_saved = str(assignment.get("crop_path", "") or "").strip()
+                if marker_name and crop_saved:
+                    refreshed_preview[marker_name] = crop_saved
+            self._preview_images = refreshed_preview
+
+            for seg_key, payload in card_payloads.items():
+                src_path = payload.get("source_path")
+                seg_idx = self._safe_int(payload.get("seg_idx", -1), -1)
+                if not isinstance(src_path, Path) or seg_idx < 0:
+                    continue
+                assignment = assignments_by_source_seg.get((self._seg_v2_source_key(src_path), int(seg_idx)))
+                if not assignment:
+                    continue
+                payload["binding"] = {
+                    "item_num": int(assignment["item_num"]),
+                    "slot": str(assignment["slot"]),
+                    "marker_name": str(assignment["marker_name"]),
+                    "crop_path": str(assignment.get("crop_path", "") or "").strip(),
+                }
+                info_var = card_info_vars.get(seg_key)
+                if info_var is not None:
+                    info_var.set(
+                        f"Asignado item={int(assignment['item_num'])} slot={str(assignment['slot'])} [[Imagen={str(assignment['marker_name'])}]]"
+                    )
+                _refresh_assignment_tree_row(seg_key)
+
+            self._render_output_from_items()
+            self._refresh_training_pairs_from_items()
+            try:
+                self._sync_preview_images_from_items()
+            except Exception:
+                pass
+            if card_payloads:
+                current_selected = str(selected_key.get("value", "") or "").strip()
+                if current_selected in card_payloads:
+                    _set_card_selected(current_selected)
+            _sync_assignment_text_widget()
+            status_var.set(
+                f"Renumeracion aplicada desde item {start_item} | slot={target_slot} | segmentos={len(assignments)} | items_actualizados={linked_items}"
+            )
+            self._log(
+                f"Renumeracion visible aplicada: inicio={start_item} slot={target_slot} segmentos={len(assignments)} items_actualizados={linked_items}"
+            )
+
+        def _on_assignment_tree_select(_event=None) -> None:
+            if assignment_tree_sync_state.get("internal", False):
+                return
+            seg_keys = _selected_tree_seg_keys()
+            if not seg_keys:
+                return
+            _sync_assignment_text_widget(seg_keys)
+            if len(seg_keys) == 1:
+                assignment_hint_var.set(
+                    "Fila seleccionada. Puedes cambiar item/slot arriba y aplicar el cambio."
+                )
+                _set_card_selected(seg_keys[0])
+            else:
+                assignment_hint_var.set(
+                    f"Seleccion multiple: {len(seg_keys)} segmentos cargados en modo texto."
+                )
+                selected_key["value"] = seg_keys[0]
+                _set_card_selected(seg_keys[0])
+
+        def _apply_assignment_text() -> None:
+            try:
+                raw_text = assignment_text.get("1.0", "end-1c")
+            except Exception:
+                raw_text = ""
+            lines = [str(line or "").strip() for line in str(raw_text or "").splitlines()]
+            changed = 0
+            removed = 0
+            errors: List[str] = []
+            touched_seg_keys: List[str] = []
+            for idx_line, line in enumerate(lines, start=1):
+                if not line or line.startswith("#"):
+                    continue
+                parts = re.split(r"\s*-{1,4}>\s*", line, maxsplit=1)
+                if len(parts) != 2:
+                    errors.append(f"L{idx_line}: falta '->'")
+                    continue
+                left = str(parts[0] or "").strip()
+                right = str(parts[1] or "").strip()
+                if not left:
+                    errors.append(f"L{idx_line}: falta segmento")
+                    continue
+                seg_key = str(assignment_label_to_seg.get(left, "") or "").strip()
+                if not seg_key:
+                    errors.append(f"L{idx_line}: segmento no encontrado: {left}")
+                    continue
+                slot_match = re.search(r"\bslot\s*=\s*([A-Za-z_]+)\b", right, flags=re.IGNORECASE)
+                slot_name = self._normalize_binding_slot(slot_match.group(1) if slot_match else "ENUNCIADO")
+                right_wo_slot = re.sub(r"\bslot\s*=\s*[A-Za-z_]+\b", " ", right, flags=re.IGNORECASE).strip()
+                if right_wo_slot in {"-", "", "none", "null", "quitar"}:
+                    if _remove_binding_for_seg(seg_key, silent=True, refresh_runtime=False, sync_text=False):
+                        removed += 1
+                        touched_seg_keys.append(seg_key)
+                    continue
+                item_num = _parse_item_num(right_wo_slot)
+                if item_num <= 0:
+                    errors.append(f"L{idx_line}: item invalido en '{right}'")
+                    continue
+                if _apply_binding_for_seg(
+                    seg_key,
+                    item_num,
+                    slot_name,
+                    silent=True,
+                    refresh_runtime=False,
+                    sync_text=False,
+                ):
+                    changed += 1
+                    touched_seg_keys.append(seg_key)
+            if touched_seg_keys:
+                _refresh_after_binding_updates(touched_seg_keys[0])
+                scope = list(assignment_text_scope.get("seg_keys", []) or touched_seg_keys)
+                _sync_assignment_text_widget(scope)
+            if errors:
+                assignment_hint_var.set("Modo texto con observaciones. Revisa las lineas con error.")
+                preview = "\n".join(errors[:8])
+                if len(errors) > 8:
+                    preview += f"\n... y {len(errors) - 8} error(es) mas."
+                messagebox.showwarning("Recortes", f"Se aplicaron cambios parciales.\n\nCambios: {changed}\nEliminadas: {removed}\n\n{preview}")
+            else:
+                assignment_hint_var.set("Modo texto aplicado correctamente.")
+                status_var.set(f"Modo texto aplicado | cambios={changed} | eliminadas={removed}")
+                _sync_assignment_text_widget(list(assignment_text_scope.get("seg_keys", []) or []))
+
+        def _auto_reassign_from_tags() -> None:
+            stats = self._auto_reassign_segment_bindings(selected_labels=selected_scope)
+            assigned = int(stats.get("assigned", 0))
+            truncated = int(stats.get("truncated", 0))
+            sources_count = int(stats.get("sources", 0))
+            if assigned <= 0:
+                messagebox.showinfo(
+                    "Recortes",
+                    "No se encontraron bindings automáticos a partir de las etiquetas actuales.",
+                )
+                return
+            self._log(
+                f"Reasignacion automatica por etiquetas: fuentes={sources_count}, bindings={assigned}, desajustes={truncated}."
+            )
+            messagebox.showinfo(
+                "Recortes",
+                f"Reasignacion completada.\n\nFuentes evaluadas: {sources_count}\nBindings creados: {assigned}\nFuentes con desajuste segmentos/etiquetas: {truncated}",
+            )
+            top.destroy()
+            self.after(40, self._open_segment_crops_view)
 
         ttk.Button(
-            controls,
+            controls_top,
             text="Asignar recorte a item/slot",
             command=_assign_selected_crop,
             style="Accent.TButton",
         ).pack(side="left", padx=(0, 8))
         ttk.Button(
-            controls,
+            controls_top,
+            text="Eliminar asignacion",
+            command=_remove_selected_binding,
+            style="Ghost.TButton",
+        ).pack(side="left", padx=(0, 8))
+        ttk.Button(
+            controls_top,
+            text="Auto reasignar por etiquetas",
+            command=_auto_reassign_from_tags,
+            style="Ghost.TButton",
+        ).pack(side="left", padx=(0, 8))
+        ttk.Button(
+            controls_top,
             text="Refrescar items",
             command=lambda: (self._sync_items_from_output_text(), _refresh_item_combo("")),
             style="Ghost.TButton",
         ).pack(side="left")
+        ttk.Button(
+            controls_top,
+            text="Renumerar visibles",
+            command=_renumber_visible_bindings,
+            style="Ghost.TButton",
+        ).pack(side="left", padx=(8, 0))
+
+        ttk.Button(
+            assignment_actions,
+            text="Aplicar cambio a fila",
+            command=_assign_selected_crop,
+            style="Accent.TButton",
+        ).pack(side="left")
+        ttk.Button(
+            assignment_actions,
+            text="Quitar asignacion",
+            command=_remove_selected_binding,
+            style="Ghost.TButton",
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            assignment_actions,
+            text="Renumerar visibles",
+            command=_renumber_visible_bindings,
+            style="Ghost.TButton",
+        ).pack(side="left", padx=(8, 0))
+
+        ttk.Button(
+            assignment_text_actions,
+            text="Cargar listado actual",
+            command=lambda: _sync_assignment_text_widget(_selected_tree_seg_keys()),
+            style="Ghost.TButton",
+        ).pack(side="left")
+        ttk.Button(
+            assignment_text_actions,
+            text="Aplicar modo texto",
+            command=_apply_assignment_text,
+            style="Accent.TButton",
+        ).pack(side="left", padx=(8, 0))
+        assignment_tree.bind("<<TreeviewSelect>>", _on_assignment_tree_select)
+
+        def _show_full_current_source() -> None:
+            seg_key = str(selected_key.get("value", "") or "").strip()
+            payload = card_payloads.get(seg_key, {})
+            source_path = payload.get("source_path") if isinstance(payload, dict) else None
+            source_key = self._seg_v2_source_key(source_path) if isinstance(source_path, Path) else ""
+            if not source_key:
+                messagebox.showinfo("Recortes", "Selecciona primero un segmento de la lista.")
+                return
+            _render_source_preview(source_key, select_seg_key=seg_key, force=True, full_source=True)
+
+        def _show_only_selected_segment() -> None:
+            seg_key = str(selected_key.get("value", "") or "").strip()
+            payload = card_payloads.get(seg_key, {})
+            source_path = payload.get("source_path") if isinstance(payload, dict) else None
+            source_key = self._seg_v2_source_key(source_path) if isinstance(source_path, Path) else ""
+            if not source_key:
+                messagebox.showinfo("Recortes", "Selecciona primero un segmento de la lista.")
+                return
+            _render_source_preview(source_key, select_seg_key=seg_key, force=True, full_source=False)
+
+        ttk.Button(
+            preview_controls,
+            text="Ver todos los segmentos de esta fuente",
+            command=_show_full_current_source,
+            style="Ghost.TButton",
+        ).grid(row=0, column=1, sticky="e", padx=(8, 8))
+        ttk.Button(
+            preview_controls,
+            text="Ver solo el seleccionado",
+            command=_show_only_selected_segment,
+            style="Ghost.TButton",
+        ).grid(row=0, column=2, sticky="e")
 
         max_thumb_w = 320
         max_thumb_h = 220
         grid_cols = 3
-        row_idx = 0
-        total_segments = 0
+        render_state: Dict[str, Any] = {"total_segments": 0, "source_idx": 0, "current_source_key": ""}
+        render_batch_size = 8
+        source_preview_meta: Dict[str, Dict[str, Any]] = {}
+        preview_render_state: Dict[str, Any] = {
+            "token": 0,
+            "source_key": "",
+            "target_seg_key": "",
+            "display_mode": "selected",
+            "displayed_seg_key": "",
+        }
 
-        for _idx, label, src in sources:
+        def _bind_card(widget, key_sel: str) -> None:
+            widget.bind("<Button-1>", lambda _e, _k=key_sel: _set_card_selected(_k))
+            widget.bind(
+                "<Double-Button-1>",
+                lambda _e, _k=key_sel: (_set_card_selected(_k), _assign_selected_crop()),
+            )
+
+        def _clear_preview_area() -> None:
+            for child in inner.winfo_children():
+                try:
+                    child.destroy()
+                except Exception:
+                    continue
+            card_widgets.clear()
+            card_info_vars.clear()
+            refs.clear()
+            _refresh_scrollregion()
+
+        def _render_source_preview(
+            source_key: str,
+            *,
+            select_seg_key: str = "",
+            force: bool = False,
+            full_source: bool = False,
+        ) -> None:
+            source_key = str(source_key or "").strip()
+            if not source_key:
+                return
+            requested_mode = "full" if full_source else "selected"
+            requested_seg_key = str(select_seg_key or "")
+            displayed_mode = str(preview_render_state.get("display_mode") or "selected")
+            displayed_seg_key = str(preview_render_state.get("displayed_seg_key") or "")
+            if (
+                (not force)
+                and str(render_state.get("current_source_key") or "") == source_key
+                and card_widgets
+                and displayed_mode == requested_mode
+                and (requested_mode == "full" or displayed_seg_key == requested_seg_key)
+            ):
+                if select_seg_key:
+                    preview_render_state["target_seg_key"] = str(select_seg_key)
+                    _apply_card_selection_styles(str(select_seg_key))
+                    _sync_tree_selection(str(select_seg_key))
+                    _refresh_scrollregion()
+                return
+            if (
+                (not force)
+                and str(preview_render_state.get("source_key") or "") == source_key
+                and str(preview_render_state.get("display_mode") or "selected") == requested_mode
+            ):
+                if select_seg_key:
+                    preview_render_state["target_seg_key"] = str(select_seg_key)
+                return
+            meta = source_preview_meta.get(source_key)
+            if not isinstance(meta, dict):
+                return
+            render_state["current_source_key"] = source_key
+            preview_render_state["token"] = int(preview_render_state.get("token", 0) or 0) + 1
+            preview_render_state["source_key"] = source_key
+            preview_render_state["target_seg_key"] = str(select_seg_key or "")
+            preview_render_state["display_mode"] = requested_mode
+            preview_render_state["displayed_seg_key"] = requested_seg_key if requested_mode != "full" else ""
+            render_token = int(preview_render_state["token"])
+            _set_preview_mode_label()
+            _clear_preview_area()
+
+            label = str(meta.get("label", "") or "")
+            src = meta.get("src")
+            boxes = list(meta.get("boxes", []) or [])
+            source_stem = str(meta.get("source_stem", "") or "")
+            source_bindings = self._get_segment_bindings_by_source_key(source_key)
+            source_item_values[source_stem] = _collect_item_values_for_source(source_stem)
+
+            render_entries: List[Tuple[int, Tuple[int, int, int, int]]] = []
+            if requested_mode == "full":
+                render_entries = list(enumerate(boxes))
+            else:
+                target_idx: int | None = None
+                if requested_seg_key:
+                    target_payload = card_payloads.get(requested_seg_key, {})
+                    if isinstance(target_payload, dict):
+                        idx_tmp = self._safe_int(target_payload.get("seg_idx", -1), -1)
+                        if idx_tmp >= 0:
+                            target_idx = int(idx_tmp)
+                if target_idx is None and boxes:
+                    target_idx = 0
+                if target_idx is not None and 0 <= target_idx < len(boxes):
+                    render_entries = [(int(target_idx), boxes[int(target_idx)])]
+
+            section_suffix = f"segmentos: {len(boxes)}" if requested_mode == "full" else "segmento seleccionado"
+            section = ttk.LabelFrame(inner, text=f"{label}  |  {section_suffix}")
+            section.grid(row=0, column=0, sticky="ew", padx=4, pady=(8, 6))
+            _bind_scroll_support(section)
+            for c in range(grid_cols):
+                section.columnconfigure(c, weight=1)
+
+            if not render_entries:
+                empty_lbl = ttk.Label(section, text="(sin recortes)")
+                empty_lbl.grid(row=0, column=0, sticky="w", padx=10, pady=(6, 8))
+                _bind_scroll_support(empty_lbl)
+                preview_render_state["source_key"] = ""
+                _refresh_scrollregion()
+                return
+
+            try:
+                source_im = Image.open(src).convert("RGB")
+            except Exception:
+                error_lbl = ttk.Label(section, text="(no se pudo abrir imagen fuente)")
+                error_lbl.grid(row=0, column=0, sticky="w", padx=10, pady=(6, 8))
+                _bind_scroll_support(error_lbl)
+                preview_render_state["source_key"] = ""
+                _refresh_scrollregion()
+                return
+
+            preview_batch_size = 3
+
+            def _finish_preview_render() -> None:
+                try:
+                    source_im.close()
+                except Exception:
+                    pass
+                preview_render_state["source_key"] = ""
+                top._segment_crop_refs = refs
+                target_key = str(preview_render_state.get("target_seg_key") or selected_key.get("value", "") or "").strip()
+                if target_key:
+                    _apply_card_selection_styles(target_key)
+                _refresh_scrollregion()
+                try:
+                    top.after_idle(_refresh_scrollregion)
+                except Exception:
+                    pass
+
+            def _render_preview_batch(start_idx: int = 0) -> None:
+                if int(preview_render_state.get("token", 0) or 0) != render_token:
+                    try:
+                        source_im.close()
+                    except Exception:
+                        pass
+                    return
+                end_idx = min(len(render_entries), start_idx + preview_batch_size)
+                for idx_box in range(start_idx, end_idx):
+                    original_idx, (x1, y1, x2, y2) = render_entries[idx_box]
+                    crop = source_im.crop((x1, y1, x2, y2))
+                    cw, ch = crop.size
+                    if cw <= 1 or ch <= 1:
+                        continue
+                    thumb_scale = min(max_thumb_w / float(cw), max_thumb_h / float(ch), 1.0)
+                    if thumb_scale < 1.0:
+                        crop = crop.resize(
+                            (max(1, int(round(cw * thumb_scale))), max(1, int(round(ch * thumb_scale)))),
+                            Image.Resampling.LANCZOS,
+                        )
+                    tk_img = ImageTk.PhotoImage(crop)
+                    refs.append(tk_img)
+
+                    seg_key = f"{source_key}::{original_idx}:{x1}:{y1}:{x2}:{y2}"
+                    payload = card_payloads.get(seg_key, {})
+                    binding_payload = payload.get("binding", {}) if isinstance(payload, dict) else {}
+                    r = idx_box // grid_cols
+                    c = idx_box % grid_cols
+                    card = tk.Frame(
+                        section,
+                        bg=self.palette["surface"],
+                        highlightthickness=2,
+                        highlightbackground=self.palette.get("border", "#334155"),
+                        highlightcolor=self.palette.get("border", "#334155"),
+                        bd=0,
+                        padx=4,
+                        pady=4,
+                    )
+                    card.grid(row=r, column=c, sticky="nw", padx=6, pady=6)
+                    card_widgets[seg_key] = card
+                    _bind_scroll_support(card)
+
+                    img_lbl = tk.Label(card, image=tk_img, bg=self.palette["surface"])
+                    img_lbl.pack(anchor="w")
+                    _bind_scroll_support(img_lbl)
+                    seg_lbl = tk.Label(
+                        card,
+                        text=f"seg-{original_idx + 1}: ({x1},{y1},{x2},{y2})",
+                        bg=self.palette["surface"],
+                        fg=self.palette["text"],
+                    )
+                    seg_lbl.pack(anchor="w", pady=(4, 0))
+                    _bind_scroll_support(seg_lbl)
+
+                    if isinstance(binding_payload, dict) and int(self._safe_int(binding_payload.get("item_num", 0), 0)) > 0:
+                        b_num = int(self._safe_int(binding_payload.get("item_num", 0), 0))
+                        b_slot = self._normalize_binding_slot(str(binding_payload.get("slot", "ENUNCIADO") or "ENUNCIADO"))
+                        b_marker = str(binding_payload.get("marker_name", "") or "").strip() or self._build_binding_marker_name(item_num=b_num, slot=b_slot)
+                        info_txt = f"Asignado item={b_num} slot={b_slot} [[Imagen={b_marker}]]"
+                    else:
+                        info_txt = "Sin asignacion"
+                    info_var = tk.StringVar(value=info_txt)
+                    card_info_vars[seg_key] = info_var
+                    info_lbl = ttk.Label(card, textvariable=info_var, style="SubHeader.TLabel")
+                    info_lbl.pack(anchor="w", pady=(2, 0))
+                    _bind_scroll_support(info_lbl)
+
+                    _bind_card(card, seg_key)
+                    _bind_card(img_lbl, seg_key)
+
+                target_key = str(preview_render_state.get("target_seg_key") or selected_key.get("value", "") or "").strip()
+                if target_key:
+                    _apply_card_selection_styles(target_key)
+                _refresh_scrollregion()
+                if end_idx < len(render_entries):
+                    status_var.set(
+                        f"Cargando vista previa de {label}... segmentos {end_idx}/{len(render_entries)}"
+                    )
+                    top.after(1, lambda: _render_preview_batch(end_idx))
+                else:
+                    _finish_preview_render()
+
+            status_var.set(f"Cargando vista previa de {label}... segmentos 0/{len(render_entries)}")
+            top.after(1, lambda: _render_preview_batch(0))
+
+        def _finalize_render() -> None:
+            if card_payloads:
+                first_key = next(iter(card_payloads.keys()))
+                _set_card_selected(first_key)
+            else:
+                _refresh_item_combo("")
+                _clear_preview_area()
+            _sync_assignment_text_widget()
+            total_segments = int(render_state["total_segments"])
+            self._log(f"Recortes: {len(sources)} imagen(es), {total_segments} segmento(s) indexados.")
+            status_var.set(
+                f"Selecciona un recorte y asigna item + slot. Fuentes cargadas: {len(sources)} | segmentos: {total_segments}"
+            )
+            assignment_hint_var.set(
+                "Selecciona una fila, cambia item/slot arriba y aplica el cambio."
+            )
+
+        def _index_one_source(label: str, src: Path, source_order: int) -> None:
             src_key = self._seg_v2_source_key(src)
             try:
                 segments = self._get_segments_v2_for_source(src)
@@ -4848,105 +10479,70 @@ class TranscriptorWindow(tk.Toplevel):
                 if x2 <= x1 or y2 <= y1:
                     continue
                 boxes.append((x1, y1, x2, y2))
+            boxes = self._sort_boxes_reading_order(boxes)
             source_stem = str(src.stem or "").strip()
             source_item_values[source_stem] = _collect_item_values_for_source(source_stem)
             source_bindings = self._get_segment_bindings_by_source_key(src_key)
-
-            section = ttk.LabelFrame(inner, text=f"{label}  |  segmentos: {len(boxes)}")
-            section.grid(row=row_idx, column=0, sticky="ew", padx=4, pady=(8, 6))
-            for c in range(grid_cols):
-                section.columnconfigure(c, weight=1)
-            row_idx += 1
-
-            if not boxes:
-                ttk.Label(section, text="(sin recortes)").grid(row=0, column=0, sticky="w", padx=10, pady=(6, 8))
-                continue
-
-            try:
-                source_im = Image.open(src).convert("RGB")
-            except Exception:
-                ttk.Label(section, text="(no se pudo abrir imagen fuente)").grid(row=0, column=0, sticky="w", padx=10, pady=(6, 8))
-                continue
-
+            source_preview_meta[src_key] = {
+                "label": label,
+                "src": src,
+                "boxes": boxes,
+                "source_stem": source_stem,
+                "source_order": int(source_order),
+            }
             for idx_box, (x1, y1, x2, y2) in enumerate(boxes):
-                crop = source_im.crop((x1, y1, x2, y2))
-                cw, ch = crop.size
-                if cw <= 1 or ch <= 1:
-                    continue
-                thumb_scale = min(max_thumb_w / float(cw), max_thumb_h / float(ch), 1.0)
-                if thumb_scale < 1.0:
-                    crop = crop.resize(
-                        (max(1, int(round(cw * thumb_scale))), max(1, int(round(ch * thumb_scale)))),
-                        Image.Resampling.LANCZOS,
-                    )
-                tk_img = ImageTk.PhotoImage(crop)
-                refs.append(tk_img)
-
                 seg_key = f"{src_key}::{idx_box}:{x1}:{y1}:{x2}:{y2}"
                 binding_payload = source_bindings.get(int(idx_box), {})
                 card_payloads[seg_key] = {
                     "source_path": src,
                     "source_name": label,
                     "source_stem": source_stem,
+                    "source_order": int(source_order),
                     "bbox_px": (x1, y1, x2, y2),
                     "seg_idx": idx_box,
                     "binding": dict(binding_payload) if isinstance(binding_payload, dict) else {},
                 }
+                _refresh_assignment_tree_row(seg_key)
+                render_state["total_segments"] = int(render_state["total_segments"]) + 1
 
-                r = idx_box // grid_cols
-                c = idx_box % grid_cols
-                card = tk.Frame(
-                    section,
-                    bg=self.palette["surface"],
-                    highlightthickness=2,
-                    highlightbackground=self.palette.get("border", "#334155"),
-                    highlightcolor=self.palette.get("border", "#334155"),
-                    bd=0,
-                    padx=4,
-                    pady=4,
-                )
-                card.grid(row=r, column=c, sticky="nw", padx=6, pady=6)
-                card_widgets[seg_key] = card
+        def _render_next_batch() -> None:
+            start = int(render_state["source_idx"])
+            if start >= len(sources):
+                _finalize_render()
+                return
+            end = min(len(sources), start + int(render_batch_size))
+            for idx_order, (_idx, label, src) in enumerate(sources[start:end], start=start):
+                _index_one_source(label, src, idx_order)
+            render_state["source_idx"] = end
+            status_var.set(
+                f"Cargando recortes... fuentes {end}/{len(sources)} | segmentos {int(render_state['total_segments'])}"
+            )
+            assignment_hint_var.set(
+                f"Cargando lista de asignaciones... {end}/{len(sources)} fuente(s) procesadas."
+            )
+            try:
+                top.update_idletasks()
+            except Exception:
+                pass
+            if end < len(sources):
+                top.after(10, _render_next_batch)
+            else:
+                _finalize_render()
 
-                img_lbl = tk.Label(card, image=tk_img, bg=self.palette["surface"])
-                img_lbl.pack(anchor="w")
-                tk.Label(
-                    card,
-                    text=f"seg-{idx_box + 1}: ({x1},{y1},{x2},{y2})",
-                    bg=self.palette["surface"],
-                    fg=self.palette["text"],
-                ).pack(anchor="w", pady=(4, 0))
-                if isinstance(binding_payload, dict) and int(self._safe_int(binding_payload.get("item_num", 0), 0)) > 0:
-                    b_num = int(self._safe_int(binding_payload.get("item_num", 0), 0))
-                    b_slot = self._normalize_binding_slot(str(binding_payload.get("slot", "ENUNCIADO") or "ENUNCIADO"))
-                    b_marker = str(binding_payload.get("marker_name", "") or "").strip() or self._build_binding_marker_name(item_num=b_num, slot=b_slot)
-                    info_txt = f"Asignado item={b_num} slot={b_slot} [[Imagen={b_marker}]]"
-                else:
-                    info_txt = "Sin asignacion"
-                info_var = tk.StringVar(value=info_txt)
-                card_info_vars[seg_key] = info_var
-                ttk.Label(card, textvariable=info_var, style="SubHeader.TLabel").pack(anchor="w", pady=(2, 0))
+        status_var.set(f"Cargando recortes... fuentes 0/{len(sources)} | segmentos 0")
+        assignment_hint_var.set("Preparando lista de asignaciones...")
+        try:
+            top.after(1, _render_next_batch)
+        except Exception:
+            _render_next_batch()
 
-                def _bind_card(widget, key_sel: str) -> None:
-                    widget.bind("<Button-1>", lambda _e, _k=key_sel: _set_card_selected(_k))
-                    widget.bind(
-                        "<Double-Button-1>",
-                        lambda _e, _k=key_sel: (_set_card_selected(_k), _assign_selected_crop()),
-                    )
-
-                _bind_card(card, seg_key)
-                _bind_card(img_lbl, seg_key)
-                total_segments += 1
-
-        top._segment_crop_refs = refs
-        if card_payloads:
-            first_key = next(iter(card_payloads.keys()))
-            _set_card_selected(first_key)
-        else:
-            _refresh_item_combo("")
-        self._log(f"Recortes: {len(sources)} imagen(es), {total_segments} segmento(s) mostrados.")
-
-    def _open_segment_editor_v2(self, *, source_path: Path, initial_boxes: List[Tuple[int, int, int, int]]) -> None:
+    def _open_segment_editor_v2(
+        self,
+        *,
+        source_path: Path,
+        initial_boxes: List[Tuple[int, int, int, int]],
+        reuse_top: Optional[tk.Toplevel] = None,
+    ) -> None:
         try:
             from PIL import Image, ImageTk  # type: ignore
         except Exception:
@@ -4955,141 +10551,160 @@ class TranscriptorWindow(tk.Toplevel):
 
         if not self._ui_alive():
             return
+        top = reuse_top or self._segment_editor_v2_window
+        if top is not None:
+            try:
+                if not bool(top.winfo_exists()):
+                    top = None
+            except Exception:
+                top = None
+        if top is None:
+            top = tk.Toplevel(self)
+            self._segment_editor_v2_window = top
         try:
-            src_img = Image.open(source_path).convert("RGB")
-        except Exception as exc:
-            messagebox.showerror("Segmentacion V2", f"No se pudo abrir imagen:\n{exc}")
-            return
+            top.grab_release()
+        except Exception:
+            pass
 
-        ow, oh = src_img.size
-        if ow <= 1 or oh <= 1:
-            messagebox.showwarning("Segmentacion V2", "Imagen invalida para editar segmentos.")
-            return
+        ctx = getattr(top, "_segment_editor_v2_ctx", None)
+        if not isinstance(ctx, dict):
+            for child in list(top.winfo_children()):
+                try:
+                    child.destroy()
+                except Exception:
+                    pass
+            ctx = {
+                "source_path": None,
+                "boxes": [],
+                "initial_boxes_signature": [],
+                "selected": -1,
+                "mode": None,
+                "edge": (False, False, False, False),
+                "start_xy": (0.0, 0.0),
+                "start_box": None,
+                "edit_enabled": False,
+                "edit_index": -1,
+                "min_size": 24.0,
+                "scale": 1.0,
+                "ow": 1.0,
+                "oh": 1.0,
+                "dw": 1,
+                "dh": 1,
+            }
+            root = ttk.Frame(top, padding=10)
+            root.pack(fill="both", expand=True)
+            toolbar = ttk.Frame(root)
+            toolbar.pack(fill="x", pady=(0, 8))
+            info_var = tk.StringVar(value="")
+            figure_var = tk.StringVar(value="")
+            ttk.Label(toolbar, textvariable=info_var).pack(side="left")
+            ttk.Label(toolbar, textvariable=figure_var, style="SubHeader.TLabel").pack(side="right")
+            frame = ttk.Frame(root)
+            frame.pack(fill="both", expand=True)
+            frame.columnconfigure(0, weight=1)
+            frame.rowconfigure(0, weight=1)
+            canvas = tk.Canvas(
+                frame,
+                bg=self.palette["surface"],
+                highlightthickness=1,
+                highlightbackground=self.palette["border"],
+            )
+            xsb = ttk.Scrollbar(frame, orient="horizontal", command=canvas.xview)
+            ysb = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
+            canvas.configure(xscrollcommand=xsb.set, yscrollcommand=ysb.set)
+            canvas.grid(row=0, column=0, sticky="nsew")
+            ysb.grid(row=0, column=1, sticky="ns")
+            xsb.grid(row=1, column=0, sticky="ew")
+            image_id = canvas.create_image(0, 0, anchor="nw")
+            controls = ttk.Frame(root)
+            controls.pack(fill="x", pady=(8, 0))
+            ctx.update(
+                {
+                    "top": top,
+                    "canvas": canvas,
+                    "image_id": image_id,
+                    "info_var": info_var,
+                    "figure_var": figure_var,
+                    "controls": controls,
+                }
+            )
+            setattr(top, "_segment_editor_v2_ctx", ctx)
+        else:
+            canvas = ctx["canvas"]
+            info_var = ctx["info_var"]
+            figure_var = ctx["figure_var"]
+            controls = ctx["controls"]
 
-        screen_w = max(1024, int(self.winfo_screenwidth() or 1920))
-        screen_h = max(700, int(self.winfo_screenheight() or 1080))
-        # Keep some room for toolbars/buttons so controls stay visible.
-        max_w = max(900, screen_w - 260)
-        max_h = max(440, screen_h - 420)
-        scale = min(1.0, max_w / float(ow), max_h / float(oh))
-        dw = max(1, int(round(ow * scale)))
-        dh = max(1, int(round(oh * scale)))
-        disp = src_img.resize((dw, dh), Image.Resampling.LANCZOS) if scale < 1.0 else src_img.copy()
+        canvas = ctx["canvas"]
+        info_var = ctx["info_var"]
+        figure_var = ctx["figure_var"]
 
-        top = tk.Toplevel(self)
-        top.title(f"Editor Segmentacion V2 - {source_path.name}")
-        top_w = int(min(screen_w - 40, max(900, min(dw + 110, 1600))))
-        top_h = int(min(screen_h - 60, max(600, min(dh + 230, 1100))))
-        top.geometry(f"{top_w}x{top_h}+20+20")
-        top.minsize(min(860, top_w), min(560, top_h))
-        top.transient(self)
-
-        state = {
-            "boxes": [list(b) for b in initial_boxes],
-            "selected": 0 if initial_boxes else -1,
-            "mode": None,
-            "edge": (False, False, False, False),  # L,R,T,B
-            "start_xy": (0.0, 0.0),
-            "start_box": None,
-            "edit_enabled": False,
-            "edit_index": -1,
-            "min_size": 24.0,
-            "scale": float(scale),
-            "ow": float(ow),
-            "oh": float(oh),
-        }
-
-        root = ttk.Frame(top, padding=10)
-        root.pack(fill="both", expand=True)
-
-        toolbar = ttk.Frame(root)
-        toolbar.pack(fill="x", pady=(0, 8))
-
-        info_var = tk.StringVar(value="")
-        ttk.Label(toolbar, textvariable=info_var).pack(side="left")
-        figure_var = tk.StringVar(value="")
-        ttk.Label(toolbar, textvariable=figure_var, style="SubHeader.TLabel").pack(side="right")
+        def _current_source() -> Path:
+            return Path(ctx.get("source_path"))
 
         def to_canvas(x: float, y: float) -> Tuple[float, float]:
+            scale = float(ctx.get("scale", 1.0) or 1.0)
             return (x * scale, y * scale)
 
         def to_image(cx: float, cy: float) -> Tuple[float, float]:
+            scale = float(ctx.get("scale", 1.0) or 1.0)
             return (cx / max(scale, 1e-8), cy / max(scale, 1e-8))
+
+        def event_to_canvas_xy(event) -> Tuple[float, float]:
+            try:
+                x_root = float(getattr(event, "x_root"))
+                y_root = float(getattr(event, "y_root"))
+                root_x = float(canvas.winfo_rootx())
+                root_y = float(canvas.winfo_rooty())
+                return (float(canvas.canvasx(x_root - root_x)), float(canvas.canvasy(y_root - root_y)))
+            except Exception:
+                return (
+                    float(canvas.canvasx(getattr(event, "x", 0.0))),
+                    float(canvas.canvasy(getattr(event, "y", 0.0))),
+                )
 
         def _norm_to_px_local(box_norm: Tuple[float, float, float, float]) -> Optional[Tuple[int, int, int, int]]:
             try:
                 x1, y1, x2, y2 = [float(v) for v in box_norm]
+                ow = float(ctx.get("ow", 1.0) or 1.0)
+                oh = float(ctx.get("oh", 1.0) or 1.0)
             except Exception:
                 return None
             px_box = (
-                int(round(max(0.0, min(1.0, x1)) * float(ow))),
-                int(round(max(0.0, min(1.0, y1)) * float(oh))),
-                int(round(max(0.0, min(1.0, x2)) * float(ow))),
-                int(round(max(0.0, min(1.0, y2)) * float(oh))),
+                int(round(max(0.0, min(1.0, x1)) * ow)),
+                int(round(max(0.0, min(1.0, y1)) * oh)),
+                int(round(max(0.0, min(1.0, x2)) * ow)),
+                int(round(max(0.0, min(1.0, y2)) * oh)),
             )
-            return self._normalize_box_px(px_box, width=ow, height=oh)
-
-        frame = ttk.Frame(root)
-        frame.pack(fill="both", expand=True)
-        frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(0, weight=1)
-        canvas = tk.Canvas(
-            frame,
-            width=max(1, min(dw, int(max_w))),
-            height=max(1, min(dh, int(max_h))),
-            bg=self.palette["surface"],
-            highlightthickness=1,
-            highlightbackground=self.palette["border"],
-        )
-        xsb = ttk.Scrollbar(frame, orient="horizontal", command=canvas.xview)
-        ysb = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
-        canvas.configure(xscrollcommand=xsb.set, yscrollcommand=ysb.set)
-        canvas.grid(row=0, column=0, sticky="nsew")
-        ysb.grid(row=0, column=1, sticky="ns")
-        xsb.grid(row=1, column=0, sticky="ew")
-
-        tk_img = ImageTk.PhotoImage(disp)
-        canvas.create_image(0, 0, anchor="nw", image=tk_img)
-        canvas.image_ref = tk_img
-        canvas.config(scrollregion=(0, 0, dw, dh))
-
-        def on_mousewheel(event) -> None:
-            try:
-                delta = int(getattr(event, "delta", 0))
-                step = -1 if delta > 0 else 1
-                if bool(getattr(event, "state", 0) & 0x1):
-                    canvas.xview_scroll(step, "units")
-                else:
-                    canvas.yview_scroll(step, "units")
-            except Exception:
-                return
-
-        canvas.bind("<MouseWheel>", on_mousewheel)
-        canvas.bind("<Shift-MouseWheel>", on_mousewheel)
-        canvas.bind("<Button-4>", lambda _e: canvas.yview_scroll(-1, "units"))
-        canvas.bind("<Button-5>", lambda _e: canvas.yview_scroll(1, "units"))
+            return self._normalize_box_px(px_box, width=int(ow), height=int(oh))
 
         def clamp_box(box: List[float]) -> List[float]:
             x1, y1, x2, y2 = box
-            x1 = max(0.0, min(state["ow"] - 1.0, x1))
-            y1 = max(0.0, min(state["oh"] - 1.0, y1))
-            x2 = max(x1 + state["min_size"], min(state["ow"], x2))
-            y2 = max(y1 + state["min_size"], min(state["oh"], y2))
+            ow = float(ctx.get("ow", 1.0) or 1.0)
+            oh = float(ctx.get("oh", 1.0) or 1.0)
+            min_size = float(ctx.get("min_size", 24.0) or 24.0)
+            x1 = max(0.0, min(ow - 1.0, x1))
+            y1 = max(0.0, min(oh - 1.0, y1))
+            x2 = max(x1 + min_size, min(ow, x2))
+            y2 = max(y1 + min_size, min(oh, y2))
             return [x1, y1, x2, y2]
 
         def draw_boxes() -> None:
+            source_now = _current_source()
+            scale = float(ctx.get("scale", 1.0) or 1.0)
+            dh = int(ctx.get("dh", 1) or 1)
             canvas.delete("segbox")
             canvas.delete("figbox")
-            boxes = state["boxes"]
-            sel = int(state["selected"])
-            used_now = self._get_used_segment_indices(source_path)
+            boxes = list(ctx.get("boxes", []) or [])
+            sel = int(ctx.get("selected", -1))
+            used_now = self._get_used_segment_indices(source_now)
             used_count = 0
             for i, b in enumerate(boxes):
                 x1, y1, x2, y2 = [float(v) for v in b]
                 cx1, cy1 = to_canvas(x1, y1)
                 cx2, cy2 = to_canvas(x2, y2)
                 is_used = i in used_now
-                is_edit_active = bool(state.get("edit_enabled")) and int(state.get("edit_index", -1)) == i
+                is_edit_active = bool(ctx.get("edit_enabled")) and int(ctx.get("edit_index", -1)) == i
                 if is_used:
                     used_count += 1
                 if i == sel:
@@ -5118,7 +10733,7 @@ class TranscriptorWindow(tk.Toplevel):
                         canvas.create_rectangle(hx - hs, hy - hs, hx + hs, hy + hs, outline=color, fill=color, tags=("segbox",))
 
             manual_boxes: List[Tuple[int, int, int, int]] = []
-            for entry in self._get_figure_boxes(source_path):
+            for entry in self._get_figure_boxes(source_now):
                 if str(entry.get("source", "")).strip().lower() != "manual":
                     continue
                 if not self._as_bool(entry.get("confirmed"), True):
@@ -5130,7 +10745,7 @@ class TranscriptorWindow(tk.Toplevel):
                     manual_boxes.append(tuple(int(v) for v in bbox_raw[:4]))
                 except Exception:
                     continue
-            yolo_payload = self._get_cached_yolo_suggestion(source_path)
+            yolo_payload = self._get_cached_yolo_suggestion(source_now)
             yolo_box_px: Optional[Tuple[int, int, int, int]] = None
             if yolo_payload and bool(yolo_payload.get("has_figure")) and yolo_payload.get("bbox_norm") is not None:
                 yolo_box_px = _norm_to_px_local(tuple(float(v) for v in yolo_payload["bbox_norm"]))  # type: ignore[arg-type]
@@ -5186,7 +10801,7 @@ class TranscriptorWindow(tk.Toplevel):
                 st = "OK" if sel in used_now else "PEND"
                 edit_state = (
                     "ON"
-                    if bool(state.get("edit_enabled")) and int(state.get("edit_index", -1)) == sel
+                    if bool(ctx.get("edit_enabled")) and int(ctx.get("edit_index", -1)) == sel
                     else "OFF (doble clic para activar)"
                 )
                 info_var.set(
@@ -5206,9 +10821,11 @@ class TranscriptorWindow(tk.Toplevel):
                 figure_var.set("Figura: sin caja")
 
         def hit_test(ix: float, iy: float) -> Tuple[int, Tuple[bool, bool, bool, bool]]:
+            scale = float(ctx.get("scale", 1.0) or 1.0)
+            boxes = list(ctx.get("boxes", []) or [])
             tol = max(6.0, 10.0 / max(scale, 1e-8))
-            for i in range(len(state["boxes"]) - 1, -1, -1):
-                x1, y1, x2, y2 = [float(v) for v in state["boxes"][i]]
+            for i in range(len(boxes) - 1, -1, -1):
+                x1, y1, x2, y2 = [float(v) for v in boxes[i]]
                 inside = (x1 <= ix <= x2) and (y1 <= iy <= y2)
                 if not inside:
                     continue
@@ -5220,53 +10837,54 @@ class TranscriptorWindow(tk.Toplevel):
             return -1, (False, False, False, False)
 
         def on_down(event) -> None:
-            cx, cy = canvas.canvasx(event.x), canvas.canvasy(event.y)
+            cx, cy = event_to_canvas_xy(event)
             ix, iy = to_image(cx, cy)
             idx, edge = hit_test(ix, iy)
             if idx < 0:
-                if bool(state.get("edit_enabled")):
-                    state["mode"] = None
-                    state["edge"] = (False, False, False, False)
-                    state["start_box"] = None
+                if bool(ctx.get("edit_enabled")):
+                    ctx["mode"] = None
+                    ctx["edge"] = (False, False, False, False)
+                    ctx["start_box"] = None
                     draw_boxes()
                     return
-                state["selected"] = -1
-                state["mode"] = None
+                ctx["selected"] = -1
+                ctx["mode"] = None
                 draw_boxes()
                 return
-            if bool(state.get("edit_enabled")) and int(state.get("edit_index", -1)) != idx:
-                state["mode"] = None
-                state["edge"] = (False, False, False, False)
-                state["start_box"] = None
+            if bool(ctx.get("edit_enabled")) and int(ctx.get("edit_index", -1)) != idx:
+                ctx["mode"] = None
+                ctx["edge"] = (False, False, False, False)
+                ctx["start_box"] = None
                 draw_boxes()
                 return
-            state["selected"] = idx
-            if not bool(state.get("edit_enabled")):
-                state["mode"] = None
-                state["edge"] = (False, False, False, False)
-                state["start_box"] = None
+            ctx["selected"] = idx
+            if not bool(ctx.get("edit_enabled")):
+                ctx["mode"] = None
+                ctx["edge"] = (False, False, False, False)
+                ctx["start_box"] = None
                 draw_boxes()
                 return
-            state["start_xy"] = (ix, iy)
-            state["start_box"] = list(state["boxes"][idx])
+            ctx["start_xy"] = (ix, iy)
+            ctx["start_box"] = list(ctx["boxes"][idx])
             if any(edge):
-                state["mode"] = "resize"
-                state["edge"] = edge
+                ctx["mode"] = "resize"
+                ctx["edge"] = edge
             else:
-                state["mode"] = "move"
-                state["edge"] = (False, False, False, False)
+                ctx["mode"] = "move"
+                ctx["edge"] = (False, False, False, False)
             draw_boxes()
 
         def on_move(event) -> None:
-            sel = int(state["selected"])
-            mode = state["mode"]
-            if sel < 0 or sel >= len(state["boxes"]) or not mode:
+            mode = ctx.get("mode")
+            sel = int(ctx.get("selected", -1))
+            boxes = ctx.get("boxes", [])
+            if sel < 0 or sel >= len(boxes) or not mode:
                 return
-            cx, cy = canvas.canvasx(event.x), canvas.canvasy(event.y)
+            cx, cy = event_to_canvas_xy(event)
             ix, iy = to_image(cx, cy)
-            sx, sy = state["start_xy"]
+            sx, sy = ctx["start_xy"]
             dx, dy = ix - sx, iy - sy
-            sb = list(state["start_box"] or state["boxes"][sel])
+            sb = list(ctx.get("start_box") or boxes[sel])
             x1, y1, x2, y2 = [float(v) for v in sb]
             if mode == "move":
                 nx1, ny1, nx2, ny2 = x1 + dx, y1 + dy, x2 + dx, y2 + dy
@@ -5275,15 +10893,15 @@ class TranscriptorWindow(tk.Toplevel):
                     nx1, nx2 = 0.0, bw
                 if ny1 < 0:
                     ny1, ny2 = 0.0, bh
-                if nx2 > state["ow"]:
-                    nx2 = state["ow"]
+                if nx2 > float(ctx.get("ow", 1.0)):
+                    nx2 = float(ctx.get("ow", 1.0))
                     nx1 = nx2 - bw
-                if ny2 > state["oh"]:
-                    ny2 = state["oh"]
+                if ny2 > float(ctx.get("oh", 1.0)):
+                    ny2 = float(ctx.get("oh", 1.0))
                     ny1 = ny2 - bh
-                state["boxes"][sel] = [nx1, ny1, nx2, ny2]
+                boxes[sel] = [nx1, ny1, nx2, ny2]
             else:
-                l, r, t, b = state["edge"]
+                l, r, t, b = ctx["edge"]
                 nx1, ny1, nx2, ny2 = x1, y1, x2, y2
                 if l:
                     nx1 = x1 + dx
@@ -5293,191 +10911,366 @@ class TranscriptorWindow(tk.Toplevel):
                     ny1 = y1 + dy
                 if b:
                     ny2 = y2 + dy
-                if nx2 - nx1 < state["min_size"]:
+                min_size = float(ctx.get("min_size", 24.0) or 24.0)
+                if nx2 - nx1 < min_size:
                     if l:
-                        nx1 = nx2 - state["min_size"]
+                        nx1 = nx2 - min_size
                     else:
-                        nx2 = nx1 + state["min_size"]
-                if ny2 - ny1 < state["min_size"]:
+                        nx2 = nx1 + min_size
+                if ny2 - ny1 < min_size:
                     if t:
-                        ny1 = ny2 - state["min_size"]
+                        ny1 = ny2 - min_size
                     else:
-                        ny2 = ny1 + state["min_size"]
-                state["boxes"][sel] = clamp_box([nx1, ny1, nx2, ny2])
+                        ny2 = ny1 + min_size
+                boxes[sel] = clamp_box([nx1, ny1, nx2, ny2])
             draw_boxes()
 
-        def on_up(_event) -> None:
-            state["mode"] = None
-            state["edge"] = (False, False, False, False)
-            state["start_box"] = None
+        def on_up(event) -> None:
+            ctx["mode"] = None
+            ctx["edge"] = (False, False, False, False)
+            ctx["start_box"] = None
 
         def on_double_click(event) -> None:
             cx, cy = canvas.canvasx(event.x), canvas.canvasy(event.y)
             ix, iy = to_image(cx, cy)
             idx, _edge = hit_test(ix, iy)
             if idx < 0:
-                was_enabled = bool(state.get("edit_enabled"))
-                state["selected"] = -1
-                state["edit_enabled"] = False
-                state["edit_index"] = -1
-                state["mode"] = None
-                state["edge"] = (False, False, False, False)
-                state["start_box"] = None
+                was_enabled = bool(ctx.get("edit_enabled"))
+                ctx["selected"] = -1
+                ctx["edit_enabled"] = False
+                ctx["edit_index"] = -1
+                ctx["mode"] = None
+                ctx["edge"] = (False, False, False, False)
+                ctx["start_box"] = None
                 draw_boxes()
                 if was_enabled:
-                    self._log(f"Editor V2: edicion desactivada (doble clic fuera) en {source_path.name}.")
+                    self._log(f"Editor V2: edicion desactivada (doble clic fuera) en {_current_source().name}.")
                 return
-            state["selected"] = idx
-            state["edit_enabled"] = True
-            state["edit_index"] = idx
-            state["mode"] = None
-            state["edge"] = (False, False, False, False)
-            state["start_box"] = None
+            ctx["selected"] = idx
+            ctx["edit_enabled"] = True
+            ctx["edit_index"] = idx
+            ctx["mode"] = None
+            ctx["edge"] = (False, False, False, False)
+            ctx["start_box"] = None
             draw_boxes()
-            self._log(f"Editor V2: edicion activada (doble clic) en seg-{idx + 1} de {source_path.name}.")
+            self._log(f"Editor V2: edicion activada (doble clic) en seg-{idx + 1} de {_current_source().name}.")
 
-        def add_box() -> None:
-            bw = max(120.0, state["ow"] * 0.5)
-            bh = max(100.0, state["oh"] * 0.24)
-            x1 = max(0.0, (state["ow"] - bw) / 2.0)
-            y1 = max(0.0, (state["oh"] - bh) / 2.0)
-            x2 = min(state["ow"], x1 + bw)
-            y2 = min(state["oh"], y1 + bh)
-            state["boxes"].append([x1, y1, x2, y2])
-            state["selected"] = len(state["boxes"]) - 1
+        def add_box_with_dialog() -> None:
+            source_now = _current_source()
+            chosen = self._run_segment_box_picker_ui(source_now)
+            if not chosen:
+                return
+            x1, y1, x2, y2 = [float(v) for v in chosen]
+            new_box = clamp_box([x1, y1, x2, y2])
+            ctx["boxes"].append(new_box)
+            new_idx = len(ctx["boxes"]) - 1
+            ctx["selected"] = new_idx
+            ctx["edit_enabled"] = True
+            ctx["edit_index"] = new_idx
             draw_boxes()
+            ix1, iy1, ix2, iy2 = [int(round(v)) for v in new_box]
+            self._log(
+                f"Editor V2: nuevo cuadro creado en {source_now.name} seg-{new_idx + 1} ({ix1},{iy1},{ix2},{iy2})."
+            )
+
+        def open_new_box_shortcut(_event=None):
+            add_box_with_dialog()
+            return "break"
+
+        def delete_selected_shortcut(_event=None):
+            delete_selected()
+            return "break"
+
+        def go_previous_shortcut(_event=None):
+            go_previous_image()
+            return "break"
+
+        def go_next_shortcut(_event=None):
+            go_next_image()
+            return "break"
 
         def delete_selected() -> None:
-            sel = int(state["selected"])
-            if sel < 0 or sel >= len(state["boxes"]):
+            boxes = ctx.get("boxes", [])
+            sel = int(ctx.get("selected", -1))
+            if sel < 0 or sel >= len(boxes):
                 return
-            state["boxes"].pop(sel)
-            if state["boxes"]:
-                state["selected"] = min(sel, len(state["boxes"]) - 1)
+            boxes.pop(sel)
+            if boxes:
+                ctx["selected"] = min(sel, len(boxes) - 1)
             else:
-                state["selected"] = -1
+                ctx["selected"] = -1
             draw_boxes()
 
-        def save_override() -> None:
+        def save_override(*, persist_to_disk: bool = False) -> None:
             boxes = []
-            for b in state["boxes"]:
+            source_now = _current_source()
+            for b in ctx.get("boxes", []) or []:
                 x1, y1, x2, y2 = [int(round(v)) for v in b]
                 if (x2 - x1) >= 16 and (y2 - y1) >= 16:
                     boxes.append((x1, y1, x2, y2))
-            key = self._seg_v2_source_key(source_path)
-            self._segmentacion_v2_overrides[key] = boxes
-            self._mark_source_reviewed(source_path)
-            self._log(f"Segmentacion V2: override guardado para {source_path.name} ({len(boxes)} cuadro(s)).")
+            boxes = self._sort_boxes_reading_order(boxes)
+            key = self._seg_v2_source_key(source_now)
+            prev_boxes = list(self._segmentacion_v2_overrides.get(key, []) or [])
+            current_sig = self._boxes_signature(boxes)
+            initial_sig = list(ctx.get("initial_boxes_signature", []) or [])
+            has_existing_override = key in self._segmentacion_v2_overrides
+            changed_from_initial = current_sig != initial_sig
+            changed_from_override = self._boxes_signature(prev_boxes) != current_sig
 
-        def edit_figure_box() -> None:
-            initial_box = self._get_ocr_exclusion_box(source_path)
-            if initial_box is None:
-                suggestion = self._get_cached_yolo_suggestion(source_path)
-                bbox_norm = suggestion.get("bbox_norm") if isinstance(suggestion, dict) else None
-                if bbox_norm is not None:
-                    initial_box = _norm_to_px_local(tuple(float(v) for v in bbox_norm))
-            chosen = self._run_ocr_exclusion_box_ui(source_path, initial_box=initial_box)
-            if not chosen:
+            if not persist_to_disk and not changed_from_initial and not has_existing_override:
+                self._mark_source_reviewed(source_now)
                 return
-            if self._set_ocr_exclusion_box(source_path, chosen):
-                manual_norm = self._box_px_to_norm(path=source_path, box_px=chosen)
-                self._set_cached_yolo_suggestion(
-                    source_path,
-                    {
-                        "has_figure": bool(manual_norm),
-                        "bbox_norm": manual_norm,
-                        "conf": 1.0,
-                        "source": "manual",
-                    },
-                )
-                x1, y1, x2, y2 = chosen
-                self._log(f"Caja OCR guardada en {source_path.name}: ({x1},{y1},{x2},{y2})")
-            draw_boxes()
+            if not persist_to_disk and has_existing_override and not changed_from_override:
+                self._mark_source_reviewed(source_now)
+                return
 
-        def clear_figure_box() -> None:
-            removed = self._clear_manual_figure_boxes(source_path)
-            if removed:
-                self._log(f"Caja OCR eliminada en {source_path.name} ({removed} caja(s)).")
-            cached = self._get_cached_yolo_suggestion(source_path)
-            if not cached or cached.get("source") in {"manual", "manual_box", "manual_marker", "none"}:
-                bbox_norm, conf, has_fig = self._detect_figure_bbox_yolo(path=source_path)
-                self._set_cached_yolo_suggestion(
-                    source_path,
-                    {
-                        "has_figure": bool(has_fig and bbox_norm is not None),
-                        "bbox_norm": bbox_norm,
-                        "conf": conf,
-                        "source": "yolo" if has_fig and bbox_norm is not None else "none",
-                    },
+            self._segmentacion_v2_overrides[key] = boxes
+            audit = self._update_segment_detector_audit_for_source(
+                source_path=source_now,
+                final_boxes=boxes,
+            )
+            try:
+                if persist_to_disk:
+                    refreshed_segments = self._save_v2_segments_from_boxes(
+                        source_path=source_now,
+                        boxes=boxes,
+                        tag="custom",
+                        detector_payload=audit,
+                        persist_manifest=True,
+                    )
+                else:
+                    refreshed_segments = self._build_runtime_segments_from_boxes(
+                        source_path=source_now,
+                        boxes=boxes,
+                        tag="custom",
+                    )
+                    self._segmentacion_v2_runtime_cache[key] = list(refreshed_segments)
+            except Exception:
+                pass
+            if persist_to_disk:
+                self._segmentacion_v2_pending_persist.pop(key, None)
+            else:
+                if changed_from_initial or changed_from_override:
+                    self._segmentacion_v2_pending_persist[key] = source_now
+            self._mark_source_reviewed(source_now)
+            if persist_to_disk or changed_from_initial or changed_from_override:
+                self._log(
+                    f"Segmentacion V2: override {'persistido' if persist_to_disk else 'en memoria'} para {source_now.name} ({len(boxes)} cuadro(s), estado={audit.get('review_status', 'corrected')})."
                 )
-            draw_boxes()
+
+        def save_block_now() -> None:
+            save_override(persist_to_disk=False)
+            self._flush_pending_segment_persists()
 
         def go_next_image() -> None:
-            save_override()
+            save_override(persist_to_disk=False)
             active_scope = self._segmentation_scope_labels
-            reviewed_now, total_now, pending_now = self._segmentation_progress(selected_labels=active_scope)
-            self._log(f"Segmentacion progreso: {reviewed_now}/{total_now} revisadas.")
-            if pending_now:
-                self._log(f"Siguiente pendiente: {pending_now[0]}")
-            current_idx = self._find_list_index_for_path(source_path)
+            current_idx = self._find_list_index_for_path(_current_source())
             if current_idx < 0:
                 self._log("Segmentacion V2: no se encontro la posicion de la imagen actual en la lista.")
                 return
-            pending = self._next_unreviewed_source(start_after_idx=current_idx, selected_labels=active_scope)
-            if pending is None:
-                if self._segmentation_route_active:
+            next_entry = self._adjacent_review_source(
+                current_idx=current_idx,
+                direction=1,
+                selected_labels=active_scope,
+            )
+            if next_entry is None:
+                done = self._refresh_segmentation_done_state(selected_labels=active_scope)
+                if done and self._segmentation_route_active:
                     self._segmentation_route_active = False
-                    self._refresh_segmentation_done_state(selected_labels=active_scope)
                     if active_scope:
                         self._log(
-                            "Paso 1 completado: segmentacion revisada en la seleccion actual. Ya puedes ejecutar 'Paso 2: OCR directo'."
+                            "Paso 1 completado: segmentacion revisada en la seleccion actual. Ya puedes ejecutar 'Paso 2: OCR fiel'."
                         )
                     else:
                         self._log(
-                            "Paso 1 completado: segmentacion revisada en todo el lote. Ya puedes ejecutar 'Paso 2: OCR directo'."
+                            "Paso 1 completado: segmentacion revisada en todo el lote. Ya puedes ejecutar 'Paso 2: OCR fiel'."
                         )
-                else:
-                    self._log("Segmentacion V2: no hay siguiente imagen en la lista.")
-                top.destroy()
+                    self._log("Usa 'Guardar bloque' para persistir todas las correcciones del lote.")
+                    return
+                self._log("Segmentacion V2: no hay siguiente imagen en la lista.")
                 return
-            next_idx, _next_label, next_path = pending
+            next_idx, _next_label, next_path = next_entry
             if not next_path.exists():
                 self._log("Segmentacion V2: la siguiente imagen no esta disponible.")
                 return
-            self.list_files.selection_clear(0, "end")
-            if active_scope:
-                total_list = int(self.list_files.size())
-                for i in range(total_list):
-                    label_i = self.list_files.get(i)
-                    if label_i in active_scope:
-                        self.list_files.selection_set(i)
-            else:
+            if not active_scope:
+                self.list_files.selection_clear(0, "end")
                 self.list_files.selection_set(next_idx)
             self.list_files.activate(next_idx)
             self.list_files.see(next_idx)
+            self._open_segment_editor_for_source(next_path, reuse_top=top)
+
+        def go_previous_image() -> None:
+            save_override(persist_to_disk=False)
+            active_scope = self._segmentation_scope_labels
+            current_idx = self._find_list_index_for_path(_current_source())
+            if current_idx < 0:
+                self._log("Segmentacion V2: no se encontro la posicion de la imagen actual en la lista.")
+                return
+            previous_entry = self._adjacent_review_source(
+                current_idx=current_idx,
+                direction=-1,
+                selected_labels=active_scope,
+            )
+            if previous_entry is None:
+                if not self._collect_review_sources(selected_labels=active_scope):
+                    self._log("Segmentacion V2: no hay imagenes disponibles en el alcance actual.")
+                else:
+                    self._log("Segmentacion V2: no hay imagen anterior en el alcance actual.")
+                return
+
+            prev_idx, _prev_label, prev_path = previous_entry
+            if not prev_path.exists():
+                self._log("Segmentacion V2: la imagen anterior no esta disponible.")
+                return
+
+            if not active_scope:
+                self.list_files.selection_clear(0, "end")
+                self.list_files.selection_set(prev_idx)
+            self.list_files.activate(prev_idx)
+            self.list_files.see(prev_idx)
+            self._open_segment_editor_for_source(prev_path, reuse_top=top)
+
+        controls = ctx["controls"]
+        if not ctx.get("controls_built"):
+            ttk.Button(controls, text="Guardar bloque", command=save_block_now, style="Accent.TButton").pack(side="left")
+            ttk.Button(controls, text="Nuevo cuadro... (N)", command=add_box_with_dialog, style="Ghost.TButton").pack(side="left", padx=(8, 0))
+            ttk.Button(controls, text="Eliminar seleccionado (Del)", command=delete_selected, style="Secondary.TButton").pack(side="left", padx=(8, 0))
+            ttk.Button(controls, text="Anterior imagen (A)", command=go_previous_image, style="Ghost.TButton").pack(side="left", padx=(8, 0))
+            ttk.Button(controls, text="Siguiente imagen (S)", command=go_next_image, style="Ghost.TButton").pack(side="left", padx=(8, 0))
+            ctx["controls_built"] = True
+
+        if not ctx.get("bindings_built"):
+            canvas.bind("<Button-1>", on_down)
+            canvas.bind("<Double-Button-1>", on_double_click)
+            canvas.bind("<B1-Motion>", on_move)
+            canvas.bind("<Button1-Motion>", on_move)
+            canvas.bind("<ButtonRelease-1>", on_up)
+            canvas.bind("<MouseWheel>", lambda event: _on_mousewheel(event))
+            canvas.bind("<Shift-MouseWheel>", lambda event: _on_mousewheel(event))
+            canvas.bind("<Button-4>", lambda _e: canvas.yview_scroll(-1, "units"))
+            canvas.bind("<Button-5>", lambda _e: canvas.yview_scroll(1, "units"))
+            canvas.bind("<KeyPress-n>", open_new_box_shortcut)
+            canvas.bind("<KeyPress-N>", open_new_box_shortcut)
+            canvas.bind("<KeyPress-a>", go_previous_shortcut)
+            canvas.bind("<KeyPress-A>", go_previous_shortcut)
+            canvas.bind("<KeyPress-s>", go_next_shortcut)
+            canvas.bind("<KeyPress-S>", go_next_shortcut)
+            canvas.bind("<Delete>", delete_selected_shortcut)
+            canvas.bind("<Control-n>", open_new_box_shortcut)
+            canvas.bind("<Control-N>", open_new_box_shortcut)
+            top.bind("<Delete>", delete_selected_shortcut)
+            top.bind("<KeyPress-n>", open_new_box_shortcut)
+            top.bind("<KeyPress-N>", open_new_box_shortcut)
+            top.bind("<KeyPress-a>", go_previous_shortcut)
+            top.bind("<KeyPress-A>", go_previous_shortcut)
+            top.bind("<KeyPress-s>", go_next_shortcut)
+            top.bind("<KeyPress-S>", go_next_shortcut)
+            top.bind("<Control-n>", open_new_box_shortcut)
+            top.bind("<Control-N>", open_new_box_shortcut)
+            ctx["bindings_built"] = True
+
+        def _on_mousewheel(event) -> None:
+            try:
+                delta = int(getattr(event, "delta", 0))
+                step = -1 if delta > 0 else 1
+                if bool(getattr(event, "state", 0) & 0x1):
+                    canvas.xview_scroll(step, "units")
+                else:
+                    canvas.yview_scroll(step, "units")
+            except Exception:
+                return
+
+        def _close_editor_window() -> None:
+            save_override(persist_to_disk=False)
+            if self._segmentacion_v2_pending_persist:
+                decision = messagebox.askyesnocancel(
+                    "Guardar bloque",
+                    "Hay cambios de segmentacion pendientes.\n\nSi eliges 'Si', se guardara todo el bloque.\nSi eliges 'No', se cerrara sin persistir.\nSi eliges 'Cancelar', seguiras en el editor.",
+                    parent=top,
+                )
+                if decision is None:
+                    return
+                if decision:
+                    self._flush_pending_segment_persists()
+            self._segment_editor_v2_window = None
+            try:
+                setattr(top, "_segment_editor_v2_ctx", None)
+            except Exception:
+                pass
             top.destroy()
-            self.after(40, lambda p=next_path: self._open_segment_editor_for_source(p))
 
-        controls = ttk.Frame(root)
-        controls.pack(fill="x", pady=(8, 0))
-        ttk.Button(controls, text="Agregar cuadro", command=add_box, style="Ghost.TButton").pack(side="left")
-        ttk.Button(controls, text="Eliminar seleccionado", command=delete_selected, style="Secondary.TButton").pack(side="left", padx=(8, 0))
-        ttk.Button(controls, text="Editar caja figura...", command=edit_figure_box, style="Ghost.TButton").pack(
-            side="left", padx=(8, 0)
-        )
-        ttk.Button(controls, text="Limpiar caja figura", command=clear_figure_box, style="Secondary.TButton").pack(
-            side="left", padx=(8, 0)
-        )
-        ttk.Button(controls, text="Guardar cambios V2", command=save_override, style="Accent.TButton").pack(side="left", padx=(8, 0))
-        ttk.Button(controls, text="Siguiente imagen", command=go_next_image, style="Ghost.TButton").pack(side="left", padx=(8, 0))
+        top.protocol("WM_DELETE_WINDOW", _close_editor_window)
 
-        canvas.bind("<Button-1>", on_down)
-        canvas.bind("<Double-Button-1>", on_double_click)
-        canvas.bind("<B1-Motion>", on_move)
-        canvas.bind("<ButtonRelease-1>", on_up)
-        top.bind("<Delete>", lambda _e: delete_selected())
-        top.protocol("WM_DELETE_WINDOW", lambda: (save_override(), top.destroy()))
-        draw_boxes()
+        def load_source(path: Path, boxes_in: List[Tuple[int, int, int, int]]) -> None:
+            preview = self._get_segment_editor_preview(path)
+            if not preview:
+                messagebox.showerror("Segmentacion V2", "No se pudo abrir o preparar la imagen para segmentacion.")
+                return
+            ow = int(preview.get("ow", 0) or 0)
+            oh = int(preview.get("oh", 0) or 0)
+            if ow <= 1 or oh <= 1:
+                messagebox.showwarning("Segmentacion V2", "Imagen invalida para editar segmentos.")
+                return
+            scale = float(preview.get("scale", 1.0) or 1.0)
+            dw = int(preview.get("dw", ow) or ow)
+            dh = int(preview.get("dh", oh) or oh)
+            max_w = int(preview.get("max_w", max(900, int(self.winfo_screenwidth() or 1920) - 260)) or 900)
+            max_h = int(preview.get("max_h", max(440, int(self.winfo_screenheight() or 1080) - 420)) or 440)
+            disp = preview.get("disp")
+            if disp is None:
+                messagebox.showerror("Segmentacion V2", "No se pudo preparar la vista previa de segmentacion.")
+                return
+            tk_img = preview.get("tk_img")
+            if tk_img is None:
+                tk_img = ImageTk.PhotoImage(disp)
+                preview["tk_img"] = tk_img
+            ctx.update(
+                {
+                    "source_path": Path(path),
+                    "boxes": [list(b) for b in list(boxes_in or [])],
+                    "initial_boxes_signature": self._boxes_signature(
+                        [tuple(int(v) for v in b) for b in list(boxes_in or [])]
+                    ),
+                    "selected": 0 if boxes_in else -1,
+                    "mode": None,
+                    "edge": (False, False, False, False),
+                    "start_box": None,
+                    "edit_enabled": False,
+                    "edit_index": -1,
+                    "scale": float(scale),
+                    "ow": float(ow),
+                    "oh": float(oh),
+                    "dw": int(dw),
+                    "dh": int(dh),
+                }
+            )
+            top.title(f"Editor Segmentacion V2 - {Path(path).name}")
+            if not ctx.get("geometry_set"):
+                screen_w = int(preview.get("screen_w", max(1024, int(self.winfo_screenwidth() or 1920))) or 1920)
+                screen_h = int(preview.get("screen_h", max(700, int(self.winfo_screenheight() or 1080))) or 1080)
+                top_w = int(min(screen_w - 40, max(900, min(dw + 110, 1600))))
+                top_h = int(min(screen_h - 60, max(600, min(dh + 230, 1100))))
+                top.geometry(f"{top_w}x{top_h}+20+20")
+                top.minsize(min(860, top_w), min(560, top_h))
+                ctx["geometry_set"] = True
+            canvas.configure(
+                width=max(1, min(dw, int(max_w))),
+                height=max(1, min(dh, int(max_h))),
+                scrollregion=(0, 0, dw, dh),
+            )
+            canvas.itemconfigure(ctx["image_id"], image=tk_img)
+            canvas.image_ref = tk_img
+            try:
+                canvas.xview_moveto(0)
+                canvas.yview_moveto(0)
+                canvas.focus_set()
+            except Exception:
+                pass
+            draw_boxes()
+
+        load_source(source_path, initial_boxes)
         self._log(
             f"Editor Segmentacion V2 abierto: {source_path.name} ({len(initial_boxes)} cuadro(s) iniciales). "
             "Color: verde=usado en OCR, naranja=pending, azul=edicion activa, cian=YOLO figura, morado=caja figura manual."
@@ -5550,96 +11343,47 @@ class TranscriptorWindow(tk.Toplevel):
         """
         Keep preview image map aligned with current items + stored crop paths.
         """
-        # Fuente de verdad: bindings confirmados por segmento->item/slot.
-        binding_marker_map = self._collect_confirmed_binding_marker_paths()
-        for mk, p in binding_marker_map.items():
-            self._preview_images[str(mk)] = str(p)
+        preview_images: Dict[str, str] = {}
+        preview_statuses: Dict[int, str] = {}
+        binding_hints: Dict[str, Dict[str, Any]] = {}
 
-        rebuilt_items: List[Tuple[str, str, List[str]]] = []
-        for idx, entry in enumerate(self._items):
+        for entry in self._items:
             archivo = str(entry[0]) if len(entry) > 0 else ""
-            item = str(entry[1] or "") if len(entry) > 1 else ""
-            image_paths = list(entry[2] or []) if len(entry) > 2 else []
-            markers = self._extract_image_marker_names(item)
-            source_has_bindings = self._source_has_confirmed_bindings(source_stem=archivo)
-            if source_has_bindings:
-                src_path = self._find_source_path_by_stem(archivo)
-                item_num = self.controller.parsear_numero_original(item) or 0
-                if src_path is not None and item_num > 0:
-                    source_key = self._seg_v2_source_key(src_path)
-                    source_bindings = self._get_segment_bindings_by_source_key(source_key)
-                    applied_slots: List[str] = []
-                    for payload in source_bindings.values():
-                        if not self._as_bool(payload.get("confirmed"), False):
-                            continue
-                        if int(self._safe_int(payload.get("item_num", 0), 0)) != int(item_num):
-                            continue
-                        slot_name = self._normalize_binding_slot(str(payload.get("slot", "ENUNCIADO") or "ENUNCIADO"))
-                        marker_bound = str(payload.get("marker_name", "") or "").strip()
-                        if not marker_bound:
-                            marker_bound = self._build_binding_marker_name(item_num=item_num, slot=slot_name)
-                        if marker_bound in markers:
-                            continue
-                        item = self._insert_explicit_marker_in_slot(
-                            text=item,
-                            marker_name=marker_bound,
-                            slot=slot_name,
-                            path=src_path,
-                            numero=item_num,
-                        )
-                        applied_slots.append(slot_name)
-                    if applied_slots:
-                        item = self.controller.normalizar_item_una_linea(self._normalize_math_delimiters(item))
-                        markers = self._extract_image_marker_names(item)
-                        self._log(f"binding_applied item={item_num} slots={applied_slots}")
+            item_text = str(entry[1] if len(entry) > 1 else "")
+            image_paths = list(entry[2] if len(entry) > 2 else [])
+            binding = self._build_runtime_item_image_binding(
+                archivo_origen=archivo,
+                item_text=item_text,
+                image_paths=image_paths,
+            )
+            item_num = int(
+                self.controller.parsear_numero_original(item_text)
+                or self._extract_structured_item_number(item_text)
+                or 0
+            )
+            if item_num > 0:
+                preview_statuses[item_num] = binding.preview_status
+                hint_key = self._item_image_binding_hint_key(
+                    archivo_origen=archivo,
+                    item_num=item_num,
+                )
+                if hint_key:
+                    binding_hints[hint_key] = binding.to_dict()
 
-            resolved_paths: List[str] = []
-            for mk_raw in markers:
-                mk = str(mk_raw or "").strip()
-                if not mk:
-                    continue
-                cur = str(binding_marker_map.get(mk) or self._preview_images.get(mk) or "").strip()
-                if self._is_valid_image_path(cur):
-                    if cur not in resolved_paths:
-                        resolved_paths.append(cur)
-                    self._preview_images[mk] = cur
-                    self._missing_marker_warned.discard(mk)
-                    continue
-                if source_has_bindings:
-                    if mk and mk not in self._missing_marker_warned:
-                        self._missing_marker_warned.add(mk)
-                        self._log(f"Aviso: [[Imagen={mk}]] sin binding/crop confirmado.")
-                    continue
-                if self.auto_crop_var.get():
-                    auto_crop = self._auto_assign_crop_for_item_marker(
-                        source_stem=archivo,
-                        marker_name=mk,
-                        item_idx=idx,
-                    )
-                    if auto_crop:
-                        self._preview_images[mk] = auto_crop
-                        if auto_crop not in resolved_paths:
-                            resolved_paths.append(auto_crop)
-                        self._missing_marker_warned.discard(mk)
-                        continue
-                if mk and mk not in self._missing_marker_warned:
-                    self._missing_marker_warned.add(mk)
-                    self._log(
-                        f"Aviso: [[Imagen={mk}]] sin archivo asociado. "
-                        "Usa recorte manual o revisa segmentacion V2."
-                    )
+            for marker_name, crop_path in dict(binding.marker_paths or {}).items():
+                if self._is_valid_image_path(crop_path):
+                    preview_images[str(marker_name)] = str(crop_path)
+                    self._missing_marker_warned.discard(str(marker_name))
 
-            # Si no hubo resolucion por marker, conservar rutas validas existentes.
-            if not resolved_paths:
-                for p in image_paths:
-                    p_txt = str(p or "").strip()
-                    if self._is_valid_image_path(p_txt) and p_txt not in resolved_paths:
-                        resolved_paths.append(p_txt)
-
-            image_paths = resolved_paths
-
-            rebuilt_items.append((archivo, item, image_paths))
-        self._items = rebuilt_items
+            if binding.status == IMAGE_BINDING_STATUS_NEEDS_REVIEW:
+                for marker_name in binding.marker_names:
+                    marker = str(marker_name or "").strip()
+                    if marker and marker not in self._missing_marker_warned:
+                        self._missing_marker_warned.add(marker)
+                        self._log(f"Aviso: [[Imagen={marker}]] pendiente de confirmacion por segmentacion.")
+        self._preview_images = preview_images
+        self._preview_item_image_statuses = preview_statuses
+        self._item_image_binding_hints = binding_hints
 
     def _is_valid_image_path(self, path_str: str) -> bool:
         p = Path(str(path_str or "").strip())
@@ -5647,21 +11391,354 @@ class TranscriptorWindow(tk.Toplevel):
             return False
         return p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
+    def _source_stem_aliases(self, source_stem: str) -> Set[str]:
+        raw = str(source_stem or "").strip()
+        aliases: Set[str] = set()
+        if not raw:
+            return aliases
+        aliases.add(raw)
+        lowered = raw.lower()
+        aliases.add(lowered)
+        trimmed = re.sub(r"_(\d{2})$", "", raw)
+        trimmed_low = re.sub(r"_(\d{2})$", "", lowered)
+        if trimmed:
+            aliases.add(trimmed)
+        if trimmed_low:
+            aliases.add(trimmed_low)
+        return {a for a in aliases if a}
+
+    def _source_stems_match(self, item_source: str, source_stem: str) -> bool:
+        item_aliases = self._source_stem_aliases(item_source)
+        source_aliases = self._source_stem_aliases(source_stem)
+        if not item_aliases or not source_aliases:
+            return False
+        return bool(item_aliases & source_aliases)
+
     def _find_source_path_by_stem(self, source_stem: str) -> Optional[Path]:
         stem = (source_stem or "").strip()
         if not stem:
             return None
         for src in self._file_map.values():
             try:
-                if src and src.exists() and src.stem == stem:
+                if src and src.exists() and self._source_stems_match(stem, src.stem):
                     return src
             except Exception:
                 continue
         return None
 
+    def _resolve_binding_source_path(self, source_key: str) -> Optional[Path]:
+        raw = str(source_key or "").strip()
+        if not raw:
+            return None
+        source_path = Path(raw)
+        try:
+            if source_path.exists() and source_path.is_file():
+                return source_path
+        except Exception:
+            pass
+
+        wanted_stem = source_path.stem.strip().lower()
+        if not wanted_stem:
+            return None
+        for src in self._file_map.values():
+            try:
+                if not src or not src.exists():
+                    continue
+                current_stem = src.stem.strip()
+                if not current_stem:
+                    continue
+                if self._source_stems_match(wanted_stem, current_stem):
+                    return src
+            except Exception:
+                continue
+        return None
+
+    def _remap_loaded_source_key(self, raw_key: str, *, session_path: Optional[Path] = None) -> str:
+        key_text = str(raw_key or "").strip()
+        if not key_text:
+            return ""
+
+        if session_path is not None:
+            try:
+                resolved = self._resolve_session_resource_path(key_text, session_path=session_path)
+                mapped = self._resolve_binding_source_path(str(resolved))
+                if mapped is not None:
+                    return self._seg_v2_source_key(mapped)
+            except Exception:
+                pass
+
+        mapped = self._resolve_binding_source_path(key_text)
+        if mapped is not None:
+            return self._seg_v2_source_key(mapped)
+
+        return key_text.lower()
+
+    def _hydrate_segmentation_overrides_from_state(self, *, session_path: Path) -> int:
+        restored = 0
+        for raw_image in list(getattr(self.state, "source_images", []) or []):
+            try:
+                raw_key = str(getattr(raw_image, "source_key", "") or "").strip()
+                raw_label = str(getattr(raw_image, "label", "") or "").strip()
+                raw_path = str(getattr(raw_image, "path", "") or "").strip()
+            except Exception:
+                continue
+
+            mapped_key = ""
+            for candidate in (raw_key, raw_label, raw_path):
+                mapped_key = self._remap_loaded_source_key(candidate, session_path=session_path)
+                if mapped_key:
+                    break
+            if not mapped_key or mapped_key in self._segmentacion_v2_overrides:
+                continue
+
+            raw_segments = list(getattr(raw_image, "segments", []) or [])
+            normalized_segments: List[Tuple[int, Tuple[int, int, int, int]]] = []
+            for raw_seg in raw_segments:
+                try:
+                    seg_idx = int(getattr(raw_seg, "idx", 0) or 0)
+                except Exception:
+                    seg_idx = 0
+                bbox_raw = list(getattr(raw_seg, "bbox_px", []) or [])
+                if len(bbox_raw) != 4:
+                    continue
+                try:
+                    x1, y1, x2, y2 = [int(v) for v in bbox_raw]
+                except Exception:
+                    continue
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                normalized_segments.append((seg_idx, (x1, y1, x2, y2)))
+
+            if not normalized_segments:
+                continue
+
+            normalized_segments.sort(key=lambda row: int(row[0]))
+            self._segmentacion_v2_overrides[mapped_key] = [box for _idx, box in normalized_segments]
+            restored += 1
+        return restored
+
+    def _segment_file_index(self, seg_path: Path, fallback: int) -> int:
+        try:
+            match = re.search(r"_(\d+)$", str(seg_path.stem or ""), flags=re.IGNORECASE)
+            if match:
+                return max(1, int(match.group(1)))
+        except Exception:
+            pass
+        return max(1, int(fallback))
+
+    def _find_state_source_image_for_key(
+        self,
+        *,
+        source_key: str,
+        session_path: Path,
+    ) -> Optional[Any]:
+        target_key = str(source_key or "").strip().lower()
+        if not target_key:
+            return None
+        for raw_image in list(getattr(self.state, "source_images", []) or []):
+            candidates = []
+            try:
+                candidates = [
+                    str(getattr(raw_image, "source_key", "") or "").strip(),
+                    str(getattr(raw_image, "label", "") or "").strip(),
+                    str(getattr(raw_image, "path", "") or "").strip(),
+                ]
+            except Exception:
+                candidates = []
+            for candidate in candidates:
+                mapped = self._remap_loaded_source_key(candidate, session_path=session_path)
+                if mapped and mapped.strip().lower() == target_key:
+                    return raw_image
+        return None
+
+    def _build_legacy_manifest_segments_for_source(
+        self,
+        *,
+        source_path: Path,
+        session_path: Path,
+    ) -> List[SegmentoProblemaV2]:
+        src = Path(source_path)
+        out_dir = Path(self._segmentador_v2.out_root) / src.stem
+        if not out_dir.exists() or (not out_dir.is_dir()):
+            return []
+
+        image_files = sorted(
+            [
+                p
+                for p in out_dir.iterdir()
+                if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+            ],
+            key=lambda p: (self._segment_file_index(p, 1), p.name.lower()),
+        )
+        if not image_files:
+            return []
+
+        key = self._seg_v2_source_key(src)
+        state_image = self._find_state_source_image_for_key(source_key=key, session_path=session_path)
+
+        disk_by_name = {p.name.lower(): p for p in image_files}
+        disk_by_idx = {
+            self._segment_file_index(p, pos): p
+            for pos, p in enumerate(image_files, start=1)
+        }
+
+        restored: List[SegmentoProblemaV2] = []
+        if state_image is not None:
+            for raw_seg in list(getattr(state_image, "segments", []) or []):
+                try:
+                    idx = int(getattr(raw_seg, "idx", 0) or 0)
+                except Exception:
+                    idx = 0
+                bbox_raw = list(getattr(raw_seg, "bbox_px", []) or [])
+                if len(bbox_raw) != 4:
+                    continue
+                try:
+                    bbox = tuple(int(v) for v in bbox_raw)
+                except Exception:
+                    continue
+                if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+                    continue
+                seg_file = None
+                raw_image_path = str(getattr(raw_seg, "image_path", "") or "").strip()
+                if raw_image_path:
+                    resolved = self._resolve_session_resource_path(raw_image_path, session_path=session_path)
+                    if resolved.exists() and resolved.is_file():
+                        seg_file = disk_by_name.get(resolved.name.lower(), resolved)
+                if seg_file is None and idx > 0:
+                    seg_file = disk_by_idx.get(idx)
+                if seg_file is None or not seg_file.exists():
+                    continue
+                restored.append(
+                    SegmentoProblemaV2(
+                        idx=max(1, idx if idx > 0 else self._segment_file_index(seg_file, len(restored) + 1)),
+                        bbox=bbox,
+                        image_path=seg_file,
+                        source_path=src,
+                    )
+                )
+            if restored:
+                restored.sort(key=lambda seg: (int(seg.idx), seg.image_path.name.lower()))
+                return restored
+
+        boxes = list(self._segmentacion_v2_overrides.get(key, []) or [])
+        if len(boxes) != len(image_files):
+            return []
+
+        for pos, seg_file in enumerate(image_files, start=1):
+            idx = self._segment_file_index(seg_file, pos)
+            box = boxes[idx - 1] if 0 <= (idx - 1) < len(boxes) else boxes[pos - 1]
+            try:
+                bbox = tuple(int(v) for v in box)
+            except Exception:
+                continue
+            if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+                continue
+            restored.append(
+                SegmentoProblemaV2(
+                    idx=idx,
+                    bbox=bbox,
+                    image_path=seg_file,
+                    source_path=src,
+                )
+            )
+        restored.sort(key=lambda seg: (int(seg.idx), seg.image_path.name.lower()))
+        return restored
+
+    def _migrate_missing_segment_manifests_from_session(self, *, session_path: Path) -> int:
+        migrated = 0
+        manifest_name = str(getattr(self._segmentador_v2, "manifest_name", "segments_manifest.json") or "segments_manifest.json")
+        for src in list(self._file_map.values()):
+            try:
+                source_path = Path(src)
+            except Exception:
+                continue
+            out_dir = Path(self._segmentador_v2.out_root) / source_path.stem
+            manifest_path = out_dir / manifest_name
+            if manifest_path.exists():
+                continue
+            legacy_segments = self._build_legacy_manifest_segments_for_source(
+                source_path=source_path,
+                session_path=session_path,
+            )
+            if not legacy_segments:
+                continue
+            try:
+                detector_payload = self._get_segment_detector_audit(source_path)
+                self._segmentador_v2.persist_segments_manifest(
+                    src=source_path,
+                    segments=legacy_segments,
+                    detector_payload=detector_payload,
+                )
+                migrated += 1
+            except Exception:
+                continue
+        return migrated
+
     def _marker_to_safe_name(self, marker_name: str) -> str:
         safe = re.sub(r"[^\w\-. ]", "_", (marker_name or "").strip()).strip()
         return safe
+
+    def _canonical_marker_crop_path(self, *, marker_name: str, fallback_stem: str = "crop") -> Path:
+        safe = self._marker_to_safe_name(marker_name)
+        if not safe:
+            safe = self._marker_to_safe_name(fallback_stem) or "crop"
+        root = Path(self._tmp_crop_root)
+        root.mkdir(parents=True, exist_ok=True)
+        return root / f"{safe}.png"
+
+    def _materialize_canonical_marker_crop_from_path(
+        self,
+        *,
+        marker_name: str,
+        source_path: Path,
+        fallback_stem: str = "crop",
+    ) -> Optional[str]:
+        if not source_path.exists() or not source_path.is_file():
+            return None
+        target_png = self._canonical_marker_crop_path(marker_name=marker_name, fallback_stem=fallback_stem)
+        try:
+            if source_path.resolve() == target_png.resolve():
+                return str(target_png)
+        except Exception:
+            pass
+
+        target_png.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            from PIL import Image  # type: ignore
+
+            with Image.open(source_path) as im:
+                tmp_path = target_png.with_name(f"{target_png.stem}__tmp{target_png.suffix}")
+                im.save(tmp_path, format="PNG")
+            try:
+                tmp_path.replace(target_png)
+            except Exception:
+                try:
+                    if target_png.exists():
+                        target_png.unlink()
+                except Exception:
+                    pass
+                tmp_path.replace(target_png)
+            return str(target_png)
+        except Exception:
+            pass
+
+        if source_path.suffix.lower() == ".png":
+            try:
+                tmp_path = target_png.with_name(f"{target_png.stem}__tmp{target_png.suffix}")
+                shutil.copy2(str(source_path), str(tmp_path))
+                try:
+                    tmp_path.replace(target_png)
+                except Exception:
+                    try:
+                        if target_png.exists():
+                            target_png.unlink()
+                    except Exception:
+                        pass
+                    tmp_path.replace(target_png)
+                return str(target_png)
+            except Exception:
+                return None
+        return str(source_path)
 
     def _find_crop_by_marker_name(self, marker_name: str) -> Optional[str]:
         mk = (marker_name or "").strip()
@@ -5672,6 +11749,13 @@ class TranscriptorWindow(tk.Toplevel):
             return None
         candidates: List[Path] = []
         safe_low = safe.lower()
+
+        canonical = self._canonical_marker_crop_path(marker_name=mk, fallback_stem=safe)
+        try:
+            if canonical.exists() and canonical.is_file():
+                return str(canonical)
+        except Exception:
+            pass
 
         # Existing preview mappings and item paths.
         for p_txt in list(self._preview_images.values()):
@@ -5843,33 +11927,123 @@ class TranscriptorWindow(tk.Toplevel):
         return [mk for mk in markers if mk not in linked]
 
     def _materialize_selected_segment_image(self, *, image_path: Path, marker_name: str) -> Optional[str]:
-        if not image_path.exists() or not image_path.is_file():
-            return None
-        target_dir = self._tmp_crop_root
-        target_dir.mkdir(parents=True, exist_ok=True)
-        safe = re.sub(r"[^\w\-. ]", "_", (marker_name or "").strip()).strip() or image_path.stem
-        target = target_dir / f"{safe}.png"
-        try:
-            if image_path.resolve() == target.resolve():
-                return str(target)
-        except Exception:
-            pass
-        try:
-            if target.exists():
-                target.unlink()
-        except Exception:
-            pass
-        try:
-            shutil.copy2(str(image_path), str(target))
-            return str(target)
-        except Exception:
-            try:
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                alt = target_dir / f"{safe}_{ts}{image_path.suffix.lower() or '.png'}"
-                shutil.copy2(str(image_path), str(alt))
-                return str(alt)
-            except Exception:
+        return self._materialize_canonical_marker_crop_from_path(
+            marker_name=marker_name,
+            source_path=image_path,
+            fallback_stem=image_path.stem,
+        )
+
+    def _canonicalize_loaded_marker_crops(self) -> int:
+        canonicalized = 0
+        marker_cache: Dict[str, str] = {}
+
+        def _remember(marker_name: str, current_path: str) -> Optional[str]:
+            mk = str(marker_name or "").strip()
+            raw = str(current_path or "").strip()
+            if not mk or not raw:
                 return None
+            cached = marker_cache.get(mk)
+            if cached and self._is_valid_image_path(cached):
+                return cached
+            src = Path(raw)
+            if not src.exists() or not src.is_file():
+                return None
+            stored = self._materialize_canonical_marker_crop_from_path(
+                marker_name=mk,
+                source_path=src,
+                fallback_stem=src.stem or mk,
+            )
+            if stored and stored != raw:
+                marker_cache[mk] = stored
+                return stored
+            if stored:
+                marker_cache[mk] = stored
+            return stored
+
+        if self._preview_images:
+            refreshed_preview: Dict[str, str] = {}
+            for marker_name, crop_path in list(self._preview_images.items()):
+                mk = str(marker_name or "").strip()
+                raw = str(crop_path or "").strip()
+                if not mk or not raw:
+                    continue
+                stored = _remember(mk, raw)
+                if stored:
+                    if stored != raw:
+                        canonicalized += 1
+                    refreshed_preview[mk] = stored
+                else:
+                    refreshed_preview[mk] = raw
+            self._preview_images = refreshed_preview
+
+        for source_key in list(self._segment_item_bindings_by_source.keys()):
+            bucket = self._get_segment_bindings_by_source_key(source_key)
+            changed = False
+            for seg_idx, payload in list(bucket.items()):
+                marker_name = str(payload.get("marker_name", "") or "").strip()
+                crop_path = str(payload.get("crop_path", "") or "").strip()
+                if not marker_name or not crop_path:
+                    continue
+                stored = _remember(marker_name, crop_path)
+                if stored and stored != crop_path:
+                    bucket[seg_idx]["crop_path"] = stored
+                    canonicalized += 1
+                    changed = True
+                elif (not stored) and marker_name:
+                    source_path = self._resolve_binding_source_path(source_key)
+                    if source_path is not None:
+                        try:
+                            segments = self._get_segments_v2_for_source(source_path)
+                        except Exception:
+                            segments = []
+                        if 0 <= int(seg_idx) < len(segments):
+                            try:
+                                bbox_px = tuple(int(v) for v in segments[int(seg_idx)].bbox)
+                            except Exception:
+                                bbox_px = ()
+                            if len(bbox_px) == 4:
+                                bbox_norm = self._box_px_to_norm(path=source_path, box_px=bbox_px)
+                                if bbox_norm is not None:
+                                    rebuilt = self._save_figure_crop(
+                                        image_path=source_path,
+                                        marker_name=marker_name,
+                                        bbox_norm=bbox_norm,
+                                    )
+                                    rebuilt_txt = str(rebuilt or "").strip()
+                                    if rebuilt_txt:
+                                        bucket[seg_idx]["crop_path"] = rebuilt_txt
+                                        marker_cache[marker_name] = rebuilt_txt
+                                        self._preview_images[marker_name] = rebuilt_txt
+                                        canonicalized += 1
+                                        changed = True
+            if changed:
+                self._set_segment_bindings_by_source_key(source_key, bucket)
+
+        rebuilt_items: List[Tuple[str, str, List[str]]] = []
+        for archivo, item_txt, imgs in self._items:
+            markers = self._extract_image_marker_names(item_txt)
+            resolved_imgs: List[str] = []
+            seen_paths: Set[str] = set()
+            if markers:
+                for marker_name in markers:
+                    mk = str(marker_name or "").strip()
+                    if not mk:
+                        continue
+                    candidate = marker_cache.get(mk) or str(self._preview_images.get(mk) or "").strip()
+                    if not candidate:
+                        candidate = str(self._find_crop_by_marker_name(mk) or "").strip()
+                    if candidate and candidate not in seen_paths:
+                        seen_paths.add(candidate)
+                        resolved_imgs.append(candidate)
+            if resolved_imgs:
+                original = [str(p or "").strip() for p in (imgs or []) if str(p or "").strip()]
+                if original != resolved_imgs:
+                    canonicalized += 1
+                rebuilt_items.append((archivo, item_txt, resolved_imgs))
+            else:
+                rebuilt_items.append((archivo, item_txt, imgs))
+        self._items = rebuilt_items
+        return canonicalized
 
     def _assign_segmented_image_to_marker(self) -> None:
         self._sync_items_from_output_text()
@@ -5888,8 +12062,6 @@ class TranscriptorWindow(tk.Toplevel):
             return
 
         initial_dir = self._segmentador_v2.out_root
-        if not initial_dir.exists():
-            initial_dir = self._runs_dir / "v2_segments"
         selected = filedialog.askopenfilename(
             title=f"Selecciona segmento para [[Imagen={marker_name}]]",
             initialdir=str(initial_dir),
@@ -6098,10 +12270,25 @@ class TranscriptorWindow(tk.Toplevel):
         if updated == 0:
             self._log("Aviso: no se encontro item con ese marker en la salida actual.")
 
-    def _encode_image_data_url(self, path: Path) -> str:
-        data = path.read_bytes()
+    def _encode_image_data_url(self, path: Path, *, max_side_px: Optional[int] = None) -> str:
+        source = Path(path)
+        data = source.read_bytes()
         mime, _ = mimetypes.guess_type(path.name)
         mime = mime or "image/png"
+        if max_side_px and max_side_px > 0:
+            try:
+                from PIL import Image
+
+                with Image.open(source) as image:
+                    image = image.convert("RGB")
+                    if max(image.size) > int(max_side_px):
+                        image.thumbnail((int(max_side_px), int(max_side_px)))
+                    buffer = BytesIO()
+                    image.save(buffer, format="JPEG", quality=88, optimize=True)
+                    data = buffer.getvalue()
+                    mime = "image/jpeg"
+            except Exception:
+                data = source.read_bytes()
         b64 = base64.b64encode(data).decode("ascii")
         return f"data:{mime};base64,{b64}"
 
@@ -6260,15 +12447,315 @@ class TranscriptorWindow(tk.Toplevel):
     def _item_has_complete_options(self, item: str) -> bool:
         body = self._body_without_tags_and_markers(item)
         _enu, options = self._extract_options_loose(body)
+        marker_slots = self._extract_image_marker_slots(item)
         required = ("A", "B", "C", "D", "E")
-        if not all(k in options for k in required):
+        present_slots = set(options.keys()) | {slot for slot in marker_slots if slot in required}
+        if not all(k in present_slots for k in required):
             return False
         # Treat placeholder-only options as incomplete so continuation can be merged
         # from subsequent images.
         for label in required:
-            if self._is_placeholder_option_value(options.get(label, "")):
+            if label in marker_slots and label not in options:
+                continue
+            if self._is_placeholder_option_value(options.get(label, "")) and label not in marker_slots:
                 return False
         return True
+
+    def _build_option_block_from_options(self, options: Dict[str, str]) -> str:
+        return (
+            f"{SEP_LINE}A){self._render_item_option_value(str(options.get('A', '') or '...'))}"
+            f"{SEP_OPT}B){self._render_item_option_value(str(options.get('B', '') or '...'))}"
+            f"{SEP_OPT}C){self._render_item_option_value(str(options.get('C', '') or '...'))}"
+            f"{SEP_LINE}D){self._render_item_option_value(str(options.get('D', '') or '...'))}"
+            f"{SEP_OPT}{SEP_OPT}E){self._render_item_option_value(str(options.get('E', '') or '...'))}{SEP_LINE}"
+        )
+
+    def _preserve_options_from_source_item(self, *, candidate: str, source: str) -> str:
+        """
+        Paso 4 must never degrade real JSON alternatives into placeholder options.
+        Metadata/format passes may rewrite the statement, but the option block from
+        the structured JSON is the safer source when it has A-E complete.
+        """
+        cand = str(candidate or "").strip()
+        src = str(source or "").strip()
+        if not cand or not src:
+            return cand
+
+        _src_enu, source_options = self._extract_options_loose(self._body_without_tags_and_markers(src))
+        source_options = self._non_placeholder_options(source_options)
+        if not all(label in source_options for label in ("A", "B", "C", "D", "E")):
+            return cand
+
+        _cand_enu, candidate_options = self._extract_options_loose(self._body_without_tags_and_markers(cand))
+        candidate_options = self._non_placeholder_options(candidate_options)
+        if all(label in candidate_options for label in ("A", "B", "C", "D", "E")):
+            return cand
+
+        option_block = self._build_option_block_from_options(source_options)
+        start = cand.find(f"{SEP_LINE}A)")
+        if start < 0:
+            match = re.search(r"(?<![A-Za-z0-9])A\)\s*", cand)
+            start = match.start() if match else -1
+        if start >= 0:
+            return f"{cand[:start].rstrip()} {option_block}".strip()
+        return f"{cand.rstrip()} {option_block}".strip()
+
+    def _find_last_incomplete_item_idx(self) -> Optional[int]:
+        for idx in range(len(self._items) - 1, -1, -1):
+            try:
+                _archivo, item_text, _imgs = self._items[idx]
+            except Exception:
+                continue
+            if not self._item_has_complete_options(str(item_text or "")):
+                return idx
+        return None
+
+    def _find_incomplete_item_before_number(self, next_item_number: Optional[int]) -> Optional[int]:
+        try:
+            target_num = int(next_item_number or 0)
+        except Exception:
+            target_num = 0
+        best_idx: Optional[int] = None
+        best_num = -1
+        for idx, entry in enumerate(self._items):
+            try:
+                _archivo, item_text, _imgs = entry
+            except Exception:
+                continue
+            item_text = str(item_text or "")
+            if self._item_has_complete_options(item_text):
+                continue
+            item_num = self._pending_item_number(idx, fallback=0)
+            if item_num <= 0:
+                continue
+            if target_num > 0 and item_num >= target_num:
+                continue
+            if item_num > best_num:
+                best_num = item_num
+                best_idx = idx
+        if best_idx is not None:
+            return best_idx
+        return self._find_last_incomplete_item_idx()
+
+    def _extract_first_structured_item_number_from_text(self, text: str) -> Optional[int]:
+        candidate = str(text or "").strip()
+        if not candidate:
+            return None
+        if candidate.startswith("```"):
+            candidate = re.sub(r"^```(?:json|JSON)?", "", candidate).strip()
+            candidate = re.sub(r"```$", "", candidate).strip()
+        try:
+            payload = json.loads(candidate)
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict):
+            return None
+        raw_items = payload.get("items", [])
+        if not isinstance(raw_items, list):
+            return None
+        for entry in raw_items:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                item_num = int(entry.get("n", 0) or 0)
+            except Exception:
+                item_num = 0
+            if item_num > 0:
+                return item_num
+        return None
+
+    def _reconcile_structured_leading_payload_for_label(self, label: str) -> bool:
+        raw = self._ensure_structured_ocr_for_label(label)
+        if not raw:
+            return False
+        leading_cont, leading_opts, _cleaned = self._extract_structured_leading_payload(raw)
+        leading_labels = self._extract_structured_leading_option_labels(raw)
+        structured_has_figure = self._extract_structured_leading_figure_hint(raw)
+        if not leading_cont and not leading_opts and not leading_labels and not structured_has_figure:
+            return False
+
+        next_item_number = self._extract_first_structured_item_number_from_text(raw)
+        target_idx = self._find_incomplete_item_before_number(next_item_number)
+        if target_idx is None or not (0 <= target_idx < len(self._items)):
+            return False
+        target_num = self._pending_item_number(target_idx, fallback=0)
+        if target_num <= 0:
+            return False
+
+        base_archivo, base_item, base_imgs = self._items[target_idx]
+        merged_item = str(base_item or "")
+        notes: List[str] = []
+        changed = False
+
+        if leading_cont:
+            new_item = self._merge_continuation_into_item(
+                base_item=merged_item,
+                continuation_text=leading_cont,
+                fallback_numero=target_num,
+            )
+            if new_item != merged_item:
+                merged_item = new_item
+                changed = True
+            note = self._build_merge_text_note(
+                stage=f"leading_continuation_cache -> item {target_num}",
+                text=leading_cont,
+            )
+            if note:
+                notes.append(note)
+
+        if leading_opts:
+            current_missing = set(self._missing_option_slots_for_item(merged_item))
+            filtered_opts = {
+                label_key: value
+                for label_key, value in dict(leading_opts or {}).items()
+                if label_key in current_missing
+            }
+            if filtered_opts:
+                new_item = self._merge_options_into_item(
+                    base_item=merged_item,
+                    extra_options=filtered_opts,
+                    fallback_numero=target_num,
+                )
+                if new_item != merged_item:
+                    merged_item = new_item
+                    changed = True
+                note = self._build_merge_options_note(
+                    stage=f"leading_options_cache -> item {target_num}",
+                    options=filtered_opts,
+                )
+                if note:
+                    notes.append(note)
+
+        continuity_context: Dict[str, Any] = {
+            "pending_num": int(target_num),
+            "statement_merged": False,
+            "merged_option_labels": list(leading_labels or []),
+            "option_labels_seen": list(leading_labels or []),
+            "structured_has_figure": bool(structured_has_figure),
+            "has_figure_hint": bool(structured_has_figure),
+        }
+        if leading_labels:
+            notes.append(
+                f"leading_option_slots_cache -> item {target_num}: {','.join(str(x) for x in leading_labels)}"
+            )
+        source_path = self._file_map.get(str(label))
+        if isinstance(source_path, Path):
+            if changed:
+                self._items[target_idx] = (base_archivo, merged_item, list(base_imgs or []))
+            segment_boxes = self._get_segment_boxes_for_ocr_flow(source_path)
+            reserved_indices, bind_notes = self._bind_leading_segments_to_pending_item(
+                pending_incomplete_idx=target_idx,
+                label=str(label),
+                path=source_path,
+                source_segment_boxes=segment_boxes,
+                continuity_context=continuity_context,
+                direct_items=[],
+                figure_positions=set(),
+            )
+            if reserved_indices or bind_notes:
+                changed = True
+                notes.extend(bind_notes)
+                _archivo2, merged_item2, _imgs2 = self._items[target_idx]
+                merged_item = str(merged_item2 or "")
+
+        if not changed:
+            return False
+
+        self._items[target_idx] = (base_archivo, merged_item, list(self._items[target_idx][2] if len(self._items[target_idx]) > 2 else base_imgs or []))
+        self._set_merge_notes_for_label(str(label), notes)
+        self._log(f"{label}: leading payload cache fusionado en item {target_num}.")
+        return True
+
+    def _build_item_from_structured_cache_entry(self, entry: Dict[str, Any]) -> str:
+        try:
+            numero = int(entry.get("n", 0) or 0)
+        except Exception:
+            numero = 0
+        numero = max(1, numero)
+        enunciado = str(entry.get("statement", "") or "").strip() or "[[ocr_sin_texto]]"
+        raw_options = entry.get("options", {})
+        options = raw_options if isinstance(raw_options, dict) else {}
+        item = self._build_scan_item_strict(
+            numero=numero,
+            enunciado=enunciado,
+            options={str(k): str(v or "") for k, v in options.items()},
+        )
+        curso = str(entry.get("curso", "") or "").strip()
+        tema = str(entry.get("tema", "") or "").strip()
+        item = self._inject_metadata_tags(item, curso=curso, tema=tema, subtema="")
+        item = self._apply_global_math_conventions(item)
+        item = self._apply_geometry_conventions(item)
+        item = self._normalize_math_delimiters(item)
+        return self.controller.normalizar_item_una_linea(item)
+
+    def _reconcile_structured_items_for_label(self, label: str) -> bool:
+        raw = self._ensure_structured_ocr_for_label(label)
+        if not raw:
+            return False
+        candidate = str(raw or "").strip()
+        if candidate.startswith("```"):
+            candidate = re.sub(r"^```(?:json|JSON)?", "", candidate).strip()
+            candidate = re.sub(r"```$", "", candidate).strip()
+        try:
+            payload = json.loads(candidate)
+        except Exception:
+            return False
+        if not isinstance(payload, dict):
+            return False
+        raw_items = payload.get("items", [])
+        if not isinstance(raw_items, list) or not raw_items:
+            return False
+
+        existing_numbers: Set[int] = set()
+        for entry in self._items:
+            if len(entry) < 2:
+                continue
+            item_num = self.controller.parsear_numero_original(str(entry[1] or "")) or 0
+            if item_num > 0:
+                existing_numbers.add(int(item_num))
+
+        inserted = False
+        source_path = self._file_map.get(str(label))
+        source_name = source_path.stem if isinstance(source_path, Path) else str(label)
+        for raw_entry in raw_items:
+            if not isinstance(raw_entry, dict):
+                continue
+            try:
+                item_num = int(raw_entry.get("n", 0) or 0)
+            except Exception:
+                item_num = 0
+            if item_num <= 0 or item_num in existing_numbers:
+                continue
+            entry = dict(raw_entry)
+            entry["_label_hint"] = str(label)
+            entry["_path_hint"] = str(source_path or "")
+            item_text = self._build_item_from_structured_cache_entry(entry)
+            insert_at = len(self._items)
+            for idx, current in enumerate(self._items):
+                if len(current) < 2:
+                    continue
+                current_num = self.controller.parsear_numero_original(str(current[1] or "")) or 0
+                if current_num > item_num:
+                    insert_at = idx
+                    break
+            self._items.insert(insert_at, (source_name, item_text, []))
+            existing_numbers.add(item_num)
+            inserted = True
+            self._log(f"{label}: item {item_num} materializado desde cache estructurado.")
+        return inserted
+
+    def _missing_option_slots_for_item(self, item: str) -> List[str]:
+        body = self._body_without_tags_and_markers(item)
+        _enu, options = self._extract_options_loose(body)
+        marker_slots = self._extract_image_marker_slots(item)
+        missing: List[str] = []
+        for label in ("A", "B", "C", "D", "E"):
+            if label in marker_slots:
+                continue
+            current = str(options.get(label, "") or "").strip()
+            if (not current) or self._is_placeholder_option_value(current):
+                missing.append(label)
+        return missing
 
     def _is_placeholder_option_value(self, value: str) -> bool:
         txt = (value or "").strip()
@@ -6295,6 +12782,169 @@ class TranscriptorWindow(tk.Toplevel):
         _enu, options = self._extract_options_loose(body)
         return len(options)
 
+    def _extract_option_label_sequence(self, text: str) -> List[str]:
+        raw_text = self._decode_scan_escapes(text or "")
+        if not raw_text:
+            return []
+        option_re = re.compile(r"(?<![A-Za-z0-9])([A-Ea-e])\s*[\)\].:]\s*")
+        labels: List[str] = []
+        for match in option_re.finditer(raw_text):
+            if self._is_false_option_marker_in_angle_context(raw_text, match.start(1)):
+                continue
+            label = str(match.group(1) or "").upper()
+            if label and label not in labels:
+                labels.append(label)
+        return labels
+
+    def _extract_image_marker_slots(self, item: str) -> Set[str]:
+        slots: Set[str] = set()
+        for marker_name in self._extract_image_marker_names(item):
+            slot = self._normalize_binding_slot(self._infer_slot_from_marker_name(marker_name))
+            if slot:
+                slots.add(slot)
+        return slots
+
+    def _extract_image_marker_names_by_slot(self, item: str) -> Dict[str, List[str]]:
+        grouped: Dict[str, List[str]] = {}
+        for marker_name in self._extract_image_marker_names(item):
+            slot = self._normalize_binding_slot(self._infer_slot_from_marker_name(marker_name))
+            if not slot:
+                continue
+            bucket = grouped.setdefault(slot, [])
+            if marker_name not in bucket:
+                bucket.append(marker_name)
+        return grouped
+
+    def _strip_image_markers_from_text(self, text: str) -> str:
+        cleaned = IMAGE_TAG_RE.sub(" ", str(text or ""))
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned
+
+    def _compose_option_value_with_markers(self, *, value: str, marker_names: List[str]) -> str:
+        cleaned = self._strip_image_markers_from_text(value)
+        tokens: List[str] = []
+        seen: Set[str] = set()
+        for raw_name in marker_names:
+            marker_name = str(raw_name or "").strip()
+            if not marker_name or marker_name in seen:
+                continue
+            seen.add(marker_name)
+            tokens.append(f"[[Imagen={marker_name}]]")
+        if tokens:
+            if (not cleaned) or self._is_placeholder_option_value(cleaned):
+                return " ".join(tokens)
+            return f"{' '.join(tokens)} {cleaned}".strip()
+        if cleaned and self._is_placeholder_option_value(cleaned):
+            return cleaned
+        if cleaned:
+            return cleaned
+        return ""
+
+    def _option_value_needs_text_completion(self, value: str) -> bool:
+        cleaned = self._strip_image_markers_from_text(value)
+        return (not cleaned) or self._is_placeholder_option_value(cleaned)
+
+    def _insert_marker_token_before_options(self, text: str, marker_name: str) -> str:
+        raw = str(text or "").strip()
+        marker = f"[[Imagen={str(marker_name or '').strip()}]]"
+        if not raw or not marker_name or marker in raw:
+            return raw
+        if f"{SEP_LINE}A)" in raw:
+            return raw.replace(f"{SEP_LINE}A)", f" {marker} {SEP_LINE}A)", 1)
+        if "Â£A)" in raw:
+            return raw.replace("Â£A)", f" {marker} Â£A)", 1)
+        m_a = re.search(r"\bA\)\s*", raw)
+        if m_a:
+            return f"{raw[:m_a.start()].rstrip()} {marker} {raw[m_a.start():].lstrip()}".strip()
+        return f"{raw} {marker}".strip()
+
+    def _render_item_option_value(self, value: str) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        marker_names = self._extract_image_marker_names(raw)
+        if not marker_names:
+            return self._option_to_math(raw)
+        cleaned = self._strip_image_markers_from_text(raw)
+        tokens = [f"[[Imagen={mk}]]" for mk in marker_names if str(mk or "").strip()]
+        if not cleaned:
+            return " ".join(tokens)
+        if self._is_placeholder_option_value(cleaned):
+            return " ".join(tokens)
+        return f"{' '.join(tokens)} {self._option_to_math(cleaned)}".strip()
+
+    def _rebuild_item_with_slot_markers(
+        self,
+        *,
+        base_item: str,
+        numero: int,
+        enunciado: str,
+        options: Dict[str, str],
+        slot_markers: Dict[str, List[str]],
+    ) -> str:
+        curso, tema, subtema = self._extract_existing_tags(base_item)
+        merged_options: Dict[str, str] = {}
+        for label in ("A", "B", "C", "D", "E"):
+            if label not in options and not slot_markers.get(label):
+                continue
+            merged_options[label] = self._compose_option_value_with_markers(
+                value=str(options.get(label, "") or ""),
+                marker_names=list(slot_markers.get(label, []) or []),
+            )
+
+        rebuilt = self._build_scan_item_strict(
+            numero=numero,
+            enunciado=enunciado,
+            options=merged_options,
+        )
+        rebuilt = self._inject_metadata_tags(rebuilt, curso=curso, tema=tema, subtema=subtema)
+        for marker_name in list(slot_markers.get("ENUNCIADO", []) or []):
+            rebuilt = self._insert_marker_token_before_options(rebuilt, marker_name)
+        rebuilt = self._move_image_marker_before_options(rebuilt)
+        rebuilt = self._normalize_math_delimiters(rebuilt)
+        return rebuilt
+
+    def _non_placeholder_options(self, raw_options: Any) -> Dict[str, str]:
+        cleaned: Dict[str, str] = {}
+        if not isinstance(raw_options, dict):
+            return cleaned
+        for label in ("A", "B", "C", "D", "E"):
+            value = str(raw_options.get(label, "") or "").strip()
+            if not value or self._is_placeholder_option_value(value):
+                continue
+            cleaned[label] = value
+        return cleaned
+
+    def _merge_continuity_context(self, base: Dict[str, Any], extra: Dict[str, Any]) -> Dict[str, Any]:
+        merged: Dict[str, Any] = {
+            "pending_num": int((base or {}).get("pending_num", 0) or 0),
+            "statement_merged": bool((base or {}).get("statement_merged", False)),
+            "merged_option_labels": list((base or {}).get("merged_option_labels", []) or []),
+            "option_labels_seen": list((base or {}).get("option_labels_seen", []) or []),
+            "structured_has_figure": bool((base or {}).get("structured_has_figure", False)),
+            "has_figure_hint": bool((base or {}).get("has_figure_hint", False)),
+        }
+        if not isinstance(extra, dict):
+            return merged
+        extra_pending = int(extra.get("pending_num", 0) or 0)
+        if extra_pending > 0:
+            merged["pending_num"] = extra_pending
+        merged["statement_merged"] = bool(merged["statement_merged"] or extra.get("statement_merged"))
+        merged["structured_has_figure"] = bool(
+            merged["structured_has_figure"] or extra.get("structured_has_figure")
+        )
+        merged["has_figure_hint"] = bool(merged["has_figure_hint"] or extra.get("has_figure_hint"))
+        for key in ("option_labels_seen", "merged_option_labels"):
+            combined: List[str] = []
+            seen: Set[str] = set()
+            for raw_label in list(merged.get(key, []) or []) + list(extra.get(key, []) or []):
+                label = self._normalize_binding_slot(str(raw_label or ""))
+                if label in {"A", "B", "C", "D", "E"} and label not in seen:
+                    seen.add(label)
+                    combined.append(label)
+            merged[key] = combined
+        return merged
+
     def _merge_orphan_options_into_item(self, base_item: str, orphan_item: str, *, fallback_numero: int) -> str:
         base = (base_item or "").strip()
         orphan = (orphan_item or "").strip()
@@ -6313,28 +12963,631 @@ class TranscriptorWindow(tk.Toplevel):
             return base
 
         numero = self.controller.parsear_numero_original(base) or fallback_numero
-        curso, tema, subtema = self._extract_existing_tags(base)
-        marker = self._extract_first_image_marker_name(base)
         base_body = self._body_without_tags_and_markers(base)
         base_enunciado, base_options = self._extract_options_loose(base_body)
+        slot_markers = self._extract_image_marker_names_by_slot(base)
 
         merged_options: Dict[str, str] = dict(base_options)
+        for label in ("A", "B", "C", "D", "E"):
+            if label in slot_markers and label not in merged_options:
+                merged_options[label] = ""
         for label in ("A", "B", "C", "D", "E"):
             value = (extra_options.get(label) or "").strip()
             if not value:
                 continue
             current = (merged_options.get(label) or "").strip()
-            if (label not in merged_options) or self._is_placeholder_option_value(current):
+            if (label not in merged_options) or self._option_value_needs_text_completion(current):
                 merged_options[label] = value
 
-        rebuilt = self._build_scan_item_strict(numero=numero, enunciado=base_enunciado or base_body, options=merged_options)
-        rebuilt = self._inject_metadata_tags(rebuilt, curso=curso, tema=tema, subtema=subtema)
-        if marker and not self._has_image_marker(rebuilt):
-            rebuilt = f"{rebuilt} [[Imagen={marker}]]".strip()
-        rebuilt = self._move_image_marker_before_options(rebuilt)
-        rebuilt = self._normalize_math_delimiters(rebuilt)
-        rebuilt = self._standardize_item_options(rebuilt, fallback_numero=numero)
-        return rebuilt
+        return self._rebuild_item_with_slot_markers(
+            base_item=base,
+            numero=numero,
+            enunciado=base_enunciado or base_body,
+            options=merged_options,
+            slot_markers=slot_markers,
+        )
+
+    def _consume_structured_continuation_candidate(
+        self,
+        *,
+        pending_incomplete_idx: Optional[int],
+        structured_items: List[Dict[str, Any]],
+        label: str,
+    ) -> Tuple[List[Dict[str, Any]], Optional[int], List[str], bool, Dict[str, Any]]:
+        remaining_items = [dict(it) for it in structured_items if isinstance(it, dict)]
+        context: Dict[str, Any] = {
+            "pending_num": 0,
+            "statement_merged": False,
+            "merged_option_labels": [],
+            "option_labels_seen": [],
+            "structured_has_figure": False,
+            "has_figure_hint": False,
+        }
+        if (
+            pending_incomplete_idx is None
+            or pending_incomplete_idx < 0
+            or pending_incomplete_idx >= len(self._items)
+            or not remaining_items
+        ):
+            return (remaining_items, pending_incomplete_idx, [], False, context)
+
+        pending_num = self._pending_item_number(pending_incomplete_idx, fallback=0)
+        context["pending_num"] = int(pending_num)
+        if pending_num <= 0:
+            return (remaining_items, pending_incomplete_idx, [], False, context)
+
+        candidate = dict(remaining_items[0])
+        try:
+            candidate_num = int(candidate.get("n", 0) or 0)
+        except Exception:
+            candidate_num = 0
+        if candidate_num <= 0 or candidate_num > pending_num:
+            return (remaining_items, pending_incomplete_idx, [], False, context)
+
+        remaining_after_candidate = remaining_items[1:]
+        has_following_new_problem = False
+        for next_item in remaining_after_candidate:
+            try:
+                next_num = int((next_item or {}).get("n", 0) or 0)
+            except Exception:
+                next_num = 0
+            if next_num > pending_num:
+                has_following_new_problem = True
+                break
+        if not has_following_new_problem:
+            return (remaining_items, pending_incomplete_idx, [], False, context)
+
+        candidate_statement = self.controller.normalizar_item_una_linea(
+            self._decode_scan_escapes(str(candidate.get("statement", "") or ""))
+        )
+        candidate_statement = re.sub(r"\s+", " ", candidate_statement).strip()
+        candidate_options = self._non_placeholder_options(candidate.get("options"))
+        context["structured_has_figure"] = bool(candidate.get("has_figure", False))
+        context["has_figure_hint"] = bool(self._item_image_hint_score(candidate_statement))
+        context["option_labels_seen"] = [label for label in ("A", "B", "C", "D", "E") if label in candidate_options]
+        if not candidate_statement and not candidate_options:
+            return (remaining_items, pending_incomplete_idx, [], False, context)
+
+        base_archivo, base_item, base_imgs = self._items[pending_incomplete_idx]
+        merged_item = str(base_item or "")
+        notes: List[str] = [
+            f"structured_continuation_consumed -> n={candidate_num} absorbido_en_item {pending_num}"
+        ]
+
+        if candidate_statement:
+            merged_item = self._merge_continuation_into_item(
+                base_item=merged_item,
+                continuation_text=candidate_statement,
+                fallback_numero=pending_num,
+            )
+            note = self._build_merge_text_note(
+                stage=f"structured_continuation_text -> item {pending_num}",
+                text=candidate_statement,
+            )
+            if note:
+                notes.append(note)
+            context["statement_merged"] = True
+
+        if candidate_options:
+            merged_item = self._merge_options_into_item(
+                base_item=merged_item,
+                extra_options=candidate_options,
+                fallback_numero=pending_num,
+            )
+            note = self._build_merge_options_note(
+                stage=f"structured_continuation_options -> item {pending_num}",
+                options=candidate_options,
+            )
+            if note:
+                notes.append(note)
+            context["merged_option_labels"] = list(context["option_labels_seen"])
+
+        self._items[pending_incomplete_idx] = (base_archivo, merged_item, list(base_imgs or []))
+        updated_pending_idx: Optional[int]
+        if self._item_has_complete_options(merged_item):
+            updated_pending_idx = None
+        else:
+            updated_pending_idx = pending_incomplete_idx
+        self._log(
+            f"{label}: structured_continuation_consumed n={candidate_num} -> item {pending_num}."
+        )
+        return (remaining_after_candidate, updated_pending_idx, notes, True, context)
+
+    def _recover_leading_options_for_pending(
+        self,
+        *,
+        pending_incomplete_idx: Optional[int],
+        label: str,
+        path: Path,
+        provider: str,
+        model: str,
+        timeout_s: int,
+        retries: int,
+        openai_client: Optional[OpenAI],
+        next_item_number: Optional[int],
+    ) -> Tuple[Optional[int], List[str], bool, Dict[str, Any]]:
+        context: Dict[str, Any] = {
+            "pending_num": 0,
+            "statement_merged": False,
+            "merged_option_labels": [],
+            "option_labels_seen": [],
+            "structured_has_figure": False,
+            "has_figure_hint": False,
+        }
+        if (
+            pending_incomplete_idx is None
+            or pending_incomplete_idx < 0
+            or pending_incomplete_idx >= len(self._items)
+        ):
+            return (pending_incomplete_idx, [], False, context)
+
+        pending_num = self._pending_item_number(pending_incomplete_idx, fallback=0)
+        context["pending_num"] = int(pending_num)
+        if pending_num <= 0:
+            return (pending_incomplete_idx, [], False, context)
+
+        leading_cont = ""
+        leading_opts: Dict[str, str] = {}
+        seen_option_labels: List[str] = []
+        prefix_text = ""
+
+        if provider == PROVIDER_OPENAI and openai_client is not None:
+            leading_cont, leading_opts = self._extract_leading_options_openai(
+                openai_client,
+                model=model,
+                timeout_s=timeout_s,
+                retries=retries,
+                label=label,
+                path=path,
+            )
+        elif provider == PROVIDER_HF:
+            leading_cont, leading_opts = self._extract_leading_options_hf(
+                model=model,
+                timeout_s=timeout_s,
+                retries=retries,
+                label=label,
+                path=path,
+            )
+
+        filtered_opts = self._non_placeholder_options(leading_opts)
+        seen_option_labels = [label for label in ("A", "B", "C", "D", "E") if label in filtered_opts]
+        clean_cont = self.controller.normalizar_item_una_linea(
+            self._decode_scan_escapes(str(leading_cont or ""))
+        )
+        clean_cont = self._clean_summary_continuation_text(clean_cont)
+
+        local_prefill_raw = ""
+        if (not filtered_opts and not clean_cont) or (not seen_option_labels):
+            try:
+                local_prefill_raw = self._transcribir_local_ocr(path, label=None)
+            except Exception as exc:
+                self._log(
+                    f"{label}: OCR local omitido durante rescate de continuidad. Detalle: {exc}"
+                )
+                local_prefill_raw = ""
+        if local_prefill_raw:
+            prefix, _rest = self._extract_prefix_before_known_item_number(
+                local_prefill_raw,
+                next_item_number=next_item_number,
+            )
+            if not prefix:
+                prefix, _rest = self._extract_leading_continuation_payload(
+                    local_prefill_raw,
+                    force_prefix=True,
+                )
+            if prefix:
+                prefix_text = prefix
+                seen_option_labels = self._extract_option_label_sequence(prefix)
+                local_enu, local_opts = self._extract_options_loose(prefix)
+                filtered_opts = self._non_placeholder_options(local_opts)
+                if filtered_opts:
+                    clean_cont = self._clean_summary_continuation_text(local_enu)
+                else:
+                    clean_cont = self._clean_summary_continuation_text(prefix)
+            if not filtered_opts:
+                payload_opts, _stripped = self._extract_leading_options_payload(local_prefill_raw)
+                filtered_opts = self._non_placeholder_options(payload_opts)
+                if filtered_opts and not seen_option_labels:
+                    seen_option_labels = [label for label in ("A", "B", "C", "D", "E") if label in filtered_opts]
+
+        if not filtered_opts and not clean_cont:
+            return (pending_incomplete_idx, [], False, context)
+
+        base_archivo, base_item, base_imgs = self._items[pending_incomplete_idx]
+        merged_item = str(base_item or "")
+        notes: List[str] = []
+        context["option_labels_seen"] = list(seen_option_labels)
+        context["has_figure_hint"] = bool(
+            self._item_image_hint_score(prefix_text or clean_cont or leading_cont or "")
+        )
+
+        if clean_cont:
+            merged_item = self._merge_continuation_into_item(
+                base_item=merged_item,
+                continuation_text=clean_cont,
+                fallback_numero=pending_num,
+            )
+            note = self._build_merge_text_note(
+                stage=f"leading_continuation_merged -> item {pending_num}",
+                text=clean_cont,
+            )
+            if note:
+                notes.append(note)
+            context["statement_merged"] = True
+
+        if filtered_opts:
+            merged_item = self._merge_options_into_item(
+                base_item=merged_item,
+                extra_options=filtered_opts,
+                fallback_numero=pending_num,
+            )
+            note = self._build_merge_options_note(
+                stage=f"leading_options_merged -> item {pending_num}",
+                options=filtered_opts,
+            )
+            if note:
+                notes.append(note)
+            context["merged_option_labels"] = [
+                label for label in ("A", "B", "C", "D", "E") if label in filtered_opts
+            ]
+
+        self._items[pending_incomplete_idx] = (base_archivo, merged_item, list(base_imgs or []))
+        updated_pending_idx: Optional[int]
+        if self._item_has_complete_options(merged_item):
+            updated_pending_idx = None
+        else:
+            updated_pending_idx = pending_incomplete_idx
+        self._log(
+            f"{label}: leading continuation/options fusionadas en item pendiente {pending_num}."
+        )
+        return (updated_pending_idx, notes, True, context)
+
+    def _ocr_local_top_band(self, path: Path, *, height_ratio: float) -> str:
+        ratio = max(0.05, min(0.95, float(height_ratio or 0.0)))
+        tmp_path: Optional[Path] = None
+        try:
+            from PIL import Image  # type: ignore
+        except Exception:
+            return ""
+        try:
+            with Image.open(path) as im:
+                width, height = im.size
+                if width <= 0 or height <= 0:
+                    return ""
+                band_height = max(1, min(height, int(round(height * ratio))))
+                crop = im.crop((0, 0, width, band_height))
+                try:
+                    resample = Image.Resampling.LANCZOS  # type: ignore[attr-defined]
+                except Exception:
+                    resample = Image.LANCZOS  # type: ignore[attr-defined]
+                upscale_factor = 2 if max(crop.size) < 2200 else 1
+                if upscale_factor > 1:
+                    crop = crop.resize(
+                        (max(1, crop.size[0] * upscale_factor), max(1, crop.size[1] * upscale_factor)),
+                        resample=resample,
+                    )
+                fd, tmp_name = tempfile.mkstemp(prefix="auditor_topband_", suffix=".png")
+                os.close(fd)
+                tmp_path = Path(tmp_name)
+                crop.save(tmp_path, format="PNG")
+            return str(self._transcribir_local_ocr(tmp_path, label=None) or "").strip()
+        except Exception:
+            return ""
+        finally:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+    def _recover_topband_options_for_pending(
+        self,
+        *,
+        pending_incomplete_idx: Optional[int],
+        label: str,
+        path: Path,
+        next_item_number: Optional[int],
+        continuity_context: Dict[str, Any],
+    ) -> Tuple[Optional[int], List[str], bool, Dict[str, Any]]:
+        context = self._merge_continuity_context({}, continuity_context)
+        if (
+            pending_incomplete_idx is None
+            or pending_incomplete_idx < 0
+            or pending_incomplete_idx >= len(self._items)
+        ):
+            return (pending_incomplete_idx, [], False, context)
+        if not next_item_number or int(next_item_number) <= 0:
+            return (pending_incomplete_idx, [], False, context)
+
+        base_archivo, base_item, base_imgs = self._items[pending_incomplete_idx]
+        pending_num = self._pending_item_number(
+            pending_incomplete_idx,
+            fallback=int(context.get("pending_num", 0) or 0),
+        )
+        if pending_num <= 0:
+            return (pending_incomplete_idx, [], False, context)
+        context["pending_num"] = int(pending_num)
+
+        missing_slots = self._missing_option_slots_for_item(base_item)
+        if not missing_slots:
+            return (pending_incomplete_idx, [], False, context)
+        missing_set = set(missing_slots)
+
+        candidates: List[Dict[str, Any]] = []
+        ratios = (0.22, 0.32, 0.42, 0.52, 0.62)
+
+        def _consider_candidate(*, raw_text: str, band_order: int, ratio: float, source_name: str) -> None:
+            raw_norm = self.controller.normalizar_item_una_linea(self._decode_scan_escapes(raw_text or ""))
+            if not raw_norm:
+                return
+
+            candidate_blocks: List[Tuple[str, Dict[str, str], str]] = []
+
+            prefix, _rest = self._extract_prefix_before_known_item_number(
+                raw_norm,
+                next_item_number=next_item_number,
+            )
+            if prefix:
+                enu_prefix, opts_prefix = self._extract_options_loose(prefix)
+                candidate_blocks.append((enu_prefix, opts_prefix, f"{source_name}:prefix"))
+
+            payload_opts, _stripped = self._extract_leading_options_payload(raw_norm)
+            if payload_opts:
+                candidate_blocks.append(("", payload_opts, f"{source_name}:payload"))
+
+            loose_enu, loose_opts = self._extract_options_loose(raw_norm)
+            if loose_opts:
+                candidate_blocks.append((loose_enu, loose_opts, f"{source_name}:loose"))
+
+            for enu_raw, opts_raw, variant_name in candidate_blocks:
+                filtered_opts = self._non_placeholder_options(opts_raw)
+                labels = [opt for opt in ("A", "B", "C", "D", "E") if opt in filtered_opts]
+                if not labels:
+                    continue
+                if not set(labels).issubset(missing_set):
+                    continue
+                clean_enu = self._clean_summary_continuation_text(str(enu_raw or ""))
+                if clean_enu and len(clean_enu) > 40 and len(labels) < 2:
+                    continue
+                candidates.append(
+                    {
+                        "ratio": float(ratio),
+                        "band_order": int(band_order),
+                        "variant": str(variant_name),
+                        "enunciado": clean_enu,
+                        "options": filtered_opts,
+                        "labels": labels,
+                    }
+                )
+
+        for band_order, ratio in enumerate(ratios, start=1):
+            topband_raw = self._ocr_local_top_band(path, height_ratio=ratio)
+            if not topband_raw:
+                continue
+            _consider_candidate(
+                raw_text=topband_raw,
+                band_order=band_order,
+                ratio=ratio,
+                source_name=f"topband_{int(round(ratio * 100))}",
+            )
+
+        if not candidates:
+            return (pending_incomplete_idx, [], False, context)
+
+        best = min(
+            candidates,
+            key=lambda cand: (
+                -len(cand.get("labels", []) or []),
+                len(str(cand.get("enunciado", "") or "")),
+                int(cand.get("band_order", 0) or 0),
+            ),
+        )
+        best_options = dict(best.get("options", {}) or {})
+        best_labels = [opt for opt in ("A", "B", "C", "D", "E") if opt in best_options]
+        if not best_options or not best_labels:
+            return (pending_incomplete_idx, [], False, context)
+
+        merged_item = self._merge_options_into_item(
+            base_item=str(base_item or ""),
+            extra_options=best_options,
+            fallback_numero=pending_num,
+        )
+        self._items[pending_incomplete_idx] = (base_archivo, merged_item, list(base_imgs or []))
+
+        notes: List[str] = []
+        note = self._build_merge_options_note(
+            stage=f"topband_options_merged -> item {pending_num}",
+            options=best_options,
+        )
+        if note:
+            notes.append(note)
+
+        context["option_labels_seen"] = self._merge_continuity_context(
+            context,
+            {"option_labels_seen": best_labels},
+        ).get("option_labels_seen", [])
+        context["merged_option_labels"] = self._merge_continuity_context(
+            context,
+            {"merged_option_labels": best_labels},
+        ).get("merged_option_labels", [])
+
+        updated_pending_idx: Optional[int]
+        if self._item_has_complete_options(merged_item):
+            updated_pending_idx = None
+        else:
+            updated_pending_idx = pending_incomplete_idx
+
+        self._log(
+            f"{label}: topband recupero opciones para item pendiente {pending_num} "
+            f"(slots={','.join(best_labels)}; fuente={best.get('variant', '')})."
+        )
+        return (updated_pending_idx, notes, True, context)
+
+    def _bind_leading_segments_to_pending_item(
+        self,
+        *,
+        pending_incomplete_idx: Optional[int],
+        label: str,
+        path: Path,
+        source_segment_boxes: List[Tuple[int, int, int, int]],
+        continuity_context: Dict[str, Any],
+        direct_items: List[str],
+        figure_positions: Set[int],
+    ) -> Tuple[Set[int], List[str]]:
+        reserved_indices: Set[int] = set()
+        notes: List[str] = []
+        if (
+            pending_incomplete_idx is None
+            or pending_incomplete_idx < 0
+            or pending_incomplete_idx >= len(self._items)
+            or not source_segment_boxes
+        ):
+            return (reserved_indices, notes)
+
+        pending_num = self._pending_item_number(
+            pending_incomplete_idx,
+            fallback=int(continuity_context.get("pending_num", 0) or 0),
+        )
+        if pending_num <= 0:
+            return (reserved_indices, notes)
+
+        base_archivo, base_item, base_imgs = self._items[pending_incomplete_idx]
+        marker_slots = self._extract_image_marker_slots(base_item)
+        base_body = self._body_without_tags_and_markers(base_item)
+        _base_enu, base_options = self._extract_options_loose(base_body)
+
+        preferred_option_labels: List[str] = []
+        for label_name in list(continuity_context.get("option_labels_seen", []) or []) + list(
+            continuity_context.get("merged_option_labels", []) or []
+        ):
+            slot_name = self._normalize_binding_slot(str(label_name or ""))
+            if slot_name in {"A", "B", "C", "D", "E"} and slot_name not in preferred_option_labels:
+                preferred_option_labels.append(slot_name)
+
+        placeholder_option_slots: List[str] = []
+        for slot_name in preferred_option_labels:
+            if slot_name in marker_slots:
+                continue
+            current_value = str(base_options.get(slot_name, "") or "").strip()
+            if self._is_placeholder_option_value(current_value):
+                placeholder_option_slots.append(slot_name)
+
+        missing_option_slots = [
+            slot_name
+            for slot_name in self._missing_option_slots_for_item(base_item)
+            if slot_name not in marker_slots
+        ]
+
+        source_bindings = self._get_segment_bindings_by_source_key(self._seg_v2_source_key(path))
+        blocked_indices = {
+            int(seg_idx)
+            for seg_idx, payload in source_bindings.items()
+            if isinstance(payload, dict) and self._as_bool(payload.get("confirmed"), False)
+        }
+        available_entries = [
+            (seg_idx, box)
+            for seg_idx, box in enumerate(source_segment_boxes)
+            if seg_idx not in blocked_indices
+        ]
+        if not available_entries:
+            return (reserved_indices, notes)
+
+        slots_to_bind: List[str] = []
+        if placeholder_option_slots:
+            if len(available_entries) >= len(placeholder_option_slots):
+                slots_to_bind = list(placeholder_option_slots)
+            else:
+                for seg_idx, _box in available_entries[: min(len(available_entries), len(placeholder_option_slots))]:
+                    reserved_indices.add(int(seg_idx))
+                notes.append(
+                    f"leading_figure_pending_manual -> item {pending_num}: slots={','.join(placeholder_option_slots)} segments={len(available_entries)}"
+                )
+                return (reserved_indices, notes)
+        elif (not preferred_option_labels) and (not direct_items) and missing_option_slots:
+            if len(available_entries) == len(missing_option_slots):
+                slots_to_bind = list(missing_option_slots)
+            elif len(available_entries) > 0:
+                for seg_idx, _box in available_entries:
+                    reserved_indices.add(int(seg_idx))
+                notes.append(
+                    f"leading_figure_pending_manual -> item {pending_num}: slots={','.join(missing_option_slots)} segments={len(available_entries)}"
+                )
+                return (reserved_indices, notes)
+        else:
+            enunciado_has_marker = "ENUNCIADO" in marker_slots
+            statement_merged = bool(continuity_context.get("statement_merged"))
+            statement_has_figure_hint = bool(continuity_context.get("structured_has_figure")) or bool(
+                continuity_context.get("has_figure_hint")
+            )
+            option_merge_only_with_figure = bool(
+                preferred_option_labels
+                and statement_has_figure_hint
+                and (not direct_items)
+            )
+            if (statement_merged or option_merge_only_with_figure) and (not enunciado_has_marker):
+                can_bind_enunciado = False
+                if len(available_entries) == 1:
+                    can_bind_enunciado = True
+                elif (not direct_items) and statement_has_figure_hint:
+                    can_bind_enunciado = True
+                elif statement_has_figure_hint and (not figure_positions) and len(available_entries) == 1:
+                    can_bind_enunciado = True
+                if can_bind_enunciado:
+                    slots_to_bind = ["ENUNCIADO"]
+                elif statement_has_figure_hint:
+                    if available_entries:
+                        reserved_indices.add(int(available_entries[0][0]))
+                    notes.append(
+                        f"leading_figure_pending_manual -> item {pending_num}: slots=ENUNCIADO segments={len(available_entries)}"
+                    )
+        if not slots_to_bind:
+            return (reserved_indices, notes)
+
+        merged_item = str(base_item or "")
+        merged_imgs = list(base_imgs or [])
+        for slot_name, (seg_idx, box_px) in zip(slots_to_bind, available_entries):
+            marker_name = self._build_binding_marker_name(item_num=pending_num, slot=slot_name)
+            merged_item = self._insert_explicit_marker_in_slot(
+                text=merged_item,
+                marker_name=marker_name,
+                slot=slot_name,
+                path=path,
+                numero=pending_num,
+            )
+            bbox_norm = self._box_px_to_norm(path=path, box_px=box_px)
+            crop_saved = ""
+            if bbox_norm is not None:
+                crop_saved = str(
+                    self._save_figure_crop(
+                        image_path=path,
+                        marker_name=marker_name,
+                        bbox_norm=bbox_norm,
+                    )
+                    or ""
+                ).strip()
+            self._set_segment_item_binding(
+                source_path=path,
+                segment_idx=int(seg_idx),
+                item_num=pending_num,
+                slot=slot_name,
+                crop_path=crop_saved,
+                confirmed=True,
+            )
+            if crop_saved:
+                if crop_saved not in merged_imgs:
+                    merged_imgs.append(crop_saved)
+                self._preview_images[marker_name] = crop_saved
+                self._missing_marker_warned.discard(marker_name)
+            reserved_indices.add(int(seg_idx))
+            notes.append(
+                f"leading_figure_bound -> item {pending_num}: slot={slot_name} marker={marker_name} seg={int(seg_idx) + 1}"
+            )
+            self._log(
+                f"{label}: leading_figure_bound item={pending_num} slot={slot_name} seg={int(seg_idx)} marker={marker_name}"
+            )
+
+        self._items[pending_incomplete_idx] = (base_archivo, merged_item, merged_imgs)
+        return (reserved_indices, notes)
 
     def _merge_continuation_into_item(
         self,
@@ -6360,6 +13613,7 @@ class TranscriptorWindow(tk.Toplevel):
 
         base_body = self._body_without_tags_and_markers(base)
         base_enunciado, base_options = self._extract_options_loose(base_body)
+        slot_markers = self._extract_image_marker_names_by_slot(base)
 
         cont_body = cont_raw
         m_cont = ITEM_HEADER_RE.search(cont_body)
@@ -6375,35 +13629,27 @@ class TranscriptorWindow(tk.Toplevel):
         merged_enunciado = (base_enunciado or base_body or "").strip()
         add_enunciado = (cont_enunciado or "").strip()
         if add_enunciado:
-            base_key = self._norm_key(merged_enunciado)
-            add_key = self._norm_key(add_enunciado)
-            if add_key and (add_key not in base_key):
-                if merged_enunciado:
-                    merged_enunciado = f"{merged_enunciado} {add_enunciado}".strip()
-                else:
-                    merged_enunciado = add_enunciado
+            merged_enunciado = merge_statement_fragments(merged_enunciado, add_enunciado)
 
         merged_options: Dict[str, str] = dict(base_options)
+        for label in ("A", "B", "C", "D", "E"):
+            if label in slot_markers and label not in merged_options:
+                merged_options[label] = ""
         for label in ("A", "B", "C", "D", "E"):
             val = (cont_options.get(label) or "").strip()
             if not val:
                 continue
             current = (merged_options.get(label) or "").strip()
-            if (label not in merged_options) or self._is_placeholder_option_value(current):
+            if (label not in merged_options) or self._option_value_needs_text_completion(current):
                 merged_options[label] = val
 
-        rebuilt = self._build_scan_item_strict(
+        return self._rebuild_item_with_slot_markers(
+            base_item=base,
             numero=numero,
             enunciado=merged_enunciado or base_enunciado or base_body,
             options=merged_options,
+            slot_markers=slot_markers,
         )
-        rebuilt = self._inject_metadata_tags(rebuilt, curso=curso, tema=tema, subtema=subtema)
-        if marker and not self._has_image_marker(rebuilt):
-            rebuilt = f"{rebuilt} [[Imagen={marker}]]".strip()
-        rebuilt = self._move_image_marker_before_options(rebuilt)
-        rebuilt = self._normalize_math_delimiters(rebuilt)
-        rebuilt = self._standardize_item_options(rebuilt, fallback_numero=numero)
-        return rebuilt
 
     def _option_to_math(self, text: str) -> str:
         normalized = normalize_latex_option(text)
@@ -6438,28 +13684,35 @@ class TranscriptorWindow(tk.Toplevel):
         if has_all:
             return (
                 f"\\item[\\textbf{{{numero}.}}] {enu} "
-                f"{SEP_LINE}A) {self._option_to_math(options['A'])}"
-                f"{SEP_OPT}B) {self._option_to_math(options['B'])}"
-                f"{SEP_OPT}C) {self._option_to_math(options['C'])}"
-                f"{SEP_LINE}D) {self._option_to_math(options['D'])}"
-                f"{SEP_OPT}{SEP_OPT}E) {self._option_to_math(options['E'])}{SEP_LINE}"
+                f"{SEP_LINE}A) {self._render_item_option_value(options['A'])}"
+                f"{SEP_OPT}B) {self._render_item_option_value(options['B'])}"
+                f"{SEP_OPT}C) {self._render_item_option_value(options['C'])}"
+                f"{SEP_LINE}D) {self._render_item_option_value(options['D'])}"
+                f"{SEP_OPT}{SEP_OPT}E) {self._render_item_option_value(options['E'])}{SEP_LINE}"
             )
         if options:
             parts: List[str] = []
             for label in ("A", "B", "C", "D", "E"):
                 if label in options:
-                    parts.append(f"{label}) {self._option_to_math(options[label])}")
+                    parts.append(f"{label}) {self._render_item_option_value(options[label])}")
             return f"\\item[\\textbf{{{numero}.}}] {enu} {SEP_LINE}{SEP_OPT.join(parts)}{SEP_LINE}"
         return f"\\item[\\textbf{{{numero}.}}] {enu}"
 
     def _build_scan_item(self, *, numero: int, enunciado: str, options: Dict[str, str]) -> str:
         return self._build_scan_item_strict(numero=numero, enunciado=enunciado, options=options)
 
-    def _item_from_plain_ocr(self, text: str, path: Path, idx: int) -> str:
+    def _item_from_plain_ocr(
+        self,
+        text: str,
+        path: Path,
+        idx: int,
+        *,
+        forced_numero: Optional[int] = None,
+    ) -> str:
         normalized = self.controller.normalizar_item_una_linea(text)
         if normalized.startswith("\\item"):
             return normalized
-        numero = self._infer_numero(path, idx)
+        numero = int(forced_numero or 0) or self._infer_numero(path, idx)
         plain = self._normalize_plain_ocr(text)
         if not plain:
             plain = f"[[ocr_sin_texto={path.name}]]"
@@ -6474,39 +13727,29 @@ class TranscriptorWindow(tk.Toplevel):
         raw_items: List[str],
         segment_count: int,
     ) -> Dict[int, int]:
-        """
-        Map item position (1-based) -> segment index (0-based).
-        Conservative policy to avoid false positives:
-        1) Prioritize items with explicit image hints (grafico/figura/...).
-        2) If there are no hints:
-           - only auto-assign when there is a single item in the image.
-           - for multi-item images, assign none (manual/continuation logic can still attach).
-        """
         plan: Dict[int, int] = {}
         if segment_count <= 0 or not raw_items:
             return plan
         item_count = len(raw_items)
-        scored: List[Tuple[int, int]] = []  # (score, pos)
-        for pos, raw in enumerate(raw_items, start=1):
-            txt = self._decode_scan_escapes(raw or "")
-            score = self._item_image_hint_score(txt)
+        if item_count == 1:
+            plan[1] = 0
+            return plan
+        if item_count == segment_count:
+            for pos in range(1, item_count + 1):
+                plan[pos] = pos - 1
+            return plan
+
+        # When a page has several OCR items but fewer detected figures, assign
+        # the available figure boxes to the items whose statement explicitly
+        # mentions a figure/graph. This covers the common case "2 problemas en
+        # una imagen, solo uno con grafico" without inventing markers blindly.
+        scored: List[Tuple[int, int]] = []
+        for pos, raw_item in enumerate(raw_items, start=1):
+            score = self._item_image_hint_score(self._decode_scan_escapes(str(raw_item or "")))
             if score > 0:
                 scored.append((score, pos))
-        scored.sort(key=lambda t: (-t[0], t[1]))
-        chosen: List[int] = []
-        for _score, pos in scored:
-            if len(chosen) >= segment_count:
-                break
-            if pos not in chosen:
-                chosen.append(pos)
-        if not chosen:
-            if item_count == 1:
-                chosen.append(1)
-            else:
-                return plan
-        for seg_idx, pos in enumerate(chosen):
-            if seg_idx >= segment_count:
-                break
+        scored.sort(key=lambda row: (-row[0], row[1]))
+        for seg_idx, (_score, pos) in enumerate(scored[:segment_count]):
             plan[pos] = seg_idx
         return plan
 
@@ -6526,8 +13769,6 @@ class TranscriptorWindow(tk.Toplevel):
         if self._has_image_marker(base_item):
             return True
         txt = self._decode_scan_escapes(continuation_text or "")
-        if self._item_image_hint_score(txt) > 0:
-            return True
         if re.search(r"\[\[\s*imagen\s*=", txt, re.IGNORECASE):
             return True
         return False
@@ -6691,22 +13932,29 @@ class TranscriptorWindow(tk.Toplevel):
         # Common OCR artifact: trailing math closer after prompt variable.
         out = re.sub(r"\b(calcule|halle|determine)\s+([A-Za-z])\$", r"\1 \2", out, flags=re.IGNORECASE)
         out = re.sub(r"\b(calcule|halle|determine)\$(\S)", r"\1 $\2", out, flags=re.IGNORECASE)
-        out = re.sub(r"\$(el|la|los|las|de|del|al|y|o)\$", r"\1", out, flags=re.IGNORECASE)
+        # Keep single-letter symbols like $y$/$o$ as math variables.
+        out = re.sub(r"\$(el|la|los|las|de|del|al)\$", r"\1", out, flags=re.IGNORECASE)
         # If OCR leaves broken/odd '$', drop unmatched delimiters instead of stretching math to EOL.
         rebuilt: List[str] = []
         open_idx: Optional[int] = None
-        for ch in out:
+        for idx, ch in enumerate(out):
+            next_ch = out[idx + 1] if (idx + 1) < len(out) else ""
             if ch != "$":
                 if open_idx is not None and ch in (SEP_LINE, SEP_OPT):
                     # Prevent crossing math fragments into option separators.
+                    # If there is math content, close it before the separator.
+                    # If the opener is empty/noise (e.g. "$£"), drop it.
                     if 0 <= open_idx < len(rebuilt) and rebuilt[open_idx] == "$":
-                        rebuilt.pop(open_idx)
+                        if open_idx < (len(rebuilt) - 1):
+                            rebuilt.append("$")
+                        else:
+                            rebuilt.pop(open_idx)
                     open_idx = None
                 rebuilt.append(ch)
                 continue
             prev = rebuilt[-1] if rebuilt else ""
             if open_idx is None:
-                if prev in (SEP_LINE, SEP_OPT):
+                if prev in (SEP_LINE, SEP_OPT) and (not next_ch or next_ch in (SEP_LINE, SEP_OPT)):
                     continue
                 open_idx = len(rebuilt)
                 rebuilt.append("$")
@@ -6720,7 +13968,12 @@ class TranscriptorWindow(tk.Toplevel):
                 rebuilt.append("$")
                 open_idx = None
         if open_idx is not None and 0 <= open_idx < len(rebuilt) and rebuilt[open_idx] == "$":
-            rebuilt.pop(open_idx)
+            # Avoid dropping math when OCR leaves trailing unclosed '$':
+            # close if there is body, otherwise drop pure-noise opener.
+            if open_idx < (len(rebuilt) - 1):
+                rebuilt.append("$")
+            else:
+                rebuilt.pop(open_idx)
         out = "".join(rebuilt)
         # Last-resort guard: never leave odd '$' count.
         while out.count("$") % 2 != 0:
@@ -6850,17 +14103,24 @@ class TranscriptorWindow(tk.Toplevel):
         curso: Optional[str] = None,
         tema: Optional[str] = None,
         subtema: Optional[str] = None,
+        estado: Optional[str] = None,
     ) -> str:
         item = (text or "").strip()
         if not item:
             return item
+        estado_existente = ""
+        estado_match = TAG_ESTADO_RE.search(item)
+        if estado_match:
+            estado_existente = self._sanitize_tag_value(estado_match.group(1))
         curso_val = self._sanitize_tag_value((curso if curso is not None else self.curso_var.get() or "").strip())
         tema_val = self._sanitize_tag_value((tema if tema is not None else self.tema_var.get() or "").strip())
         subtema_val = self._sanitize_tag_value((subtema if subtema is not None else self.subtema_var.get() or "").strip())
+        estado_val = self._sanitize_tag_value((estado if estado is not None else estado_existente or "sin_revisar").strip())
 
         cleaned = TAG_CURSO_RE.sub(" ", item)
         cleaned = TAG_TEMA_RE.sub(" ", cleaned)
         cleaned = TAG_SUBTEMA_RE.sub(" ", cleaned)
+        cleaned = TAG_ESTADO_RE.sub(" ", cleaned)
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
 
         tags: List[str] = []
@@ -6870,6 +14130,8 @@ class TranscriptorWindow(tk.Toplevel):
             tags.append(f"[[tema={tema_val}]]")
         if subtema_val:
             tags.append(f"[[subtema={subtema_val}]]")
+        if estado_val:
+            tags.append(f"[[Estado={estado_val}]]")
         if not tags:
             return cleaned
 
@@ -6925,6 +14187,37 @@ class TranscriptorWindow(tk.Toplevel):
                     chunk = (base[start:end] or "").strip(" ;")
                     if chunk:
                         chunks.append(self._item_from_plain_ocr(chunk, path, idx + pos))
+                if chunks:
+                    return chunks
+            numbered_markers = list(
+                re.finditer(
+                    r"(?<!\S)(\d{1,4})\s*[\].:)](?=\s*[A-Za-zÁÉÍÓÚÜÑáéíóúüñ¿¡])",
+                    base,
+                )
+            )
+            if numbered_markers:
+                chunks = []
+                prefix = (base[: numbered_markers[0].start()] or "").strip()
+                if prefix:
+                    chunks.append(f"{ORPHAN_OPTIONS_PREFIX} {prefix}".strip())
+                for pos, match in enumerate(numbered_markers):
+                    start = match.start()
+                    end = numbered_markers[pos + 1].start() if pos + 1 < len(numbered_markers) else len(base)
+                    chunk = (base[start:end] or "").strip(" ;")
+                    if not chunk:
+                        continue
+                    try:
+                        forced_numero = int(match.group(1))
+                    except Exception:
+                        forced_numero = 0
+                    chunks.append(
+                        self._item_from_plain_ocr(
+                            chunk,
+                            path,
+                            idx + pos,
+                            forced_numero=forced_numero if forced_numero > 0 else None,
+                        )
+                    )
                 if chunks:
                     return chunks
             return [self._item_from_plain_ocr(base, path, idx)]
@@ -6991,7 +14284,8 @@ class TranscriptorWindow(tk.Toplevel):
         if not header_match:
             return txt
         header = header_match.group(1)
-        marker_name = self._extract_first_image_marker_name(txt)
+        numero = self.controller.parsear_numero_original(header) or fallback_numero
+        slot_markers = self._extract_image_marker_names_by_slot(txt)
         ex_curso, ex_tema, ex_subtema = self._extract_existing_tags(txt)
         body = self._body_without_tags_and_markers(txt)
         enunciado, options = self._extract_options(body)
@@ -6999,30 +14293,42 @@ class TranscriptorWindow(tk.Toplevel):
         enunciado = re.sub(r"\s+", " ", enunciado).strip()
         option_markers = re.findall(r"(?<![A-Za-z0-9])([A-Ea-e])\s*[\)\].:]", body)
 
-        def with_marker(base_item: str) -> str:
+        def with_markers(base_item: str) -> str:
             out = (base_item or "").strip()
-            if marker_name and not self._has_image_marker(out):
-                out = f"{out} [[Imagen={marker_name}]]".strip()
-                out = self._move_image_marker_before_options(out)
+            for marker_name in list(slot_markers.get("ENUNCIADO", []) or []):
+                out = self._insert_marker_token_before_options(out, marker_name)
+            for slot_name in ("A", "B", "C", "D", "E"):
+                for marker_name in list(slot_markers.get(slot_name, []) or []):
+                    out = self._insert_explicit_marker_in_slot(
+                        text=out,
+                        marker_name=marker_name,
+                        slot=slot_name,
+                        path=Path("cache.png"),
+                        numero=numero,
+                    )
+            out = self._move_image_marker_before_options(out)
             return out
 
         if option_markers and len(set(x.upper() for x in option_markers)) < 3:
             # Likely bleed from previous/next problem; keep only enunciado.
             if enunciado:
                 stripped = f"{header} {enunciado}".strip()
-                return with_marker(
+                return with_markers(
                     self._inject_metadata_tags(stripped, curso=ex_curso, tema=ex_tema, subtema=ex_subtema)
                 )
-            return with_marker(
+            return with_markers(
                 self._inject_metadata_tags(header, curso=ex_curso, tema=ex_tema, subtema=ex_subtema)
             )
         if len(options) < 2:
-            return with_marker(txt)
-        numero = self.controller.parsear_numero_original(header) or fallback_numero
-        rebuilt = self._build_scan_item_strict(numero=numero, enunciado=enunciado, options=options)
-        return with_marker(
-            self._inject_metadata_tags(rebuilt, curso=ex_curso, tema=ex_tema, subtema=ex_subtema)
+            return with_markers(txt)
+        rebuilt = self._rebuild_item_with_slot_markers(
+            base_item=txt,
+            numero=numero,
+            enunciado=enunciado,
+            options=options,
+            slot_markers=slot_markers,
         )
+        return self._inject_metadata_tags(rebuilt, curso=ex_curso, tema=ex_tema, subtema=ex_subtema)
 
     def _is_orphan_options_item(self, item: str) -> bool:
         txt = (item or "").strip()
@@ -7554,7 +14860,7 @@ class TranscriptorWindow(tk.Toplevel):
         token = self._resolve_hf_token()
         if not token:
             return (None, 0.0, False)
-        base_url = self._resolve_hf_base_url()
+        base_url = self._resolve_hf_base_url(model)
         client = OpenAI(base_url=base_url, api_key=token, timeout=timeout_s)
         img_url = self._encode_image_data_url(path)
         prompt = (
@@ -7611,13 +14917,7 @@ class TranscriptorWindow(tk.Toplevel):
 
         out_dir = self._tmp_crop_root
         out_dir.mkdir(parents=True, exist_ok=True)
-        safe_name = re.sub(r"[^\w\-. ]", "_", marker_name or image_path.stem).strip()
-        if not safe_name:
-            safe_name = image_path.stem
-        out_path = out_dir / f"{safe_name}.png"
-        if out_path.exists():
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            out_path = out_dir / f"{safe_name}_{ts}.png"
+        out_path = self._canonical_marker_crop_path(marker_name=marker_name, fallback_stem=image_path.stem)
         try:
             im = Image.open(image_path)
             w, h = im.size
@@ -7632,7 +14932,17 @@ class TranscriptorWindow(tk.Toplevel):
                 right = max(left + 1, min(w, int(round(x2 * w))))
                 bottom = max(top + 1, min(h, int(round(y2 * h))))
                 cropped = im.crop((left, top, right, bottom))
-            cropped.save(out_path, format="PNG")
+            tmp_path = out_path.with_name(f"{out_path.stem}__tmp{out_path.suffix}")
+            cropped.save(tmp_path, format="PNG")
+            try:
+                tmp_path.replace(out_path)
+            except Exception:
+                try:
+                    if out_path.exists():
+                        out_path.unlink()
+                except Exception:
+                    pass
+                tmp_path.replace(out_path)
             return str(out_path)
         except Exception:
             return None
@@ -7688,20 +14998,9 @@ class TranscriptorWindow(tk.Toplevel):
         except Exception:
             src_res = src
             tmp_res = self._tmp_crop_root
-        if not str(src_res).lower().startswith(str(tmp_res).lower()):
+        if str(src_res).lower().startswith(str(tmp_res).lower()):
             return str(src)
-
-        final_dir = Path(self._final_crop_dir)
-        final_dir.mkdir(parents=True, exist_ok=True)
-        target = final_dir / src.name
-        if target.exists():
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            target = final_dir / f"{src.stem}_{ts}{src.suffix}"
-        try:
-            src.replace(target)
-            return str(target)
-        except Exception:
-            return str(src)
+        return str(src)
 
     def _sanitize_storage_base_name(self, source_name: str) -> str:
         raw = (source_name or "").strip()
@@ -7795,7 +15094,7 @@ class TranscriptorWindow(tk.Toplevel):
         token = self._resolve_hf_token()
         if not token:
             return False
-        base_url = self._resolve_hf_base_url()
+        base_url = self._resolve_hf_base_url(model)
         client = OpenAI(base_url=base_url, api_key=token, timeout=timeout_s)
         img_url = self._encode_image_data_url(path)
         prompt = (
@@ -7856,7 +15155,7 @@ class TranscriptorWindow(tk.Toplevel):
             return
 
         provider = self._resolve_effective_provider()
-        model = (self.model_var.get() or "").strip() or DEFAULT_HF_VISION_MODEL
+        model = (self.model_var.get() or "").strip() or self._default_vision_model_for_provider(provider)
         detect_model = self._resolve_detect_model(provider, model)
         try:
             timeout_s = int(self.timeout_var.get())
@@ -7921,7 +15220,17 @@ class TranscriptorWindow(tk.Toplevel):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _transcribir_openai(self, client: OpenAI, *, model: str, timeout_s: int, retries: int, label: str, path: Path) -> str:
+    def _transcribir_openai(
+        self,
+        client: OpenAI,
+        *,
+        model: str,
+        timeout_s: int,
+        retries: int,
+        label: str,
+        path: Path,
+        start_n: int = 0,
+    ) -> str:
         img_url = self._encode_image_data_url(path)
         text = ""
         last_exc: Exception | None = None
@@ -7943,7 +15252,7 @@ class TranscriptorWindow(tk.Toplevel):
                     resp = client.responses.create(**kwargs, timeout=timeout_s)
                 except TypeError:
                     resp = client.responses.create(**kwargs)
-                text = (resp.output_text or "").strip()
+                text = self._canonicalize_faithful_ocr_text((resp.output_text or "").strip(), start_n=start_n)
                 self._ocr_raw_first_by_label[str(label)] = str(text or "")
                 self._log_usage(
                     provider=PROVIDER_OPENAI,
@@ -7973,55 +15282,7 @@ class TranscriptorWindow(tk.Toplevel):
         return text
 
     def _extract_chat_text(self, content, *, include_reasoning: bool = True) -> str:
-        if content is None:
-            return ""
-        if isinstance(content, str):
-            return content.strip()
-        # Some SDKs return typed content blocks (pydantic/dataclass objects).
-        # Prefer reading known text-bearing attributes before fallback to repr().
-        attrs = ("text", "content", "output_text", "reasoning_content") if include_reasoning else ("text", "content", "output_text")
-        for attr in attrs:
-            try:
-                if hasattr(content, attr):
-                    txt = self._extract_chat_text(getattr(content, attr), include_reasoning=include_reasoning)
-                    if txt:
-                        return txt
-            except Exception:
-                pass
-        if hasattr(content, "model_dump"):
-            try:
-                dumped = content.model_dump()
-                txt = self._extract_chat_text(dumped, include_reasoning=include_reasoning)
-                if txt:
-                    return txt
-            except Exception:
-                pass
-        if isinstance(content, dict):
-            keys = ("text", "content", "output_text", "reasoning_content") if include_reasoning else ("text", "content", "output_text")
-            for key in keys:
-                val = content.get(key)
-                txt = self._extract_chat_text(val, include_reasoning=include_reasoning)
-                if txt:
-                    return txt
-            if include_reasoning:
-                return str(content).strip()
-            return ""
-        if isinstance(content, list):
-            parts: List[str] = []
-            for block in content:
-                if isinstance(block, dict):
-                    block_type = str(block.get("type", "") or "").strip().lower()
-                    if (not include_reasoning) and block_type in {"reasoning", "reasoning_content", "thinking"}:
-                        continue
-                    txt = self._extract_chat_text(block, include_reasoning=include_reasoning)
-                    if txt:
-                        parts.append(str(txt))
-                else:
-                    txt = self._extract_chat_text(block, include_reasoning=include_reasoning)
-                    if txt:
-                        parts.append(str(txt))
-            return "\n".join(parts).strip()
-        return str(content).strip()
+        return parse_chat_text(content, include_reasoning=include_reasoning)
 
     def _is_low_signal_model_text(self, text: str) -> bool:
         val = self.controller.normalizar_item_una_linea(str(text or ""))
@@ -8037,10 +15298,33 @@ class TranscriptorWindow(tk.Toplevel):
     def _build_deepseek_ocr_prompt(self) -> str:
         return self._get_vision_ocr_prompt()
 
-    def _get_vision_ocr_prompt(self) -> str:
-        curso = (self.curso_var.get() or "").strip() or "SIN_CURSO"
-        tema = (self.tema_var.get() or "").strip() or "SIN_TEMA"
-        return build_extract_prompt(curso=curso, tema=tema, start_n=1)
+    def _get_vision_ocr_prompt(self, *, compact: bool = False) -> str:
+        kwargs = {
+            "curso": (self.curso_var.get() or "").strip(),
+            "tema": (self.tema_var.get() or "").strip(),
+            "book_code": (self.book_code_var.get() or "").strip(),
+            "instance_type": (self.instance_type_var.get() or "").strip(),
+        }
+        if compact:
+            return build_faithful_ocr_prompt_compact(**kwargs)
+        return build_faithful_ocr_prompt(**kwargs)
+
+    def _get_vision_ocr_recovery_prompt(self) -> str:
+        return (
+            "OCR fiel de la imagen. Devuelve SOLO el texto visible, sin explicaciones.\n"
+            "No repitas frases ni instrucciones. Si una palabra no se ve, usa puntos suspensivos.\n"
+            "Formato obligatorio:\n"
+            "- Si aparece numero visible: <n.> texto completo.\n"
+            "- Si no aparece numero visible y parece continuacion: [CONT.] texto completo.\n"
+            "- Conserva alternativas A), B), C), D), E) si aparecen.\n"
+            "- En matematica usa $...$; grados como $50^\\circ$.\n"
+            "- En geometria usa $\\sphericalangle$, $m\\sphericalangle$, $\\overline{AB}$ y $\\overparen{AB}$ cuando corresponda.\n"
+            "- Nunca uses \\angle; si ves un angulo escribe $\\sphericalangle$ o $m\\sphericalangle$.\n"
+            "Salida final: solo la transcripcion."
+        )
+
+    def _canonicalize_faithful_ocr_text(self, text: str, *, start_n: int = 0) -> str:
+        return canonicalize_faithful_ocr_text(text, start_n=start_n)
 
     def _extract_direct_scan_items(self, text: str) -> List[str]:
         raw = self.controller.normalizar_item_una_linea(self._decode_scan_escapes(text or ""))
@@ -8171,6 +15455,42 @@ class TranscriptorWindow(tk.Toplevel):
                 best_ts = ts
         return best_key
 
+    def _structured_item_for_training(
+        self,
+        structured_items: Iterable[Dict[str, Any]],
+        *,
+        item_num: int,
+        position: int,
+    ) -> Dict[str, Any]:
+        entries = [dict(it) for it in list(structured_items or []) if isinstance(it, dict)]
+        if item_num > 0:
+            for entry in entries:
+                try:
+                    n_val = int(entry.get("n", 0) or 0)
+                except Exception:
+                    n_val = 0
+                if n_val == int(item_num):
+                    return entry
+        idx = max(0, int(position or 1) - 1)
+        if 0 <= idx < len(entries):
+            return entries[idx]
+        return {}
+
+    def _final_latex_candidate_from_structured_item(self, entry: Dict[str, Any]) -> str:
+        if not isinstance(entry, dict):
+            return ""
+        candidate = str(entry.get("final_latex_candidate", "") or "").strip()
+        if not candidate:
+            return ""
+        candidate = self._decode_scan_escapes(candidate)
+        candidate = re.sub(r"^```(?:latex|tex|text)?", "", candidate.strip(), flags=re.IGNORECASE).strip()
+        candidate = re.sub(r"```$", "", candidate).strip()
+        candidate = self._move_image_marker_before_options(self.controller.normalizar_item_una_linea(candidate))
+        candidate = self._apply_global_math_conventions(candidate)
+        candidate = self._apply_geometry_conventions(candidate)
+        candidate = self._normalize_math_delimiters(candidate)
+        return self.controller.normalizar_item_una_linea(candidate)
+
     def _upsert_training_pair(self, key: str, patch: Dict[str, Any]) -> None:
         if not key:
             return
@@ -8178,6 +15498,10 @@ class TranscriptorWindow(tk.Toplevel):
         merged = dict(current)
         for field in (
             "input_structured",
+            "ocr_raw_output",
+            "structured_model_output",
+            "structured_item_json",
+            "final_latex_candidate",
             "model_raw_output",
             "model_validated_output",
             "human_final_output",
@@ -8322,20 +15646,24 @@ class TranscriptorWindow(tk.Toplevel):
     ) -> Set[int]:
         if (not has_figure) or (not direct_items):
             return set()
-        scored: List[Tuple[int, int]] = []
-        for pos, raw_item in enumerate(direct_items, start=1):
-            score = self._item_image_hint_score(self._decode_scan_escapes(raw_item))
-            if score > 0:
-                scored.append((score, pos))
-        scored.sort(key=lambda t: (-t[0], t[1]))
-        if scored:
-            return {scored[0][1]}
         if len(direct_items) == 1:
             return {1}
         return set()
 
     def _build_deepseek_ocr_prompt_compact(self) -> str:
         return self._get_vision_ocr_prompt()
+
+    def _build_hf_ocr_prompt_candidates(self, model: str) -> List[str]:
+        name = (model or "").strip().lower()
+        if "zai-org/glm-4.5v" in name:
+            return [self._get_vision_ocr_prompt(compact=True), self._get_vision_ocr_prompt()]
+        if (model or "").strip() == TRAINED_OCR_VISION_MODEL:
+            return [
+                self._get_vision_ocr_prompt(),
+                self._get_vision_ocr_prompt(compact=True),
+                self._get_vision_ocr_recovery_prompt(),
+            ]
+        return [self._get_vision_ocr_prompt()]
 
     def _looks_like_instruction_echo(self, text: str) -> bool:
         raw = (text or "").strip()
@@ -8359,11 +15687,31 @@ class TranscriptorWindow(tk.Toplevel):
             "no agregues texto",
             "no agregue",
             "no agregues",
+            "transcribe todo el texto visible",
+            "devuelve solo texto plano fiel",
+            "si un problema tiene numero visible",
+            "si la imagen contiene varios problemas",
+            "escribe cada alternativa",
+            "salida final: solo la transcripcion fiel completa",
+            "salida final: solo la transcripcion completa",
         )
         hits = sum(1 for t in tokens if t in low)
         if hits >= 2:
             return True
         if low.count("\\item[") >= 10 and ("no incluy" in low):
+            return True
+        return False
+
+    def _has_structured_ocr_signal(self, text: str) -> bool:
+        raw = str(text or "").strip()
+        if not raw:
+            return False
+        if re.search(r"(?m)^\s*(?:<\d+>\.?\s*|\d+\.)", raw):
+            return True
+        option_labels = re.findall(r"(?im)(?:^|\s)([A-Ea-e])\)", raw)
+        if len({lab.upper() for lab in option_labels}) >= 3:
+            return True
+        if raw.count("\n\n") >= 1 and len(option_labels) >= 3:
             return True
         return False
 
@@ -8401,11 +15749,27 @@ class TranscriptorWindow(tk.Toplevel):
             r"(?i)patr[oó]n obligatorio[^£æ\n\r]*",
             r"(?i)respuesta:[^£æ\n\r]*",
             r"(?i)no incluy(?:as|es)[^£æ\n\r]*",
+            r"(?i)transcribe todo el texto visible[^£æ\n\r]*",
+            r"(?i)devuelve solo texto plano fiel[^£æ\n\r]*",
+            r"(?i)si un problema tiene numero visible[^£æ\n\r]*",
+            r"(?i)si la imagen contiene varios problemas[^£æ\n\r]*",
+            r"(?i)escribe cada alternativa[^£æ\n\r]*",
+            r"(?i)salida final:[^£æ\n\r]*",
         ]
         for pat in patterns:
             out = re.sub(pat, " ", out)
         out = re.sub(r"\s+", " ", out).strip()
         return out
+
+    def _accept_hf_ocr_candidate(self, text: str) -> Tuple[bool, str]:
+        candidate = str(text or "").strip()
+        if not candidate:
+            return (False, "vacio")
+        if self._looks_like_instruction_echo(candidate):
+            return (False, "eco_prompt")
+        if self._looks_like_repetitive_garbage(candidate) and not self._has_structured_ocr_signal(candidate):
+            return (False, "basura_repetitiva")
+        return (True, "ok")
 
     def _build_leading_options_prompt(self) -> str:
         return (
@@ -8460,9 +15824,11 @@ class TranscriptorWindow(tk.Toplevel):
         continuation = ""
         options: Dict[str, str] = {}
         payload = raw
+        looks_like_object_payload = False
         m = re.search(r"\{.*\}", raw, re.DOTALL)
         if m:
             payload = m.group(0)
+            looks_like_object_payload = True
 
         try:
             data = json.loads(payload)
@@ -8501,10 +15867,15 @@ class TranscriptorWindow(tk.Toplevel):
             prefix = normalized
 
         if not continuation:
-            enu, _opts = self._extract_options_loose(prefix)
-            continuation = (enu or "").strip()
+            if looks_like_object_payload and options:
+                continuation = ""
+            else:
+                enu, _opts = self._extract_options_loose(prefix)
+                continuation = (enu or "").strip()
 
         continuation = re.sub(r"\s+", " ", continuation).strip()
+        if options and re.search(r'(?i)"\s*(?:continuation|leading_continuation|a|b|c|d|e)\s*"\s*:', continuation):
+            continuation = ""
         if continuation.upper() in {"VACIO", "NULO", "NONE"}:
             continuation = ""
         return (continuation, options)
@@ -8574,7 +15945,7 @@ class TranscriptorWindow(tk.Toplevel):
         token = self._resolve_hf_token()
         if not token:
             return ("", {})
-        base_url = self._resolve_hf_base_url()
+        base_url = self._resolve_hf_base_url(model)
         client = OpenAI(base_url=base_url, api_key=token, timeout=timeout_s)
         img_url = self._encode_image_data_url(path)
         prompt = self._build_leading_options_prompt()
@@ -8612,7 +15983,7 @@ class TranscriptorWindow(tk.Toplevel):
 
     def _build_format_system_prompt(self) -> str:
         return (
-            "Eres un editor matematico determinista para items de examen.\n"
+            "Eres un formateador matematico conservador para items de examen.\n"
             "Piensa internamente, pero NO muestres razonamiento.\n"
             "Salida obligatoria: SOLO JSON valido exacto con forma {\"item\":\"...\"}.\n"
             "No agregues texto fuera del JSON. No markdown. No comentarios.\n"
@@ -8620,10 +15991,23 @@ class TranscriptorWindow(tk.Toplevel):
             "- Inventar contenido.\n"
             "- Resolver el problema.\n"
             "- Mezclar contenido entre items distintos.\n"
+            "- Agregar, quitar, sustituir o reordenar texto visible del enunciado u opciones, salvo las normalizaciones matematicas permitidas.\n"
+            "- Convertir oraciones completas a modo matematico.\n"
+            "- Latexizar palabras comunes que deben quedar como espanol normal.\n"
+            "- Encerrar el enunciado u opciones entre signos agregados como < >, << >>, comillas nuevas o corchetes nuevos.\n"
             "PRIORIDADES (en orden):\n"
-            "1) Preservar semantica del item original.\n"
-            "2) Estructura scan exacta.\n"
-            "3) Matematica valida y cerrada.\n"
+            "1) Fidelidad literal al texto visible de la ENTRADA RAW.\n"
+            "2) Preservar semantica del item original.\n"
+            "3) Estructura scan exacta.\n"
+            "4) Separar correctamente texto normal y expresiones matematicas.\n"
+            "5) Matematica valida y cerrada.\n"
+            "REGLA CLAVE:\n"
+            "- Envuelve en $...$ solo spans matematicos o simbolicos visibles.\n"
+            "- Deja fuera de $...$ verbos, conectores e instrucciones en espanol.\n"
+            "- Si una expresion matematica es continua, debe quedar en un solo bloque $...$.\n"
+            "- Dentro del enunciado y opciones, conserva las mismas palabras, el mismo orden y la misma puntuacion visible; solo puedes agregar $...$ y aplicar las normalizaciones matematicas permitidas.\n"
+            "- Si la ENTRADA RAW no contiene < o >, la salida tampoco debe contener < o > dentro del enunciado ni de las opciones.\n"
+            "- Si una expresion matematica esta rodeada por comillas o puntuacion narrativa visibles, conserva esas comillas o signos fuera de $...$; no los borres.\n"
             "Si hay conflicto, preserva semantica y no resuelvas el problema.\n"
         )
 
@@ -8692,6 +16076,16 @@ class TranscriptorWindow(tk.Toplevel):
                     lines.append(f"- alertas: {', '.join(alertas)}")
                 reasoning_block = "\n".join(lines) + "\n"
 
+        scan_pattern = (
+            f"\\item[\\textbf{{n.}}] [[curso=...]] [[tema=...]] [[subtema=...]] (opcional) "
+            f"ENUNCIADO_NORMALIZADO [[Imagen=img-n]] {SEP_LINE}A) $...${SEP_OPT}B) $...${SEP_OPT}C) $...$"
+            f"{SEP_LINE}D) $...${SEP_OPT}{SEP_OPT}E) $...${SEP_LINE}"
+        )
+        scan_separator_pattern = (
+            f"{SEP_LINE}A) ...{SEP_OPT}B) ...{SEP_OPT}C) ..."
+            f"{SEP_LINE}D) ...{SEP_OPT}{SEP_OPT}E) ...{SEP_LINE}"
+        )
+
         return (
             "Convierte UN item al formato scan LaTeX.\n"
             "Devuelve SOLO JSON: {\"item\":\"\\\\item[\\\\textbf{n.}] ...\"}\n"
@@ -8699,51 +16093,94 @@ class TranscriptorWindow(tk.Toplevel):
             "Si la entrada viene como ITEM n:/ENUNCIADO:/OPCIONES: (FIGURA opcional), usa esos campos.\n"
             "Si la entrada ya viene como \\item..., normalizala sin cambiar la semantica.\n"
             "Si no hay contexto de razonamiento, continua con solo la entrada.\n"
+            "Tu tarea principal es detectar que parte es texto normal y que parte es matematica.\n"
+            "REGLA DE FIDELIDAD LITERAL:\n"
+            "- Conserva exactamente el texto visible del ENUNCIADO y de las OPCIONES en el mismo orden.\n"
+            "- NO agregues ni elimines palabras, signos, comillas, parentesis, corchetes ni signos angulares.\n"
+            "- NO encapsules el enunciado con <...>, [...], (...), comillas nuevas ni adornos.\n"
+            "- SOLO se permite modificar el contenido de estas formas:\n"
+            "  a) agregar delimitadores $...$ a expresiones matematicas ya visibles,\n"
+            "  b) aplicar las normalizaciones matematicas listadas mas abajo dentro de $...$,\n"
+            "  c) reparar un cierre matematico roto solo si el propio OCR ya deja claro que falta ese cierre.\n"
+            "- Si una palabra o signo no aparece en la ENTRADA RAW, no debe aparecer en el enunciado ni en las opciones de salida.\n"
+            "- Si la ENTRADA RAW trae comillas visibles, dos puntos, comas, puntos o parentesis narrativos, conservalos en la salida; no los absorbas ni los elimines al envolver matematica.\n"
             "\n"
             "FASE 1 - ESTRUCTURA SCAN (obligatoria):\n"
             "A) Construye exactamente:\n"
-            "\\item[\\textbf{n.}] [[curso=...]] [[tema=...]] [[subtema=...]] (opcional) <ENUNCIADO_NORMALIZADO> [[Imagen=img-n]] £A) $...$æB) $...$æC) $...$£D) $...$ææE) $...$£\n"
+            f"{scan_pattern}\n"
             "B) [[subtema=...]] es opcional: incluir solo si hay valor; si no, omitir.\n"
-            "C) Si FIGURA: SI (cuando exista), incluir [[Imagen=img-n]] al final del enunciado y antes de £A).\n"
+            f"C) Si FIGURA: SI (cuando exista), incluir [[Imagen=img-n]] al final del enunciado y antes de {SEP_LINE}A).\n"
             "D) Opciones A-E en un unico bloque $...$ cada una.\n"
             "E) Si una opcion esta ausente/desconocida, usar exactamente $...$.\n"
-            "F) Separadores exactos: £A) ...æB) ...æC) ...£D) ...ææE) ...£\n"
+            f"F) Separadores exactos: {scan_separator_pattern}\n"
             "\n"
-            "FASE 2 - NORMALIZACION MATEMATICA (obligatoria):\n"
-            "1) NO redetectes expresiones matematicas desde cero.\n"
-            "2) Usa el CONTEXTO DE RAZONAMIENTO (expresiones_sin_dolares y elementos_geometricos) como fuente principal.\n"
-            "3) Cada expresion indicada por ese contexto debe quedar en un solo bloque $...$ (sin partir ni anidar).\n"
-            "4) Repara expresiones rotas con correccion moderada, preservando semantica:\n"
+            "FASE 2 - DETECCION DE MATEMATICA Y MODO $...$ (obligatoria):\n"
+            "1) Trabaja primero sobre la ENTRADA RAW. El CONTEXTO DE RAZONAMIENTO es solo una pista secundaria.\n"
+            "2) Detecta como matematico cualquier tramo visible que contenga una o mas de estas senales:\n"
+            "   - variables o letras con valor simbolico: x, y, z, n, m, a, b, AB, BC, P(x), R(x)\n"
+            "   - operadores o relaciones: =, <, >, \\le, \\ge, +, -, \\times, /, :\n"
+            "   - fracciones, potencias, raices, subindices, parentesis algebraicos o polinomios\n"
+            "   - notacion geometrica simbolica: \\angle ABC, m\\angle B, \\triangle ABC, AB, BC\n"
+            "   - funciones o razones: f(x), sen x, cos x, tg x, log, ln\n"
+            "   - coordenadas, conjuntos, intervalos o expresiones con numeros y simbolos mezclados\n"
+            "3) Si un simbolo aislado es claramente la cantidad pedida o una variable del problema, envuelvelo en $...$.\n"
+            "4) NO envuelvas en $...$ palabras comunes como: calcule, halle, determine, si, dado, encuentre, en, del, de la, suma, valor, residuo.\n"
+            "5) NO conviertas una oracion completa a modo matematico solo porque contiene una variable.\n"
+            "6) Cada expresion matematica continua debe quedar en un solo bloque $...$ (sin partir ni anidar).\n"
+            "7) Repara expresiones rotas con correccion moderada, preservando semantica:\n"
             "   - $PB = AQ$ = AB -> $PB = AQ = AB$\n"
             "   - m\\angle B = $60^\\circ$ -> $m\\angle B = 60^\\circ$\n"
             "   - Calcule$m\\angle BCA -> Calcule $m\\angle BCA$\n"
-            "5) No dejes '$' desbalanceados.\n"
-            "6) Dentro de $...$ normaliza:\n"
+            "   - R(x) = px + q -> $R(x) = px + q$\n"
+            "   - 2x + 3 = 7 -> $2x + 3 = 7$\n"
+            "8) No dejes '$' desbalanceados.\n"
+            "9) Dentro de $...$ normaliza:\n"
             "   - \\frac y \\tfrac -> \\dfrac\n"
             "   - ° -> ^\\circ\n"
             "   - ∠ -> \\angle\n"
             "   - tg/sen/ctg -> \\tan/\\sin/\\cot cuando corresponda\n"
-            "7) Geometria:\n"
+            "10) Geometria:\n"
             "   - puntos, triangulos y medidas en $...$ cuando aparezcan como simbolos.\n"
             "   - usar \\overline{AB} solo para segmento geometrico; para medida usar $AB$.\n"
+            "11) En el enunciado, deja la puntuacion narrativa fuera del bloque matematico salvo que forme parte real de la expresion.\n"
+            "12) En las opciones A-E, cada opcion debe quedar completa dentro de un solo bloque $...$.\n"
+            "13) NO introduzcas signos angulares, corchetes o comillas nuevas alrededor del enunciado. Ejemplo incorrecto: <Si ...>.\n"
+            "14) Si la narrativa trae comillas visibles alrededor de una variable o expresion, deja las comillas fuera del bloque matematico. Ejemplo: “AB” -> “$AB$”.\n"
             "\n"
-            "USA CONTEXTO DE RAZONAMIENTO (si existe):\n"
-            "- cada elemento de expresiones_sin_dolares debe quedar envuelto en un solo $...$.\n"
-            "- los elementos geometricos detectados deben quedar bien envueltos cuando apliquen.\n"
+            "USA CONTEXTO DE RAZONAMIENTO (si existe) SOLO COMO APOYO:\n"
+            "- cada elemento de expresiones_sin_dolares es una pista de expresion matematica probable.\n"
+            "- los elementos geometricos detectados ayudan a envolver bien la notacion simbolica.\n"
+            "- si el contexto contradice el texto visible, manda la ENTRADA RAW.\n"
             "\n"
             "MICRO-EJEMPLOS:\n"
+            "Ej0 IN: Si el resto de la division (Ax + B), calcule AB.\n"
+            "Ej0 OUT: Si el resto de la division $(Ax + B)$, calcule $AB$.\n"
+            "Ej0 MAL: <Si el resto de la division $(Ax + B)$, calcule $AB$>.\n"
+            "Ej0b IN: calcule “AB”.\n"
+            "Ej0b OUT: calcule “$AB$”.\n"
+            "Ej0b MAL: calcule $AB$.\n"
             "Ej1 IN: En un triangulo ABC, m\\angle B = $60^\\circ$. Calcule$m\\angle C$.\n"
             "Ej1 OUT: En un triangulo $ABC$, $m\\angle B = 60^\\circ$. Calcule $m\\angle C$.\n"
             "Ej2 IN: Si $PB = AQ$ = AB, halle x.\n"
             "Ej2 OUT: Si $PB = AQ = AB$, halle $x$.\n"
             "Ej3 IN: A) 60° - \\frac{\\theta}{10}\n"
             "Ej3 OUT: A) $60^\\circ - \\dfrac{\\theta}{10}$\n"
+            "Ej4 IN: Si P(x)=x^2+1, halle P(2).\n"
+            "Ej4 OUT: Si $P(x)=x^2+1$, halle $P(2)$.\n"
+            "Ej5 IN: Calcular el valor de x + y.\n"
+            "Ej5 OUT: Calcular el valor de $x + y$.\n"
+            "Ej6 IN: La suma de los angulos A, B y C es 180°.\n"
+            "Ej6 OUT: La suma de los angulos $A$, $B$ y $C$ es $180^\\circ$.\n"
             "\n"
             "VALIDACION FINAL:\n"
             "- item en una sola linea.\n"
             "- '$' balanceados.\n"
             "- patron scan exacto de opciones.\n"
             "- ninguna opcion fuera de $...$.\n"
+            "- no envolver texto comun completo dentro de $...$.\n"
+            "- no agregar signos nuevos como < > alrededor del enunciado u opciones.\n"
+            "- el texto base del enunciado y opciones debe conservar las mismas palabras y signos visibles, salvo $...$ y normalizaciones matematicas permitidas.\n"
+            "- si la ENTRADA RAW trae comillas visibles alrededor de una expresion, esas comillas deben seguir presentes en la salida.\n"
             f"{reasoning_block}"
             f"Entrada RAW:\n{raw_item}\n"
         )
@@ -8905,128 +16342,16 @@ class TranscriptorWindow(tk.Toplevel):
         return out
 
     def _extract_reasoning_payload(self, text: str) -> Dict[str, Any]:
-        data = self._extract_json_object(text or "")
-        if not data:
-            data = self._extract_reasoning_payload_loose(text or "")
-        if not data:
-            return {
-                "razonamiento_es": "",
-                "elementos_geometricos": [],
-                "expresiones_sin_dolares": [],
-                "alertas": ["salida_no_json_valida"],
-            }
-        payload = {
-            "razonamiento_es": self.controller.normalizar_item_una_linea(str(data.get("razonamiento_es", "") or "")),
-            "elementos_geometricos": self._extract_json_list_field(data, "elementos_geometricos"),
-            "expresiones_sin_dolares": self._extract_json_list_field(data, "expresiones_sin_dolares"),
-            "alertas": self._extract_json_list_field(data, "alertas"),
-        }
-        if not payload["alertas"] and (
-            (not payload["razonamiento_es"])
-            and (not payload["elementos_geometricos"])
-            and (not payload["expresiones_sin_dolares"])
-        ):
-            payload["alertas"] = ["salida_json_sin_campos"]
-        return payload
-
-    def _extract_reasoning_payload_loose(self, text: str) -> Dict[str, Any]:
-        raw = str(text or "").strip()
-        if not raw:
-            return {}
-        raw = re.sub(r"<think>.*?</think>", " ", raw, flags=re.IGNORECASE | re.DOTALL)
-        raw = re.sub(r"```(?:json)?", " ", raw, flags=re.IGNORECASE)
-        raw = raw.replace("```", " ")
-        raw = re.sub(r"\s+", " ", raw).strip()
-        if not raw:
-            return {}
-
-        def _json_unescape(value: str) -> str:
-            v = str(value or "").strip()
-            if not v:
-                return ""
-            try:
-                return str(json.loads(f"\"{v}\""))
-            except Exception:
-                return v
-
-        key_names = (
-            "razonamiento_es",
-            "elementos_geometricos",
-            "expresiones_sin_dolares",
-            "alertas",
+        return parse_reasoning_payload(
+            text,
+            normalize_text=self.controller.normalizar_item_una_linea,
         )
 
-        def _segment_for_key(key: str) -> str:
-            m = re.search(rf"(?is)(?:\"{re.escape(key)}\"|{re.escape(key)})\s*:\s*", raw)
-            if not m:
-                return ""
-            start = m.end()
-            tail = raw[start:]
-            next_hits: List[int] = []
-            for other in key_names:
-                if other == key:
-                    continue
-                m2 = re.search(rf"(?is)(?:\"{re.escape(other)}\"|{re.escape(other)})\s*:\s*", tail)
-                if m2:
-                    next_hits.append(m2.start())
-            if next_hits:
-                tail = tail[: min(next_hits)]
-            return tail.strip(" ,")
-
-        def _extract_string_field(key: str) -> str:
-            seg = _segment_for_key(key)
-            if not seg:
-                return ""
-            m = re.search(r'^"((?:\\.|[^"\\])*)"', seg)
-            if m:
-                return self.controller.normalizar_item_una_linea(_json_unescape(m.group(1)))
-            m = re.search(r"^'([^']*)'", seg)
-            if m:
-                return self.controller.normalizar_item_una_linea(str(m.group(1) or ""))
-            # Fallback: until first comma/closing brace.
-            plain = re.split(r"[,\}]", seg, maxsplit=1)[0]
-            plain = plain.strip(" \"'")
-            return self.controller.normalizar_item_una_linea(plain)
-
-        def _extract_list_field(key: str) -> List[str]:
-            seg = _segment_for_key(key)
-            if not seg:
-                return []
-            items: List[str] = []
-            for quoted in re.findall(r'"((?:\\.|[^"\\])*)"', seg):
-                txt = self.controller.normalizar_item_una_linea(_json_unescape(quoted))
-                if txt:
-                    items.append(txt)
-            if not items:
-                for quoted in re.findall(r"'([^']*)'", seg):
-                    txt = self.controller.normalizar_item_una_linea(str(quoted or ""))
-                    if txt:
-                        items.append(txt)
-            if not items:
-                buf = seg
-                if "[" in buf:
-                    buf = buf.split("[", 1)[1]
-                if "]" in buf:
-                    buf = buf.split("]", 1)[0]
-                for part in buf.split(","):
-                    txt = self.controller.normalizar_item_una_linea(part.strip(" \"'"))
-                    if txt:
-                        items.append(txt)
-            return items
-
-        razonamiento = _extract_string_field("razonamiento_es")
-        elementos = _extract_list_field("elementos_geometricos")
-        expresiones = _extract_list_field("expresiones_sin_dolares")
-        alertas = _extract_list_field("alertas")
-
-        if not razonamiento and not elementos and not expresiones and not alertas:
-            return {}
-        return {
-            "razonamiento_es": razonamiento,
-            "elementos_geometricos": elementos,
-            "expresiones_sin_dolares": expresiones,
-            "alertas": alertas,
-        }
+    def _extract_reasoning_payload_loose(self, text: str) -> Dict[str, Any]:
+        return parse_reasoning_payload_loose(
+            text,
+            normalize_text=self.controller.normalizar_item_una_linea,
+        )
 
     def _is_reasoning_payload_json_invalid(self, payload: Dict[str, Any]) -> bool:
         alertas = [self._norm_key(str(v or "")) for v in self._extract_json_list_field(payload, "alertas")]
@@ -9118,81 +16443,12 @@ class TranscriptorWindow(tk.Toplevel):
         return self._sanitize_reasoning_payload(payload)
 
     def _sanitize_reasoning_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        src = payload if isinstance(payload, dict) else {}
-        src_meta = src.get("__meta", {}) if isinstance(src, dict) else {}
-        if not isinstance(src_meta, dict):
-            src_meta = {}
-        prev_retry_count = int(src_meta.get("retry_json_count", 0) or 0)
-        prev_json_invalid_count = int(src_meta.get("json_invalid_count", 0) or 0)
-        prev_filtered_figure_count = int(src_meta.get("filtered_figure_alert_count", 0) or 0)
-        prev_local_fallback_count = int(src_meta.get("local_fallback_count", 0) or 0)
-        prev_raw_model_text = self._clip_debug_text(str(src_meta.get("raw_model_text", "") or ""))
-        prev_raw_retry_text = self._clip_debug_text(str(src_meta.get("raw_retry_text", "") or ""))
-        razonamiento = self.controller.normalizar_item_una_linea(str(src.get("razonamiento_es", "") or ""))
-        if len(razonamiento) > 180:
-            razonamiento = razonamiento[:180].rstrip()
-
-        def _dedup_limited(values: List[str], limit: int) -> List[str]:
-            out: List[str] = []
-            seen: Set[str] = set()
-            for val in values:
-                txt = self.controller.normalizar_item_una_linea(str(val or ""))
-                if not txt:
-                    continue
-                key = self._norm_key(txt)
-                if key in seen:
-                    continue
-                seen.add(key)
-                out.append(txt)
-                if len(out) >= limit:
-                    break
-            return out
-
-        elementos = _dedup_limited(self._extract_json_list_field(src, "elementos_geometricos"), 5)
-        expresiones = _dedup_limited(self._extract_json_list_field(src, "expresiones_sin_dolares"), 5)
-        raw_alertas = self._extract_json_list_field(src, "alertas")
-        figure_terms = (
-            "figura",
-            "grafico",
-            "gráfico",
-            "falta figura",
-            "no se proporciona figura",
-            "grafico no visible",
-            "gráfico no visible",
-            "corte de enunciado",
-            "corte visual",
+        return parse_sanitize_reasoning_payload(
+            payload,
+            normalize_text=self.controller.normalizar_item_una_linea,
+            norm_key=self._norm_key,
+            clip_debug_text=self._clip_debug_text,
         )
-        filtered_figure_alert_count = 0
-        alertas_tmp: List[str] = []
-        for alert in raw_alertas:
-            norm = self._norm_key(alert)
-            if any(term in norm for term in figure_terms):
-                filtered_figure_alert_count += 1
-                continue
-            alertas_tmp.append(alert)
-        alertas = _dedup_limited(alertas_tmp, 2)
-
-        if not alertas and (not razonamiento) and (not elementos) and (not expresiones):
-            alertas = ["salida_json_sin_campos"]
-
-        out = {
-            "razonamiento_es": razonamiento,
-            "elementos_geometricos": elementos,
-            "expresiones_sin_dolares": expresiones,
-            "alertas": alertas,
-            "__meta": {
-                "json_invalid_count": max(
-                    int(prev_json_invalid_count),
-                    1 if self._is_reasoning_payload_json_invalid(src) else 0,
-                ),
-                "filtered_figure_alert_count": int(prev_filtered_figure_count + filtered_figure_alert_count),
-                "retry_json_count": int(prev_retry_count),
-                "local_fallback_count": int(prev_local_fallback_count),
-                "raw_model_text": prev_raw_model_text,
-                "raw_retry_text": prev_raw_retry_text,
-            },
-        }
-        return out
 
     def _clip_debug_text(self, text: str, limit: int = 4000) -> str:
         raw = str(text or "")
@@ -9265,71 +16521,11 @@ class TranscriptorWindow(tk.Toplevel):
         return ""
 
     def _extract_formatted_item(self, text: str) -> str:
-        raw = (text or "").strip()
-        if not raw:
-            return ""
-        # Drop explicit reasoning blocks from reasoning models (e.g. Qwen <think> ... </think>).
-        raw = re.sub(r"<think>.*?</think>", " ", raw, flags=re.IGNORECASE | re.DOTALL).strip()
-        if not raw:
-            return ""
-
-        def _item_from_payload(payload: str) -> str:
-            try:
-                data = json.loads(payload)
-            except Exception:
-                return ""
-            if not isinstance(data, dict):
-                return ""
-            item = str(data.get("item", "") or "").strip()
-            if not item:
-                return ""
-            return self._extract_first_item(item) or self.controller.normalizar_item_una_linea(item)
-
-        # Prefer fenced JSON blocks if present.
-        fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.IGNORECASE | re.DOTALL)
-        if fenced:
-            parsed = _item_from_payload((fenced.group(1) or "").strip())
-            if parsed:
-                return parsed
-
-        # Parse all top-level JSON object candidates and keep the last valid one.
-        candidates: List[str] = []
-        depth = 0
-        start = -1
-        in_str = False
-        esc = False
-        for i, ch in enumerate(raw):
-            if in_str:
-                if esc:
-                    esc = False
-                elif ch == "\\":
-                    esc = True
-                elif ch == '"':
-                    in_str = False
-                continue
-            if ch == '"':
-                in_str = True
-                continue
-            if ch == "{":
-                if depth == 0:
-                    start = i
-                depth += 1
-            elif ch == "}":
-                if depth > 0:
-                    depth -= 1
-                    if depth == 0 and start >= 0:
-                        candidates.append(raw[start : i + 1])
-                        start = -1
-        for payload in reversed(candidates):
-            parsed = _item_from_payload(payload)
-            if parsed:
-                return parsed
-
-        # Final fallback only if the content itself is already a clean \item line.
-        compact = self.controller.normalizar_item_una_linea(raw)
-        if compact.startswith("\\item") and ("i need to" not in compact.lower()):
-            return self._extract_first_item(compact)
-        return ""
+        return parse_formatted_item(
+            text,
+            normalize_text=self.controller.normalizar_item_una_linea,
+            extract_first_item=self._extract_first_item,
+        )
 
     def _format_item_openai(
         self,
@@ -9472,9 +16668,9 @@ class TranscriptorWindow(tk.Toplevel):
         token = self._resolve_hf_token()
         if not token:
             return ""
-        base_url = self._resolve_hf_base_url()
-        client = OpenAI(base_url=base_url, api_key=token, timeout=timeout_s)
         format_model = self._resolve_hf_format_model(model)
+        base_url = self._resolve_hf_base_url(format_model)
+        client = OpenAI(base_url=base_url, api_key=token, timeout=timeout_s)
         working_raw = raw_item
         local_reasoning_payload: Dict[str, Any] = dict(reasoning_payload or {})
         if run_geometry_pass:
@@ -9675,7 +16871,7 @@ class TranscriptorWindow(tk.Toplevel):
                 except Exception as exc:
                     last_exc = exc
                     msg = str(exc).lower()
-                    is_retryable = ("timeout" in msg) or ("timed out" in msg) or ("rate" in msg) or ("429" in msg)
+                    is_retryable = self._is_retryable_hf_ocr_error(exc)
                     if attempt < retries and is_retryable:
                         time.sleep(min(8, 2 ** attempt))
                         continue
@@ -9753,9 +16949,9 @@ class TranscriptorWindow(tk.Toplevel):
                 "expresiones_sin_dolares": [],
                 "alertas": ["hf_token_ausente"],
             }
-        base_url = self._resolve_hf_base_url()
-        client = OpenAI(base_url=base_url, api_key=token, timeout=timeout_s)
         format_model = self._resolve_hf_format_model(model)
+        base_url = self._resolve_hf_base_url(format_model)
+        client = OpenAI(base_url=base_url, api_key=token, timeout=timeout_s)
         geo_system_prompt = self._build_geometry_pass_system_prompt()
         geo_prompt = self._build_geometry_pass_prompt(
             raw_item=raw_item,
@@ -9868,7 +17064,7 @@ class TranscriptorWindow(tk.Toplevel):
                 except Exception as exc:
                     last_exc = exc
                     msg = str(exc).lower()
-                    is_retryable = ("timeout" in msg) or ("timed out" in msg) or ("rate" in msg) or ("429" in msg)
+                    is_retryable = self._is_retryable_hf_ocr_error(exc)
                     if attempt < retries and is_retryable:
                         time.sleep(min(8, 2 ** attempt))
                         continue
@@ -9997,7 +17193,7 @@ class TranscriptorWindow(tk.Toplevel):
         token = self._resolve_hf_token()
         if not token:
             return ("", "", "")
-        base_url = self._resolve_hf_base_url()
+        base_url = self._resolve_hf_base_url(model)
         client = OpenAI(base_url=base_url, api_key=token, timeout=timeout_s)
         prompt = self._build_metadata_prompt(item_text=item_text, catalog=catalog)
 
@@ -10111,6 +17307,7 @@ class TranscriptorWindow(tk.Toplevel):
         timeout_s: int,
         label: str,
         path: Path,
+        start_n: int = 0,
     ) -> str:
         token = self._resolve_hf_token()
         if not token:
@@ -10128,7 +17325,10 @@ class TranscriptorWindow(tk.Toplevel):
         client = InferenceClient(model=endpoint_url, token=token, timeout=timeout_s)
         try:
             out = client.image_to_text(image=path)
-            text = self._extract_hf_image_to_text_output(out)
+            text = self._canonicalize_faithful_ocr_text(
+                self._extract_hf_image_to_text_output(out),
+                start_n=start_n,
+            )
             if not text:
                 raise Exception("DeepSeek-OCR devolvio texto vacio.")
             self._ocr_raw_first_by_label[str(label)] = str(text or "")
@@ -10151,15 +17351,16 @@ class TranscriptorWindow(tk.Toplevel):
         retries: int,
         label: str,
         path: Path,
+        start_n: int = 0,
     ) -> str:
         if self._use_hf_native_ocr_endpoint(model):
-            return self._transcribir_hf_native_endpoint(timeout_s=timeout_s, label=label, path=path)
+            return self._transcribir_hf_native_endpoint(timeout_s=timeout_s, label=label, path=path, start_n=start_n)
 
         token = self._resolve_hf_token()
         if not token:
             raise Exception("Falta HF token. Define HF_TOKEN en .env.local/.env o en el campo HF token.")
 
-        base_url = self._resolve_hf_base_url()
+        base_url = self._resolve_hf_base_url(model)
         client = OpenAI(base_url=base_url, api_key=token, timeout=timeout_s)
         img_url = self._encode_image_data_url(path)
 
@@ -10168,51 +17369,33 @@ class TranscriptorWindow(tk.Toplevel):
             prompt_candidates.append(self._build_deepseek_ocr_prompt())
             prompt_candidates.append(self._build_deepseek_ocr_prompt_compact())
         else:
-            prompt_candidates.append(self._get_vision_ocr_prompt())
-            prompt_candidates.append(
-                self._get_vision_ocr_prompt()
-                + "\nTu salida debe ser SOLO JSON valido con clave 'items'."
-            )
+            prompt_candidates.extend(self._build_hf_ocr_prompt_candidates(model))
 
         text = ""
         last_exc: Exception | None = None
         for pidx, prompt_text in enumerate(prompt_candidates, start=1):
             for attempt in range(retries + 1):
                 try:
-                    resp = client.chat.completions.create(
+                    pass_max_tokens = 3200
+                    if (model or "").strip() == TRAINED_OCR_VISION_MODEL and pidx >= 2:
+                        pass_max_tokens = 900
+                    text = self._transcribir_huggingface_single_pass(
                         model=model,
-                        messages=[
-                            {
-                                "role": "user",
-                                "content": [
-                                    {"type": "text", "text": prompt_text},
-                                    {"type": "image_url", "image_url": {"url": img_url}},
-                                ],
-                            }
-                        ],
-                        temperature=0,
-                        max_tokens=3200,
+                        timeout_s=timeout_s,
+                        label=label,
+                        path=path,
+                        start_n=start_n,
+                        prompt_text=prompt_text,
+                        prompt_tag=f"ocr-pass-{pidx}",
+                        max_tokens=pass_max_tokens,
+                        update_label_cache=True,
                     )
-                    content = resp.choices[0].message.content if resp and resp.choices else ""
-                    candidate_raw = self._extract_chat_text(content)
-                    if candidate_raw.strip():
-                        self._ocr_raw_first_by_label[str(label)] = str(candidate_raw or "")
-                    candidate = self._strip_instruction_echo(candidate_raw)
-                    self._log_usage(
-                        provider=PROVIDER_HF,
-                        model=model,
-                        label=f"{label} [ocr-pass-{pidx}]",
-                        usage=getattr(resp, "usage", None),
-                    )
-                    if candidate and not self._looks_like_instruction_echo(candidate) and not self._looks_like_repetitive_garbage(candidate):
-                        text = candidate
-                        last_exc = None
-                        break
-                    last_exc = Exception("Salida invalida: eco de instrucciones del prompt.")
+                    last_exc = None
+                    break
                 except Exception as exc:
                     last_exc = exc
                     msg = str(exc).lower()
-                    is_retryable = ("timeout" in msg) or ("timed out" in msg) or ("rate" in msg) or ("429" in msg)
+                    is_retryable = self._is_retryable_hf_ocr_error(exc)
                     if attempt < retries and is_retryable:
                         wait_s = min(30, 2 ** attempt)
                         self.after(
@@ -10262,24 +17445,25 @@ class TranscriptorWindow(tk.Toplevel):
                     )
                     content = resp.choices[0].message.content if resp and resp.choices else ""
                     candidate_raw = self._extract_chat_text(content)
-                    if candidate_raw.strip():
-                        self._ocr_raw_first_by_label[str(label)] = str(candidate_raw or "")
-                    candidate = candidate_raw.strip()
+                    candidate = self._canonicalize_faithful_ocr_text(candidate_raw.strip())
+                    if candidate:
+                        self._ocr_raw_first_by_label[str(label)] = str(candidate or "")
                     self._log_usage(
                         provider=PROVIDER_HF,
                         model=fb_model,
                         label=f"{label} [ocr-fallback-pass]",
                         usage=getattr(resp, "usage", None),
                     )
-                    if candidate and not self._looks_like_instruction_echo(candidate) and not self._looks_like_repetitive_garbage(candidate):
+                    accepted, accept_reason = self._accept_hf_ocr_candidate(candidate)
+                    if accepted:
                         text = candidate
                         fb_exc = None
                         break
-                    fb_exc = Exception("Salida invalida en fallback remoto.")
+                    fb_exc = Exception(f"Salida invalida en fallback remoto: {accept_reason}.")
                 except Exception as exc:
                     fb_exc = exc
                     msg = str(exc).lower()
-                    is_retryable = ("timeout" in msg) or ("timed out" in msg) or ("rate" in msg) or ("429" in msg)
+                    is_retryable = self._is_retryable_hf_ocr_error(exc)
                     if attempt < retries and is_retryable:
                         time.sleep(min(30, 2 ** attempt))
                         continue
@@ -10309,7 +17493,135 @@ class TranscriptorWindow(tk.Toplevel):
             raise Exception(last_exc or "Sin texto de HuggingFace")
         return text
 
-    def _transcribir_local_ocr(self, path: Path, *, label: Optional[str] = None) -> str:
+    def _transcribir_huggingface_single_pass(
+        self,
+        *,
+        model: str,
+        timeout_s: int,
+        label: str,
+        path: Path,
+        start_n: int = 0,
+        prompt_text: str,
+        prompt_tag: str,
+        max_tokens: int,
+        update_label_cache: bool = True,
+    ) -> str:
+        if self._use_hf_native_ocr_endpoint(model):
+            return self._transcribir_hf_native_endpoint(timeout_s=timeout_s, label=label, path=path, start_n=start_n)
+
+        token = self._resolve_hf_token()
+        if not token:
+            raise Exception("Falta HF token. Define HF_TOKEN en .env.local/.env o en el campo HF token.")
+
+        base_url = self._resolve_hf_base_url(model)
+        client = OpenAI(base_url=base_url, api_key=token, timeout=timeout_s)
+        img_url = self._encode_image_data_url(
+            path,
+            max_side_px=self._resolve_hf_ocr_image_max_side(model=model),
+        )
+        safe_max_tokens = self._resolve_hf_ocr_max_tokens(model=model, requested=max_tokens)
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt_text},
+                    {"type": "image_url", "image_url": {"url": img_url}},
+                ],
+            }
+        ]
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0,
+                max_tokens=int(safe_max_tokens),
+            )
+        except Exception as exc:
+            reduced_max_tokens = self._reduced_hf_max_tokens_from_error(
+                exc,
+                requested=int(safe_max_tokens),
+            )
+            if reduced_max_tokens is None or reduced_max_tokens >= int(safe_max_tokens):
+                raise
+            self.after(
+                0,
+                lambda l=label, old=int(safe_max_tokens), new=int(reduced_max_tokens): self._log(
+                    f"{l}: ajuste automatico max_tokens HF {old} -> {new} por limite de contexto."
+                ),
+            )
+            resp = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0,
+                max_tokens=int(reduced_max_tokens),
+            )
+        content = resp.choices[0].message.content if resp and resp.choices else ""
+        candidate_raw = self._extract_chat_text(content)
+        candidate = self._canonicalize_faithful_ocr_text(self._strip_instruction_echo(candidate_raw), start_n=start_n)
+        self._log_usage(
+            provider=PROVIDER_HF,
+            model=model,
+            label=f"{label} [{prompt_tag}]",
+            usage=getattr(resp, "usage", None),
+        )
+        accepted, accept_reason = self._accept_hf_ocr_candidate(candidate)
+        if not accepted:
+            raise Exception(f"Salida invalida: {accept_reason}.")
+        if not candidate.strip():
+            raise Exception("Salida invalida: vacio.")
+        if update_label_cache:
+            self._ocr_raw_first_by_label[str(label)] = str(candidate or "")
+        return candidate
+
+    def _resolve_hf_ocr_max_tokens(self, *, model: str, requested: int) -> int:
+        requested = max(256, int(requested or 0))
+        model_name = str(model or "").strip()
+        if model_name == TRAINED_OCR_VISION_MODEL:
+            try:
+                cap = int(str(os.getenv("HF_TRAINED_OCR_MAX_TOKENS", "1500") or "1500").strip())
+            except Exception:
+                cap = 1500
+            return max(256, min(requested, cap))
+        try:
+            global_cap = int(str(os.getenv("HF_OCR_MAX_TOKENS", "") or "0").strip())
+        except Exception:
+            global_cap = 0
+        if global_cap > 0:
+            return max(256, min(requested, global_cap))
+        return requested
+
+    def _resolve_hf_ocr_image_max_side(self, *, model: str) -> Optional[int]:
+        model_name = str(model or "").strip()
+        if model_name != TRAINED_OCR_VISION_MODEL:
+            return None
+        try:
+            max_side = int(str(os.getenv("HF_TRAINED_OCR_IMAGE_MAX_SIDE", "960") or "960").strip())
+        except Exception:
+            max_side = 960
+        return max(480, min(1600, max_side))
+
+    def _reduced_hf_max_tokens_from_error(self, exc: Exception, *, requested: int) -> Optional[int]:
+        text = str(exc or "")
+        low = text.lower()
+        if "max_tokens" not in low and "max_completion_tokens" not in low:
+            return None
+        if "maximum context length" not in low and "too large" not in low:
+            return None
+
+        context_match = re.search(r"maximum context length is\s+(\d+)", text, flags=re.IGNORECASE)
+        input_match = re.search(r"request has\s+(\d+)\s+input tokens", text, flags=re.IGNORECASE)
+        if context_match and input_match:
+            try:
+                context = int(context_match.group(1))
+                input_tokens = int(input_match.group(1))
+                safe = context - input_tokens - 96
+                return max(256, min(int(requested), int(safe)))
+            except Exception:
+                pass
+        return max(256, min(int(requested), 1200))
+
+    def _transcribir_local_ocr(self, path: Path, *, label: Optional[str] = None, start_n: int = 0) -> str:
         try:
             import pytesseract  # type: ignore
             from PIL import Image, ImageEnhance, ImageFilter, ImageOps  # type: ignore
@@ -10329,10 +17641,146 @@ class TranscriptorWindow(tk.Toplevel):
         image = ImageEnhance.Contrast(image).enhance(1.8)
         image = image.filter(ImageFilter.MedianFilter(size=3))
         raw = pytesseract.image_to_string(image, lang=lang)
-        text = " ".join((raw or "").replace("\r\n", "\n").split())
+        text = self._canonicalize_faithful_ocr_text(
+            " ".join((raw or "").replace("\r\n", "\n").split()),
+            start_n=start_n,
+        )
         if label is not None:
             self._ocr_raw_first_by_label[str(label)] = str(text or "")
         return text.strip()
+
+    def _generate_structured_ocr_for_label(
+        self,
+        *,
+        label: str,
+        path: Path,
+        raw_output: str,
+        provider: str,
+        model: str,
+        timeout_s: int,
+        retries: int,
+        start_number_hint: int,
+        curso_now: str,
+        tema_now: str,
+        prefer_cached: bool = True,
+    ) -> Tuple[ScanPipeline, str, List[Dict[str, Any]], Optional[Exception]]:
+        provider_key = "ocr"
+        if provider == PROVIDER_OPENAI:
+            provider_key = "openai"
+        elif provider == PROVIDER_HF:
+            provider_key = "hf"
+        pipeline = ScanPipeline(
+            provider=provider_key,
+            model=model,
+            max_retries=retries,
+            parse_max_retries=retries,
+            timeout_s=timeout_s,
+            debug_dir=str(self._runs_dir / "scan_pipeline_debug"),
+            ocr_lang=(self.ocr_lang_var.get() or "spa+eng"),
+            temperature=0.0,
+            top_p=1.0,
+            max_tokens=3200,
+            seed=42,
+            strict_json=(provider_key in {"hf", "openai"}),
+        )
+
+        structured_model_output = ""
+        parsed_structured_items: List[Dict[str, Any]] = []
+        structured_exc: Optional[Exception] = None
+
+        if prefer_cached:
+            cached_structured = str(self._ocr_structured_by_label.get(str(label), "") or "").strip()
+            if cached_structured:
+                structured_model_output = cached_structured
+                try:
+                    parsed_structured_items = [
+                        dict(it)
+                        for it in pipeline.extractor.parse_raw_output(
+                            raw_output=structured_model_output,
+                            curso=curso_now,
+                            tema=tema_now,
+                            start_n=start_number_hint,
+                            allow_text_fallback=False,
+                        )
+                        if isinstance(it, dict)
+                    ]
+                except Exception as exc:
+                    structured_exc = exc
+                    parsed_structured_items = []
+
+        if not structured_model_output.strip():
+            try:
+                parsed_seed_items, structured_seed_raw = pipeline.extractor.structure_raw_output(
+                    image_path=path,
+                    raw_output=raw_output,
+                    curso=curso_now,
+                    tema=tema_now,
+                    start_n=start_number_hint,
+                )
+                if structured_seed_raw:
+                    structured_model_output = str(structured_seed_raw or "")
+                parsed_structured_items = [dict(it) for it in parsed_seed_items if isinstance(it, dict)]
+                structured_exc = None
+            except Exception as exc:
+                parsed_structured_items = []
+                structured_model_output = ""
+                structured_exc = exc
+
+        if not structured_model_output.strip():
+            try:
+                parsed_seed_items, structured_seed_raw = pipeline.extractor.build_local_structured_output(
+                    raw_output=raw_output,
+                    curso=curso_now,
+                    tema=tema_now,
+                    start_n=start_number_hint,
+                )
+                if structured_seed_raw:
+                    structured_model_output = str(structured_seed_raw or "")
+                parsed_structured_items = [dict(it) for it in parsed_seed_items if isinstance(it, dict)]
+            except Exception as fallback_exc:
+                if structured_exc is None:
+                    structured_exc = fallback_exc
+
+        structured_model_output, parsed_structured_items, repair_notes = self._repair_structured_result_against_raw_ocr(
+            label=str(label),
+            structured_text=structured_model_output,
+            structured_items=parsed_structured_items,
+            raw_output=raw_output,
+            curso=curso_now,
+            tema=tema_now,
+            start_number_hint=start_number_hint,
+        )
+        structured_model_output, parsed_structured_items, normalize_notes = self._normalize_small_number_outliers_in_structured_result(
+            label=str(label),
+            structured_text=structured_model_output,
+            structured_items=parsed_structured_items,
+            start_number_hint=start_number_hint,
+        )
+        structured_model_output, parsed_structured_items, renumber_notes = self._apply_continuous_numbering_to_structured_result(
+            label=str(label),
+            structured_text=structured_model_output,
+            structured_items=parsed_structured_items,
+            start_number_hint=start_number_hint,
+        )
+        structured_model_output, parsed_structured_items, fragment_notes = self._collapse_fragmented_structured_items(
+            label=str(label),
+            structured_text=structured_model_output,
+            structured_items=parsed_structured_items,
+        )
+        structured_model_output, parsed_structured_items, figure_notes = self._enrich_structured_result_with_segmentation(
+            label=str(label),
+            path=path,
+            structured_text=structured_model_output,
+            structured_items=parsed_structured_items,
+        )
+        for note in repair_notes + normalize_notes + renumber_notes + fragment_notes + figure_notes:
+            self._log(note)
+
+        if structured_model_output.strip():
+            self._ocr_structured_by_label[str(label)] = str(structured_model_output or "")
+        else:
+            self._ocr_structured_by_label.pop(str(label), None)
+        return (pipeline, structured_model_output, parsed_structured_items, structured_exc)
 
     def _ingest_direct_ocr_output_for_label(
         self,
@@ -10353,59 +17801,390 @@ class TranscriptorWindow(tk.Toplevel):
         has_figure: bool,
         detector_source: str,
         segment_boxes: Optional[List[Tuple[int, int, int, int]]] = None,
-    ) -> Tuple[int, int]:
-        provider_key = "ocr"
-        if provider == PROVIDER_OPENAI:
-            provider_key = "openai"
-        elif provider == PROVIDER_HF:
-            provider_key = "hf"
+        pending_incomplete_idx: Optional[int] = None,
+    ) -> Tuple[int, int, Optional[int], List[str]]:
+        merge_notes: List[str] = []
+        provider_key = "hf" if provider == PROVIDER_HF else ("openai" if provider == PROVIDER_OPENAI else "ocr")
 
         key_cls = classify_key_text(raw_output, path=path)
-        if key_cls.is_key_image:
+
+        curso_now = (self.curso_var.get() or "").strip()
+        tema_now = (self.tema_var.get() or "").strip()
+        start_number_hint = self._next_item_number_hint(
+            pending_incomplete_idx,
+            image_index,
+            current_label=label,
+        )
+        pipeline, structured_model_output, parsed_structured_items, structured_exc = self._generate_structured_ocr_for_label(
+            label=label,
+            path=path,
+            raw_output=raw_output,
+            provider=provider,
+            model=model,
+            timeout_s=timeout_s,
+            retries=retries,
+            start_number_hint=start_number_hint,
+            curso_now=curso_now,
+            tema_now=tema_now,
+            prefer_cached=True,
+        )
+        if structured_exc is not None and structured_model_output.strip():
+            self._log(
+                f"{label}: JSON estructurado previo reutilizado pese a error de parseo puntual. "
+                f"Detalle: {structured_exc}"
+            )
+        elif structured_exc is not None and not structured_model_output.strip():
+            self._log(
+                f"{label}: no se pudo generar JSON estructurado. Detalle: {structured_exc}"
+            )
+        graphic_continuation_payload: Dict[str, Any] = {}
+        if (
+            provider_key in {"hf", "openai"}
+            and pending_incomplete_idx is not None
+            and segment_boxes
+        ):
+            try:
+                graphic_continuation_payload = pipeline.extractor.detect_graphic_continuation(
+                    image_path=path,
+                )
+            except Exception as graphic_exc:
+                self._log(f"{label}: detector de continuidad grafica fallo. Detalle: {graphic_exc}")
+                graphic_continuation_payload = {}
+            if graphic_continuation_payload:
+                detector_labels = [
+                    self._normalize_binding_slot(str(v or ""))
+                    for v in list(graphic_continuation_payload.get("option_labels_visible", []) or [])
+                ]
+                detector_labels = [v for v in detector_labels if v in {"A", "B", "C", "D", "E"}]
+                structured_model_output = self._merge_graphic_detector_payload_into_structured_text(
+                    structured_text=structured_model_output,
+                    detector_payload=graphic_continuation_payload,
+                )
+                try:
+                    parsed_structured_items = pipeline.extractor.parse_raw_output(
+                        raw_output=structured_model_output,
+                        curso=curso_now,
+                        tema=tema_now,
+                        start_n=start_number_hint,
+                        allow_text_fallback=False,
+                    )
+                except Exception:
+                    parsed_structured_items = []
+                if detector_labels or bool(graphic_continuation_payload.get("contains_option_graphs")):
+                    self._log(
+                        f"{label}: detector grafico -> scope={graphic_continuation_payload.get('figure_scope', 'none')} "
+                        f"labels={','.join(detector_labels) if detector_labels else '-'}"
+                    )
+        structured_model_output, parsed_structured_items, repair_notes = self._repair_structured_result_against_raw_ocr(
+            label=str(label),
+            structured_text=structured_model_output,
+            structured_items=parsed_structured_items,
+            raw_output=raw_output,
+            curso=curso_now,
+            tema=tema_now,
+            start_number_hint=start_number_hint,
+        )
+        for note in repair_notes:
+            self._log(note)
+        if structured_model_output.strip():
+            self._ocr_structured_by_label[str(label)] = str(structured_model_output or "")
+        else:
+            self._ocr_structured_by_label.pop(str(label), None)
+        structured_source_raw = structured_model_output if structured_model_output.strip() else raw_output
+        structured_leading_cont, structured_leading_opts, cleaned_raw_output = self._extract_structured_leading_payload(
+            structured_source_raw
+        )
+        structured_leading_labels = self._extract_structured_leading_option_labels(
+            structured_source_raw
+        )
+        structured_leading_has_figure = self._extract_structured_leading_figure_hint(
+            structured_source_raw
+        )
+        parse_input_raw = cleaned_raw_output if cleaned_raw_output else structured_source_raw
+        continuity_context: Dict[str, Any] = {
+            "pending_num": 0,
+            "statement_merged": False,
+            "merged_option_labels": [],
+            "option_labels_seen": [],
+            "structured_has_figure": False,
+            "has_figure_hint": False,
+        }
+        binding_pending_idx: Optional[int] = (
+            pending_incomplete_idx
+            if pending_incomplete_idx is not None and 0 <= pending_incomplete_idx < len(self._items)
+            else None
+        )
+        if not parsed_structured_items:
+            try:
+                parsed_structured_items = pipeline.extractor.parse_raw_output(
+                    raw_output=parse_input_raw,
+                    curso=curso_now,
+                    tema=tema_now,
+                    start_n=start_number_hint,
+                    allow_text_fallback=False,
+                )
+            except Exception:
+                parsed_structured_items = []
+
+        role_info = resolve_image_role(
+            ImageEvidence(
+                raw_text=raw_output,
+                has_pending_item=pending_incomplete_idx is not None,
+                is_key_candidate=bool(key_cls.is_key_image),
+                structured_item_count=len(parsed_structured_items),
+                leading_continuation=structured_leading_cont,
+                leading_options_count=len(structured_leading_opts),
+                leading_option_labels_count=len(structured_leading_labels),
+                leading_has_figure=bool(structured_leading_has_figure),
+                segment_count=len(segment_boxes or []),
+                pending_prefix_signal=bool(
+                    pending_incomplete_idx is not None and self._has_pending_prefix_continuation_signal(raw_output)
+                ),
+            )
+        )
+        if key_cls.is_key_image and not role_info.keep_for_processing:
             self._direct_item_diagnostics_by_label[str(label)] = [
                 {
                     "status": "SKIPPED_KEY",
                     "reason": key_cls.reason,
                     "confidence": key_cls.confidence,
+                    "role": role_info.role,
                 }
             ]
             self._log(
-                f"{label}: imagen clasificada como CLAVES/RESPUESTAS (reason={key_cls.reason}, conf={key_cls.confidence:.2f}); se ignora."
+                f"{label}: imagen clasificada como CLAVES/RESPUESTAS (reason={key_cls.reason}, "
+                f"conf={key_cls.confidence:.2f}, role={role_info.role}); se ignora."
             )
-            return (0, 0)
+            return (0, 0, pending_incomplete_idx, merge_notes)
+        if key_cls.is_key_image and role_info.keep_for_processing:
+            self._log(
+                f"{label}: payload tipo claves detectado, pero se conserva por evidencia "
+                f"(role={role_info.role})."
+            )
 
-        curso_now = (self.curso_var.get() or "").strip()
-        tema_now = (self.tema_var.get() or "").strip()
-        pipeline = ScanPipeline(
-            provider=provider_key,
-            model=model,
-            max_retries=retries,
-            parse_max_retries=retries,
-            timeout_s=timeout_s,
-            debug_dir=str(self._runs_dir / "scan_pipeline_debug"),
-            ocr_lang=(self.ocr_lang_var.get() or "spa+eng"),
-            temperature=0.0,
-            top_p=1.0,
-            max_tokens=3200,
-            seed=42,
-            strict_json=(provider_key in {"hf", "openai"}),
+        structured_payload_present = bool(structured_model_output.strip())
+        structured_items_for_pipeline: Optional[List[Dict[str, Any]]] = (
+            [dict(it) for it in parsed_structured_items] if parsed_structured_items else []
+        ) if structured_payload_present else None
+        structured_continuation_only = bool(
+            structured_payload_present
+            and (not parsed_structured_items)
+            and (
+                structured_leading_cont
+                or structured_leading_opts
+                or structured_leading_labels
+                or structured_leading_has_figure
+            )
         )
-        pipeline_run = pipeline.process_raw_output(
-            raw_output=raw_output,
-            image_path=path,
-            start_n=max(1, int(image_index)),
-            curso=curso_now,
-            tema=tema_now,
-            has_figure_hint=bool(has_figure),
-        )
-        if pipeline_run.json_parse_failed_count > 0:
-            for parse_diag in pipeline_run.parse_failures:
-                self._log(
-                    f"{label}: parse JSON fallo tras {int(parse_diag.get('parse_retries_used', 0))} reintentos "
-                    f"({', '.join(parse_diag.get('parse_errors', []))}); item marcado para revision."
+        structured_candidate_consumed = False
+        if parsed_structured_items:
+            (
+                structured_items_for_pipeline,
+                pending_incomplete_idx,
+                structured_notes,
+                structured_candidate_consumed,
+                continuity_context,
+            ) = self._consume_structured_continuation_candidate(
+                pending_incomplete_idx=pending_incomplete_idx,
+                structured_items=parsed_structured_items,
+                label=label,
+            )
+            merge_notes.extend(structured_notes)
+
+        next_item_number: Optional[int] = None
+        for raw_item in list(structured_items_for_pipeline or parsed_structured_items):
+            try:
+                item_num = int((raw_item or {}).get("n", 0) or 0)
+            except Exception:
+                item_num = 0
+            if item_num > 0:
+                next_item_number = item_num
+                break
+
+        if (
+            pending_incomplete_idx is not None
+            and 0 <= pending_incomplete_idx < len(self._items)
+            and (
+                structured_leading_cont
+                or structured_leading_opts
+                or structured_leading_labels
+                or structured_leading_has_figure
+            )
+        ):
+            pending_num = self._pending_item_number(
+                pending_incomplete_idx,
+                fallback=int(continuity_context.get("pending_num", 0) or 0),
+            )
+            if pending_num > 0:
+                leading_payload_context: Dict[str, Any] = {
+                    "pending_num": int(pending_num),
+                    "statement_merged": False,
+                    "merged_option_labels": [],
+                    "option_labels_seen": list(structured_leading_labels),
+                    "structured_has_figure": bool(structured_leading_has_figure),
+                    "has_figure_hint": False,
+                }
+                base_archivo, base_item, base_imgs = self._items[pending_incomplete_idx]
+                merged_item = str(base_item or "")
+                if structured_leading_cont:
+                    merged_item = self._merge_continuation_into_item(
+                        base_item=merged_item,
+                        continuation_text=structured_leading_cont,
+                        fallback_numero=pending_num,
+                    )
+                    note = self._build_merge_text_note(
+                        stage=f"leading_continuation_modelo -> item {pending_num}",
+                        text=structured_leading_cont,
+                    )
+                    if note:
+                        merge_notes.append(note)
+                    leading_payload_context["statement_merged"] = True
+                    leading_payload_context["has_figure_hint"] = bool(
+                        self._item_image_hint_score(structured_leading_cont)
+                    )
+                if structured_leading_opts:
+                    merged_item = self._merge_options_into_item(
+                        base_item=merged_item,
+                        extra_options=structured_leading_opts,
+                        fallback_numero=pending_num,
+                    )
+                    note = self._build_merge_options_note(
+                        stage=f"leading_options_modelo -> item {pending_num}",
+                        options=structured_leading_opts,
+                    )
+                    if note:
+                        merge_notes.append(note)
+                    merged_labels = [
+                        opt for opt in ("A", "B", "C", "D", "E") if opt in structured_leading_opts
+                    ]
+                    leading_payload_context["option_labels_seen"] = list(merged_labels)
+                    leading_payload_context["merged_option_labels"] = list(merged_labels)
+                elif structured_leading_labels:
+                    note = f"leading_option_slots_modelo -> item {pending_num}: {','.join(structured_leading_labels)}"
+                    merge_notes.append(note)
+                self._items[pending_incomplete_idx] = (base_archivo, merged_item, list(base_imgs or []))
+                continuity_context = self._merge_continuity_context(
+                    continuity_context,
+                    leading_payload_context,
                 )
-        pipeline_rows = list(pipeline_run.items)
-        direct_items = [row.rendered for row in pipeline_rows]
+                self._log(
+                    f"{label}: LEADING payload del modelo aplicado al item pendiente {pending_num}."
+                )
+                if self._item_has_complete_options(merged_item):
+                    pending_incomplete_idx = None
+
+        should_skip_leading_recovery = bool(
+            structured_payload_present
+            and (not parsed_structured_items)
+            and (
+                continuity_context.get("option_labels_seen")
+                or continuity_context.get("merged_option_labels")
+                or continuity_context.get("structured_has_figure")
+            )
+        )
+        if not structured_candidate_consumed and not should_skip_leading_recovery:
+            try:
+                pending_incomplete_idx, leading_notes, _leading_merged, leading_context = self._recover_leading_options_for_pending(
+                    pending_incomplete_idx=pending_incomplete_idx,
+                    label=label,
+                    path=path,
+                    provider=provider,
+                    model=model,
+                    timeout_s=timeout_s,
+                    retries=retries,
+                    openai_client=openai_client,
+                    next_item_number=next_item_number,
+                )
+                continuity_context = self._merge_continuity_context(continuity_context, leading_context)
+                merge_notes.extend(leading_notes)
+            except Exception as exc:
+                self._log(f"{label}: rescate de continuidad omitido por error. Detalle: {exc}")
+            if (
+                pending_incomplete_idx is not None
+                and 0 <= pending_incomplete_idx < len(self._items)
+                and next_item_number is not None
+            ):
+                missing_slots = self._missing_option_slots_for_item(
+                    str(self._items[pending_incomplete_idx][1] or "")
+                )
+                if missing_slots:
+                    (
+                        pending_incomplete_idx,
+                        topband_notes,
+                        _topband_merged,
+                        topband_context,
+                    ) = self._recover_topband_options_for_pending(
+                        pending_incomplete_idx=pending_incomplete_idx,
+                        label=label,
+                        path=path,
+                        next_item_number=next_item_number,
+                        continuity_context=continuity_context,
+                    )
+                    continuity_context = self._merge_continuity_context(
+                        continuity_context,
+                        topband_context,
+                    )
+                    merge_notes.extend(topband_notes)
+
+        continuation_only_roles = {
+            "continuation_only",
+            "continuation_labels_only",
+            "continuation_graphic_only",
+        }
+        should_process_new_items = role_info.role not in continuation_only_roles
+        if should_process_new_items:
+            try:
+                pipeline_run = pipeline.process_raw_output(
+                    raw_output=raw_output,
+                    image_path=path,
+                    start_n=start_number_hint,
+                    curso=curso_now,
+                    tema=tema_now,
+                    has_figure_hint=bool(has_figure),
+                    initial_items=structured_items_for_pipeline,
+                )
+            except Exception as exc:
+                self._log(
+                    f"{label}: pipeline IA fallo durante validacion/correccion; se usa fallback local. "
+                    f"Detalle: {exc}"
+                )
+                fallback_pipeline = ScanPipeline(
+                    provider="ocr",
+                    model="",
+                    max_retries=0,
+                    parse_max_retries=0,
+                    timeout_s=timeout_s,
+                    debug_dir=str(self._runs_dir / "scan_pipeline_debug"),
+                    ocr_lang=(self.ocr_lang_var.get() or "spa+eng"),
+                    temperature=0.0,
+                    top_p=1.0,
+                    max_tokens=3200,
+                    seed=42,
+                    strict_json=False,
+                )
+                pipeline_run = fallback_pipeline.process_raw_output(
+                    raw_output=raw_output,
+                    image_path=path,
+                    start_n=start_number_hint,
+                    curso=curso_now,
+                    tema=tema_now,
+                    has_figure_hint=bool(has_figure),
+                    initial_items=structured_items_for_pipeline,
+                )
+            if pipeline_run.json_parse_failed_count > 0:
+                for parse_diag in pipeline_run.parse_failures:
+                    self._log(
+                        f"{label}: parse JSON fallo tras {int(parse_diag.get('parse_retries_used', 0))} reintentos "
+                        f"({', '.join(parse_diag.get('parse_errors', []))}); item marcado para revision."
+                    )
+            pipeline_rows = list(pipeline_run.items)
+            direct_items = [row.rendered for row in pipeline_rows]
+        else:
+            pipeline_rows = []
+            direct_items = []
+            self._log(
+                f"{label}: rol={role_info.role}; se omite creacion de items nuevos para esta imagen."
+            )
         created_ok = 0
         created_err = 0
         label_key = str(label)
@@ -10413,6 +18192,7 @@ class TranscriptorWindow(tk.Toplevel):
         source_stem = self._safe_fs_name(path.stem, "src")
         segmentation_reviewed = source_key in self._segmentation_reviewed_sources
         figure_confirmed = detector_source in {"manual", "manual_box", "manual_marker"}
+
         source_segment_boxes: List[Tuple[int, int, int, int]] = []
         for raw_box in list(segment_boxes or []):
             try:
@@ -10427,32 +18207,100 @@ class TranscriptorWindow(tk.Toplevel):
             direct_items=direct_items,
             has_figure=has_figure,
         )
+        reserved_segment_indices: Set[int] = set()
+        if source_segment_boxes and (
+            continuity_context.get("statement_merged")
+            or continuity_context.get("option_labels_seen")
+            or continuity_context.get("structured_has_figure")
+            or continuity_context.get("has_figure_hint")
+            or (binding_pending_idx is not None and not direct_items)
+        ):
+            reserved_segment_indices, leading_figure_notes = self._bind_leading_segments_to_pending_item(
+                pending_incomplete_idx=binding_pending_idx,
+                label=label,
+                path=path,
+                source_segment_boxes=source_segment_boxes,
+                continuity_context=continuity_context,
+                direct_items=direct_items,
+                figure_positions=figure_positions,
+            )
+            merge_notes.extend(leading_figure_notes)
+        source_bindings = self._get_segment_bindings_by_source_key(source_key)
+        blocked_segment_indices = set(reserved_segment_indices)
+        for seg_idx, payload in source_bindings.items():
+            if isinstance(payload, dict) and self._as_bool(payload.get("confirmed"), False):
+                blocked_segment_indices.add(int(seg_idx))
+
         segment_plan: Dict[int, int] = {}
-        if direct_items and source_segment_boxes:
+        remaining_segment_entries = [
+            (seg_idx, box)
+            for seg_idx, box in enumerate(source_segment_boxes)
+            if seg_idx not in blocked_segment_indices
+        ]
+        if direct_items and remaining_segment_entries:
             segment_plan = self._plan_image_tag_positions(
                 raw_items=direct_items,
-                segment_count=len(source_segment_boxes),
+                segment_count=len(remaining_segment_entries),
             )
-            if not segment_plan:
-                # Fallback deterministico: mapear por orden item->segmento.
-                limit = min(len(direct_items), len(source_segment_boxes))
-                for pos in range(1, limit + 1):
-                    segment_plan[pos] = pos - 1
-                if segment_plan:
-                    self._log(
-                        f"{label}: asignacion item->segmento aplicada por orden ({len(segment_plan)} mapeo(s))."
-                    )
-        source_bindings = self._get_segment_bindings_by_source_key(source_key)
+            if segment_plan:
+                segment_plan = {
+                    pos: int(remaining_segment_entries[rel_idx][0])
+                    for pos, rel_idx in segment_plan.items()
+                    if 0 <= int(rel_idx) < len(remaining_segment_entries)
+                }
 
-        if not direct_items:
-            fallback_num = self._infer_numero(path, image_index)
+        segment_only_continuation = bool(
+            binding_pending_idx is not None
+            and source_segment_boxes
+            and not direct_items
+            and str(raw_output or "").strip().startswith("[SIN TEXTO]")
+        )
+        pending_num_for_fallback = self._pending_item_number(pending_incomplete_idx, fallback=0)
+        explicit_new_item_numbers = collect_new_item_numbers(
+            raw_text=structured_source_raw if structured_source_raw else raw_output,
+            pending_num=int(pending_num_for_fallback or 0),
+            structured_items=list(structured_items_for_pipeline or []),
+        )
+        if not direct_items and (structured_continuation_only or segment_only_continuation):
+            self._log(f"{label}: continuidad pura detectada; no se crea item nuevo.")
+
+        if not direct_items and (not structured_continuation_only) and (not segment_only_continuation):
+            if (
+                pending_incomplete_idx is not None
+                and pending_incomplete_idx >= 0
+                and pending_incomplete_idx < len(self._items)
+                and not explicit_new_item_numbers
+            ):
+                diagnostics.append(
+                    {
+                        "item_num": int(pending_num_for_fallback or 0),
+                        "status": "CONTINUATION_UNRESOLVED",
+                        "errors": ["continuation_without_explicit_new_item_signal"],
+                    }
+                )
+                self._log(
+                    f"{label}: sin evidencia explicita de item nuevo; se conserva como continuidad sin crear item borrador."
+                )
+                self._direct_item_diagnostics_by_label[str(label)] = diagnostics
+                return (created_ok, created_err, pending_incomplete_idx, merge_notes)
+
+            fallback_num = (
+                int(explicit_new_item_numbers[0])
+                if explicit_new_item_numbers
+                else self._infer_numero(path, image_index)
+            )
+            fallback_raw_item = str(raw_output or "")
+            if explicit_new_item_numbers:
+                _prefix_fallback, fallback_rest = self._extract_prefix_before_known_item_number(
+                    fallback_raw_item,
+                    next_item_number=int(explicit_new_item_numbers[0]),
+                )
+                if fallback_rest:
+                    fallback_raw_item = fallback_rest
             draft = self._build_direct_error_draft(
-                raw_item=raw_output,
+                raw_item=fallback_raw_item,
                 fallback_numero=fallback_num,
             )
-            if has_figure and not self._has_image_marker(draft):
-                draft = self._insert_image_marker(draft, path=path, numero=fallback_num)
-                draft = self._move_image_marker_before_options(draft)
 
             draft = self._apply_metadata_mode(
                 item=draft,
@@ -10469,13 +18317,17 @@ class TranscriptorWindow(tk.Toplevel):
             draft = self._move_image_marker_before_options(self.controller.normalizar_item_una_linea(draft))
 
             image_paths: List[str] = []
-            marker_name = self._extract_first_image_marker_name(draft)
             fallback_bbox_norm = bbox_norm
             fallback_bbox_source = detector_source
             if fallback_bbox_norm is None and source_segment_boxes:
                 fallback_bbox_norm = self._box_px_to_norm(path=path, box_px=source_segment_boxes[0])
                 if fallback_bbox_norm is not None:
                     fallback_bbox_source = "segment_item"
+            if fallback_bbox_norm is not None and not self._has_image_marker(draft):
+                draft_num = self.controller.parsear_numero_original(draft) or fallback_num
+                draft = self._insert_image_marker(draft, path=path, numero=draft_num)
+                draft = self._move_image_marker_before_options(self.controller.normalizar_item_una_linea(draft))
+            marker_name = self._extract_first_image_marker_name(draft)
             bbox_norm_payload: Optional[List[float]] = None
             if fallback_bbox_norm is not None:
                 try:
@@ -10506,6 +18358,10 @@ class TranscriptorWindow(tk.Toplevel):
                 key,
                 {
                     "input_structured": draft_structured,
+                    "ocr_raw_output": str(raw_output or ""),
+                    "structured_model_output": str(structured_model_output or ""),
+                    "structured_item_json": {},
+                    "final_latex_candidate": "",
                     "model_raw_output": str(raw_output or ""),
                     "model_validated_output": "",
                     "human_final_output": draft,
@@ -10520,8 +18376,11 @@ class TranscriptorWindow(tk.Toplevel):
                     "detector_source": detector_source,
                     "metadata": {
                         "item_num": int(num),
+                        "source_label": label_key,
                         "source_stem": source_stem,
                         "source_path": str(path),
+                        "curso_hint": curso_now,
+                        "tema_hint": tema_now,
                         "detector_source": detector_source,
                         "has_figure": bool(has_figure),
                         "figure_confirmed": bool(figure_confirmed),
@@ -10544,6 +18403,12 @@ class TranscriptorWindow(tk.Toplevel):
                 }
             )
             self._log(f"{label}: ERROR_FORMATO_DIRECTO (sin \\item valido).")
+            if self._item_has_complete_options(draft):
+                pending_incomplete_idx = None
+            else:
+                pending_incomplete_idx = len(self._items) - 1
+                merge_notes.append(f"item_incompleto_directo -> item {int(num)}")
+                self._log(f"{label}: item incompleto detectado en OCR directo; se espera continuacion.")
         else:
             for pos, raw_item in enumerate(direct_items, start=1):
                 pipeline_row = pipeline_rows[pos - 1] if (pos - 1) < len(pipeline_rows) else None
@@ -10574,10 +18439,6 @@ class TranscriptorWindow(tk.Toplevel):
                         fallback_numero=base_num,
                     )
 
-                if pos in figure_positions and (not has_confirmed_pre_binding) and not self._has_image_marker(working):
-                    working = self._insert_image_marker(working, path=path, numero=base_num)
-                    working = self._move_image_marker_before_options(working)
-
                 working = self._apply_metadata_mode(
                     item=working,
                     mode=tag_mode,
@@ -10593,6 +18454,7 @@ class TranscriptorWindow(tk.Toplevel):
                 working = self._move_image_marker_before_options(
                     self.controller.normalizar_item_una_linea(self._normalize_math_delimiters(working))
                 )
+                working = self._preserve_options_from_source_item(candidate=working, source=raw_item)
                 item_num = self.controller.parsear_numero_original(working) or base_num
                 binding_entry: Optional[Dict[str, Any]] = None
                 binding_slot = "ENUNCIADO"
@@ -10627,6 +18489,13 @@ class TranscriptorWindow(tk.Toplevel):
                             numero=item_num,
                         )
                         working = self._normalize_math_delimiters(self.controller.normalizar_item_una_linea(working))
+                        working = self._preserve_options_from_source_item(candidate=working, source=raw_item)
+
+                if seg_idx >= 0 and not self._has_image_marker(working):
+                    working = self._insert_image_marker(working, path=path, numero=item_num)
+                    working = self._move_image_marker_before_options(working)
+                    working = self._normalize_math_delimiters(self.controller.normalizar_item_una_linea(working))
+                    working = self._preserve_options_from_source_item(candidate=working, source=raw_item)
 
                 image_paths: List[str] = []
                 marker_name = self._extract_first_image_marker_name(working)
@@ -10647,7 +18516,7 @@ class TranscriptorWindow(tk.Toplevel):
                     image_paths = [binding_crop_path]
                     self._preview_images[binding_marker] = binding_crop_path
                     marker_name = binding_marker
-                elif marker_name and crop_bbox_norm is not None and self.auto_crop_var.get() and (pos in figure_positions):
+                elif marker_name and crop_bbox_norm is not None and self.auto_crop_var.get():
                     crop_saved = self._save_figure_crop(
                         image_path=path,
                         marker_name=marker_name,
@@ -10656,6 +18525,91 @@ class TranscriptorWindow(tk.Toplevel):
                     if crop_saved:
                         image_paths = [crop_saved]
                         self._preview_images[marker_name] = crop_saved
+
+                item_figure_confirmed = bool(binding_entry is not None or seg_idx >= 0)
+
+                if (
+                    pending_incomplete_idx is not None
+                    and 0 <= pending_incomplete_idx < len(self._items)
+                    and pos == 1
+                ):
+                    base_archivo, base_item, base_imgs = self._items[pending_incomplete_idx]
+                    pending_num = (
+                        self.controller.parsear_numero_original(base_item)
+                        or self._extract_structured_item_number(base_item)
+                        or 0
+                    )
+                    incoming_num = int(item_num or 0)
+                    preview_body = self._body_without_tags_and_markers(working)
+                    preview_enu, preview_options = self._extract_options_loose(preview_body)
+                    preview_enu_clean = self.controller.normalizar_item_una_linea(
+                        str(preview_enu or "").replace("[[ocr_sin_texto]]", " ")
+                    )
+                    options_only_like = (
+                        len(preview_options) >= 2
+                        and (
+                            not preview_enu_clean
+                            or len(preview_enu_clean) <= 48
+                            or bool(pipeline_row is not None and pipeline_row.item.needs_review)
+                        )
+                    )
+                    if (
+                        pending_num > 0
+                        and incoming_num > pending_num
+                        and options_only_like
+                    ):
+                        self._log(
+                            f"{label}: guardia anti-fusion activada; item {incoming_num} no se absorbe en el pendiente {pending_num}."
+                        )
+                    should_force_continuation = (
+                        should_absorb_direct_item_into_pending(
+                            pending_num=int(pending_num or 0),
+                            incoming_num=int(incoming_num or 0),
+                            options_only_like=bool(options_only_like),
+                        )
+                    )
+                    if should_force_continuation:
+                        if options_only_like:
+                            note = self._build_merge_options_note(
+                                stage=f"direct_options_continuation_pending_{pending_num}_incoming_{incoming_num}",
+                                options=preview_options,
+                            )
+                        else:
+                            note = self._build_merge_text_note(
+                                stage=f"direct_continuation_pending_{pending_num}_incoming_{incoming_num}",
+                                text=working,
+                            )
+                        if note:
+                            merge_notes.append(note)
+                        if options_only_like:
+                            merged = self._merge_options_into_item(
+                                base_item=base_item,
+                                extra_options=preview_options,
+                                fallback_numero=pending_num,
+                            )
+                        else:
+                            merged = self._merge_continuation_into_item(
+                                base_item=base_item,
+                                continuation_text=working,
+                                fallback_numero=pending_num,
+                            )
+                        merged_imgs = list(base_imgs or [])
+                        for raw_img in image_paths:
+                            clean_img = str(raw_img or "").strip()
+                            if clean_img and clean_img not in merged_imgs:
+                                merged_imgs.append(clean_img)
+                        self._items[pending_incomplete_idx] = (base_archivo, merged, merged_imgs)
+                        if self._item_has_complete_options(merged):
+                            pending_incomplete_idx = None
+                        if options_only_like:
+                            self._log(
+                                f"{label}: opciones parciales detectadas y fusionadas con el item pendiente {pending_num}."
+                            )
+                        else:
+                            self._log(
+                                f"{label}: continuacion directa fusionada con el item pendiente {pending_num} (incoming={incoming_num})."
+                            )
+                        continue
 
                 self._items.append((path.stem, working, image_paths))
                 needs_review_item = bool(pipeline_row.item.needs_review) if pipeline_row is not None else False
@@ -10674,6 +18628,14 @@ class TranscriptorWindow(tk.Toplevel):
                     )
 
                 structured_input = self._build_structured_input_from_scan_item(working)
+                structured_entry_for_pair = self._structured_item_for_training(
+                    structured_items_for_pipeline or parsed_structured_items,
+                    item_num=int(item_num or 0),
+                    position=pos,
+                )
+                final_latex_candidate = self._final_latex_candidate_from_structured_item(
+                    structured_entry_for_pair
+                )
                 key = self._build_training_pair_key(
                     item_num,
                     source_stem=source_stem,
@@ -10684,6 +18646,10 @@ class TranscriptorWindow(tk.Toplevel):
                     key,
                     {
                         "input_structured": structured_input,
+                        "ocr_raw_output": str(raw_output or ""),
+                        "structured_model_output": str(structured_model_output or ""),
+                        "structured_item_json": structured_entry_for_pair,
+                        "final_latex_candidate": final_latex_candidate,
                         "model_raw_output": str(raw_item or ""),
                         "model_validated_output": working if status in {"OK_DIRECTO", "NEEDS_REVIEW"} else "",
                         "human_final_output": working,
@@ -10698,12 +18664,15 @@ class TranscriptorWindow(tk.Toplevel):
                         "detector_source": detector_source,
                         "metadata": {
                             "item_num": int(item_num),
+                            "source_label": label_key,
                             "source_stem": source_stem,
                             "source_path": str(path),
+                            "curso_hint": curso_now,
+                            "tema_hint": tema_now,
                             "detector_source": detector_source,
                             "has_figure": bool(has_figure),
                             "position_in_image": pos,
-                            "figure_confirmed": bool(figure_confirmed),
+                            "figure_confirmed": bool(figure_confirmed or item_figure_confirmed),
                             "figure_bbox_source": bbox_source,
                             "figure_bbox_norm": bbox_norm_payload,
                             "segmentation_reviewed": bool(segmentation_reviewed),
@@ -10726,20 +18695,76 @@ class TranscriptorWindow(tk.Toplevel):
                         "retry_count": int(retry_count),
                     }
                 )
+                had_pending_before_append = (
+                    pending_incomplete_idx is not None
+                    and 0 <= pending_incomplete_idx < len(self._items) - 1
+                )
+                if self._item_has_complete_options(working):
+                    if not had_pending_before_append:
+                        pending_incomplete_idx = None
+                else:
+                    pending_incomplete_idx = len(self._items) - 1
+                    merge_notes.append(f"item_incompleto_directo -> item {int(item_num)}")
+                    self._log(f"{label}: item {item_num} incompleto; se espera continuacion en la siguiente imagen.")
 
         self._direct_item_diagnostics_by_label[label_key] = diagnostics
-        return (created_ok, created_err)
+        return (created_ok, created_err, pending_incomplete_idx, merge_notes)
+
+    def _ocr_batch_settings(self) -> Tuple[int, float]:
+        def _env_int(name: str, default: int, *, min_value: int, max_value: int) -> int:
+            try:
+                value = int(str(os.getenv(name, "") or default).strip())
+            except Exception:
+                value = default
+            return max(min_value, min(max_value, value))
+
+        def _env_float(name: str, default: float, *, min_value: float, max_value: float) -> float:
+            try:
+                value = float(str(os.getenv(name, "") or default).strip())
+            except Exception:
+                value = default
+            return max(min_value, min(max_value, value))
+
+        batch_size = _env_int("MOD0_OCR_BATCH_SIZE", 10, min_value=1, max_value=100)
+        pause_seconds = _env_float("MOD0_OCR_BATCH_PAUSE_SECONDS", 12.0, min_value=0.0, max_value=180.0)
+        return batch_size, pause_seconds
+
+    def _pause_between_ocr_batches(
+        self,
+        *,
+        idx: int,
+        total: int,
+        batch_size: int,
+        pause_seconds: float,
+        phase: str,
+    ) -> None:
+        if idx <= 1 or batch_size <= 0 or (idx - 1) % batch_size != 0:
+            return
+        completed_batches = (idx - 1) // batch_size
+        total_batches = max(1, (total + batch_size - 1) // batch_size)
+        self.after(
+            0,
+            lambda cb=completed_batches, tb=total_batches, ps=pause_seconds, ph=phase: self._log(
+                f"{ph}: lote {cb}/{tb} completado. Pausa preventiva de {ps:.0f}s antes del siguiente bloque."
+            ),
+        )
+        self.after(
+            0,
+            lambda cb=completed_batches, tb=total_batches, ph=phase: self._set_loading_bar(
+                True,
+                f"Estado: {ph} | pausa entre lotes ({cb}/{tb})...",
+            ),
+        )
+        if pause_seconds > 0:
+            time.sleep(pause_seconds)
 
     def _transcribir_async_raw_only(self) -> None:
         if self._transcribing:
             messagebox.showinfo("Transcripcion", "Ya hay una transcripcion en curso.")
             return
 
-        # Paso 2 en modo vision-directa: OCR crudo + validacion de formato por item.
-        self.provider_var.set(FIXED_PROVIDER)
-        current_model = (self.model_var.get() or "").strip()
-        if current_model not in HF_MODELS:
-            self.model_var.set(DEFAULT_HF_VISION_MODEL)
+        # Paso 2: solo OCR fiel. El JSON estructurado corre en un paso separado.
+        self._on_provider_change()
         self.segmentation_v2_var.set(True)
         self.ocr_exclude_box_var.set(True)
 
@@ -10759,7 +18784,7 @@ class TranscriptorWindow(tk.Toplevel):
             "Paso 2 - estado previo",
             "¿Conservar estado previo?\n\n"
             "Si = conservar salida/items previos\n"
-            "No = limpiar salida/items previos\n"
+            "No = limpiar salida/items previos y borrar JSON estructurado derivado del OCR anterior\n"
             "Cancelar = no ejecutar",
             default=messagebox.YES,
         )
@@ -10768,16 +18793,27 @@ class TranscriptorWindow(tk.Toplevel):
         if keep_state is False:
             self._items.clear()
             self._training_pairs_by_item.clear()
+            self._transcribed_by_label.clear()
+            self._ocr_raw_first_by_label.clear()
+            self._ocr_candidate_cache_by_label.clear()
+            self._ocr_structured_by_label.clear()
+            self._geometry_pass_by_label.clear()
+            self._geometry_pass_payload_by_label.clear()
+            self._ocr_merge_applied_by_label.clear()
             self._direct_item_diagnostics_by_label.clear()
             self._render_output_from_items()
-            self._log("Paso 2: estado previo limpiado (_items/salida/training_pairs).")
+            self._log(
+                "Paso 2: estado previo limpiado "
+                "(_items/salida/training_pairs/cache_ocr/transcribed_by_label/ocr_structured). "
+                "Debes volver a ejecutar 'Paso 3: JSON estructurado' antes de 'Paso 4: Salida LaTeX'."
+            )
         else:
             self._log("Paso 2: estado previo conservado (_items/salida).")
 
         if selected_scope is not None:
-            self._log(f"Paso 2 (vision directa): seleccion actual ({len(sel)} imagen(es)).")
+            self._log(f"Paso 2 (OCR fiel): seleccion actual ({len(sel)} imagen(es)).")
         else:
-            self._log(f"Paso 2 (vision directa): lote completo ({len(sel)} imagen(es)).")
+            self._log(f"Paso 2 (OCR fiel): lote completo ({len(sel)} imagen(es)).")
 
         if not self._refresh_segmentation_done_state(selected_labels=selected_scope):
             reviewed, total_review, pending = self._segmentation_progress(selected_labels=selected_scope)
@@ -10788,22 +18824,29 @@ class TranscriptorWindow(tk.Toplevel):
                 self._log(f"Pendientes: {preview}{extra}")
             messagebox.showwarning(
                 "Paso 2 bloqueado",
-                "Completa la segmentacion (Paso 1) antes de ejecutar OCR directo.",
+                "Completa la segmentacion (Paso 1) antes de ejecutar OCR fiel.",
             )
             return
         else:
             reviewed, total_review, _pending = self._segmentation_progress(selected_labels=selected_scope)
             self._log(f"Segmentacion completa: {reviewed}/{total_review}.")
 
-        provider = FIXED_PROVIDER
-        model = (self.model_var.get() or "").strip() or DEFAULT_HF_VISION_MODEL
-        detect_model = self._resolve_bbox_detector_model_path() or "segmentacion_v2_fallback"
-        try:
-            provider_key = "hf" if provider == PROVIDER_HF else ("openai" if provider == PROVIDER_OPENAI else "ocr")
-            validate_scan_provider_env(provider_key)
-        except Exception as exc:
-            messagebox.showerror("ENV", str(exc))
+        provider = self._normalize_provider_label(self.provider_var.get() or FIXED_PROVIDER)
+        model = (self.model_var.get() or "").strip() or self._default_vision_model_for_provider(provider)
+        if provider == PROVIDER_HF and model == TRAINED_OCR_VISION_MODEL and not self._trained_ocr_endpoint_configured():
+            message = (
+                "El modelo OCR geometrico entrenado aun no esta activo.\n\n"
+                "Falta configurar HF_TRAINED_OCR_BASE_URL con la URL /v1 del endpoint dedicado.\n"
+                "El merge del modelo puede seguir en proceso; espera a que termine y luego crea/activa el endpoint."
+            )
+            self._log("Paso 2 bloqueado: falta endpoint OCR entrenado (HF_TRAINED_OCR_BASE_URL).")
+            messagebox.showwarning("OCR entrenado pendiente", message)
             return
+        render_provider = PROVIDER_OCR
+        render_model = ""
+        render_retries = 0
+        render_tag_mode = TAG_MODE_MANUAL
+        detect_model = self._resolve_bbox_detector_model_path() or "segmentacion_v2_fallback"
         try:
             timeout_s = int(self.timeout_var.get())
         except Exception:
@@ -10825,14 +18868,13 @@ class TranscriptorWindow(tk.Toplevel):
         else:
             paths = [(label, self._file_map[label]) for label in sel if label in self._file_map]
         original_count = len(paths)
-        self._log(f"Segmentos V2 se guardan en: {self._runs_dir / 'v2_segments'}")
+        self._log(f"Segmentos V2 se guardan en: {self._segmentador_v2.out_root}")
         source_segment_boxes: Dict[str, List[Tuple[int, int, int, int]]] = {}
         total_segments = 0
         for _label, src in paths:
             try:
                 key = self._seg_v2_source_key(src)
-                segments = self._get_segments_v2_for_source(src)
-                boxes = [tuple(int(v) for v in seg.bbox) for seg in segments]
+                boxes = list(self._get_segment_boxes_for_ocr_flow(src))
                 source_segment_boxes[key] = boxes
                 total_segments += len(boxes)
             except Exception:
@@ -10844,10 +18886,7 @@ class TranscriptorWindow(tk.Toplevel):
         self._progress_start(len(paths))
         self._set_loading_bar(True, "Estado: preparando OCR...")
         self._transcribing = True
-        try:
-            self.btn_transcribir.configure(state="disabled")
-        except Exception:
-            pass
+        self._set_main_flow_buttons_enabled(False)
         run_ctx: Dict[str, Optional[Path]] = {"path": None}
 
         def worker() -> None:
@@ -10863,7 +18902,15 @@ class TranscriptorWindow(tk.Toplevel):
                     return
 
             skip_done = bool(self.skip_done_var.get())
-            to_process = [(label, path) for (label, path) in paths if not (skip_done and label in self._transcribed_by_label)]
+            to_process = [
+                (label, path)
+                for (label, path) in paths
+                if not (
+                    skip_done
+                    and label in self._transcribed_by_label
+                    and self._has_reusable_transcription_cache(label)
+                )
+            ]
             total = len(to_process)
             if total == 0:
                 self.after(0, lambda: self._progress_start(0))
@@ -10878,8 +18925,41 @@ class TranscriptorWindow(tk.Toplevel):
                 )
                 return
 
+            if keep_state and not skip_done:
+                invalidated = self._invalidate_ocr_reprocess_state(label for (label, _path) in to_process)
+                if invalidated:
+                    self.after(
+                        0,
+                        lambda c=invalidated: self._log(
+                            f"Paso 2: cache OCR invalidado para {c} imagen(es) a reprocesar."
+                        ),
+                    )
+
+            if provider == PROVIDER_HF:
+                ensemble_enabled = self._is_hf_ocr_ensemble_enabled()
+                if ensemble_enabled:
+                    ensemble_models = self._resolve_hf_ocr_ensemble_models(model)
+                else:
+                    ensemble_models = [TRAINED_OCR_VISION_MODEL]
+                self.after(
+                    0,
+                    lambda enabled=ensemble_enabled, base=model, models=list(ensemble_models): self._log(
+                        "Paso 2: HF OCR "
+                        f"{'ensemble activo' if enabled else 'ensemble desactivado'} | "
+                        f"modelo base={base} | candidatos={', '.join(models) if models else '-'}"
+                    ),
+                )
+
             self.after(0, lambda t=total: self._progress_start(t))
-            self.after(0, lambda t=total: self._set_loading_bar(True, f"Estado: OCR crudo ({t} imagen(es))..."))
+            self.after(0, lambda t=total: self._set_loading_bar(True, f"Estado: OCR fiel ({t} imagen(es))..."))
+            batch_size, batch_pause_seconds = self._ocr_batch_settings()
+            if total > batch_size:
+                self.after(
+                    0,
+                    lambda t=total, bs=batch_size, ps=batch_pause_seconds: self._log(
+                        f"OCR fiel particionado: {t} imagen(es) en lotes de {bs}; pausa={ps:.0f}s."
+                    ),
+                )
             run_path = self._new_run_log_path(
                 provider=provider,
                 model=model,
@@ -10890,7 +18970,7 @@ class TranscriptorWindow(tk.Toplevel):
             self.after(
                 0,
                 lambda t=total, dm=detect_model, rp=str(run_path): self._log(
-                    f"Lote OCR crudo iniciado: {t} imagen(es) | detector={dm} | ocr_masking=off | segmentation_active=true | log={rp}"
+                    f"Lote OCR fiel iniciado: {t} imagen(es) | detector={dm} | ocr_masking=off | segmentation_active=true | log={rp}"
                 ),
             )
             self._append_run_event(
@@ -10910,11 +18990,19 @@ class TranscriptorWindow(tk.Toplevel):
             ok_count = 0
             err_count = 0
             ai_fallback_to_ocr = False
-
+            pending_incomplete_idx: Optional[int] = None
             for idx, (label, path) in enumerate(to_process, start=1):
+                self._pause_between_ocr_batches(
+                    idx=idx,
+                    total=total,
+                    batch_size=batch_size,
+                    pause_seconds=batch_pause_seconds,
+                    phase="OCR fiel",
+                )
                 self._ocr_merge_applied_by_label.pop(str(label), None)
                 self._direct_item_diagnostics_by_label.pop(str(label), None)
                 effective_provider = provider
+                effective_model = model
                 if ai_fallback_to_ocr and provider in (PROVIDER_OPENAI, PROVIDER_HF):
                     effective_provider = PROVIDER_OCR
 
@@ -10945,7 +19033,7 @@ class TranscriptorWindow(tk.Toplevel):
                 self.after(
                     0,
                     lambda l=label, p=effective_provider, i=idx, t=total: self._log(
-                        f"[{i}/{t}] OCR crudo ({p}): {l}"
+                        f"[{i}/{t}] OCR fiel ({p}): {l}"
                     ),
                 )
                 self._append_run_event(
@@ -10970,41 +19058,24 @@ class TranscriptorWindow(tk.Toplevel):
                     ocr_lang=(self.ocr_lang_var.get() or "spa+eng"),
                 )
                 if key_img_cls.is_key_image:
-                    self._direct_item_diagnostics_by_label[str(label)] = [
-                        {
-                            "status": "SKIPPED_KEY",
-                            "reason": key_img_cls.reason,
-                            "confidence": key_img_cls.confidence,
-                        }
-                    ]
-                    self._transcribed_by_label[str(label)] = "SKIPPED_KEY"
-                    self._set_merge_notes_for_label(str(label), [])
-                    self.after(0, self._refresh_image_list_colors)
                     self.after(
                         0,
                         lambda l=label, r=key_img_cls.reason, c=key_img_cls.confidence: self._log(
-                            f"{l}: imagen de claves/respuestas detectada antes de extraer (reason={r}, conf={c:.2f}); se ignora."
+                            f"{l}: preclasificada como imagen de claves/respuestas "
+                            f"(reason={r}, conf={c:.2f}); se verificara tras OCR fiel."
                         ),
                     )
-                    self._append_run_event(
-                        run_path,
-                        {
-                            "event": "image_skipped_key",
-                            "mode": "raw_only",
-                            "idx": idx,
-                            "label": label,
-                            "reason": key_img_cls.reason,
-                            "confidence": key_img_cls.confidence,
-                        },
-                    )
+                if key_img_cls.is_key_image and pending_incomplete_idx is not None:
                     self.after(
                         0,
-                        lambda i=idx, t=total, n=len(self._items), l=label: self._progress_update(
-                            i, t, n, current_label=l
+                        lambda l=label, r=key_img_cls.reason, c=key_img_cls.confidence: self._log(
+                            f"{l}: clasificada como clave (reason={r}, conf={c:.2f}), pero se procesa por continuidad pendiente."
                         ),
                     )
-                    continue
 
+                start_number_hint = self._next_item_number_hint(None, idx, current_label=label)
+                curso_now = (self.curso_var.get() or "").strip()
+                tema_now = (self.tema_var.get() or "").strip()
                 try:
                     if effective_provider == PROVIDER_OPENAI:
                         _ = self._transcribir_openai(
@@ -11014,31 +19085,82 @@ class TranscriptorWindow(tk.Toplevel):
                             retries=retries,
                             label=label,
                             path=path,
+                            start_n=start_number_hint,
                         )
                     elif effective_provider == PROVIDER_HF:
-                        _ = self._transcribir_huggingface(
-                            model=model,
-                            timeout_s=timeout_s,
-                            retries=retries,
-                            label=label,
-                            path=path,
-                        )
+                        if self._is_hf_ocr_ensemble_enabled():
+                            _selected_text, selected_model = self._transcribir_huggingface_best_candidate(
+                                model=effective_model,
+                                timeout_s=timeout_s,
+                                retries=retries,
+                                label=label,
+                                path=path,
+                                start_n=start_number_hint,
+                                curso=curso_now,
+                                tema=tema_now,
+                            )
+                            effective_model = selected_model
+                        else:
+                            _ = self._transcribir_huggingface(
+                                model=effective_model,
+                                timeout_s=timeout_s,
+                                retries=retries,
+                                label=label,
+                                path=path,
+                                start_n=start_number_hint,
+                            )
                     else:
-                        _ = self._transcribir_local_ocr(path, label=label)
+                        _ = self._transcribir_local_ocr(path, label=label, start_n=start_number_hint)
                 except Exception as trans_exc:
+                    trans_reason = str(trans_exc or "")
+                    trans_reason_lower = trans_reason.lower()
+                    can_continue_without_text = bool(
+                        pending_incomplete_idx is not None and segment_boxes
+                    )
+                    looks_like_textless_image = any(
+                        token in trans_reason_lower
+                        for token in (
+                            "sin texto",
+                            "texto vacio",
+                            "texto vacío",
+                            "salida invalida",
+                            "salida inválida",
+                            "devolvio salida vacia",
+                            "devolvió salida vacía",
+                            "echo de instrucciones",
+                        )
+                    )
                     if effective_provider in (PROVIDER_OPENAI, PROVIDER_HF):
-                        reason = str(trans_exc)
+                        reason = trans_reason
+                        raw_hint_after_failure = str(self._ocr_raw_first_by_label.get(str(label), "") or "").strip()
+                        provider_config_error = any(
+                            token in trans_reason_lower
+                            for token in (
+                                "401",
+                                "403",
+                                "token invalido",
+                                "token inválido",
+                                "falta hf token",
+                                "not a chat model",
+                                "no soporta chat",
+                                "permiso",
+                                "permission",
+                                "invalid username or password",
+                            )
+                        )
                         recovered_with_model_fallback = False
                         # Auto fallback de modelo HF cuando el seleccionado no existe/soporta.
                         if (
+                            not self._is_hf_ocr_ensemble_enabled()
+                            and
                             effective_provider == PROVIDER_HF
                             and self._is_hf_model_unavailable_error(trans_exc)
-                            and model != DEFAULT_HF_VISION_MODEL
+                            and effective_model != DEFAULT_HF_VISION_MODEL
                         ):
                             try:
                                 self.after(
                                     0,
-                                    lambda l=label, m=model, fb=DEFAULT_HF_VISION_MODEL: self._log(
+                                    lambda l=label, m=effective_model, fb=DEFAULT_HF_VISION_MODEL: self._log(
                                         f"{l}: modelo HF no disponible ({m}). Reintento automatico con {fb}."
                                     ),
                                 )
@@ -11048,20 +19170,64 @@ class TranscriptorWindow(tk.Toplevel):
                                     retries=retries,
                                     label=label,
                                     path=path,
+                                    start_n=start_number_hint,
                                 )
                                 self.after(
                                     0,
                                     lambda l=label, fb=DEFAULT_HF_VISION_MODEL: self._log(
-                                        f"{l}: OCR crudo registrado con fallback de modelo ({fb})."
+                                    f"{l}: OCR fiel registrado con fallback de modelo ({fb})."
                                     ),
                                 )
                                 effective_provider = PROVIDER_HF
+                                effective_model = DEFAULT_HF_VISION_MODEL
                                 recovered_with_model_fallback = True
                             except Exception as fallback_model_exc:
                                 reason = f"{reason} | fallback_model={fallback_model_exc}"
-                                self._ocr_raw_first_by_label[str(label)] = f"[ERROR_IA] {reason}"
-                                err_count += 1
-                                continue
+                        if (
+                            not recovered_with_model_fallback
+                            and not self._is_hf_ocr_ensemble_enabled()
+                            and effective_provider == PROVIDER_HF
+                            and not provider_config_error
+                        ):
+                            for fb_model in self._resolve_hf_ocr_fallback_models(effective_model)[:3]:
+                                try:
+                                    self.after(
+                                        0,
+                                        lambda l=label, m=effective_model, fb=fb_model: self._log(
+                                            f"{l}: OCR remoto alterno {m} -> {fb}."
+                                        ),
+                                    )
+                                    _ = self._transcribir_huggingface(
+                                        model=fb_model,
+                                        timeout_s=timeout_s,
+                                        retries=retries,
+                                        label=label,
+                                        path=path,
+                                        start_n=start_number_hint,
+                                    )
+                                    self._append_run_event(
+                                        run_path,
+                                        {
+                                            "event": "provider_fallback",
+                                            "mode": "raw_only",
+                                            "idx": idx,
+                                            "label": label,
+                                            "from": effective_model,
+                                            "to": fb_model,
+                                            "reason": reason,
+                                        },
+                                    )
+                                    self.after(
+                                        0,
+                                        lambda l=label, fb=fb_model: self._log(
+                                            f"{l}: OCR fiel registrado con fallback remoto ({fb})."
+                                        ),
+                                    )
+                                    effective_model = fb_model
+                                    recovered_with_model_fallback = True
+                                    break
+                                except Exception as fallback_model_exc:
+                                    reason = f"{reason} | fallback_model[{fb_model}]={fallback_model_exc}"
                         if recovered_with_model_fallback:
                             pass
                         elif self._is_credit_depleted_error(trans_exc):
@@ -11079,21 +19245,102 @@ class TranscriptorWindow(tk.Toplevel):
                                 ),
                             )
                         if not recovered_with_model_fallback:
-                            self._append_run_event(
-                                run_path,
-                                {
-                                    "event": "provider_fallback",
-                                    "mode": "raw_only",
-                                    "idx": idx,
-                                    "label": label,
-                                    "from": effective_provider,
-                                    "to": "none",
-                                    "reason": reason,
-                                },
-                            )
-                            self._ocr_raw_first_by_label[str(label)] = f"[ERROR_IA] {reason}"
-                            err_count += 1
-                            continue
+                            local_ocr_text = ""
+                            local_ocr_exc: Optional[Exception] = None
+                            local_ocr_ok = False
+                            local_ocr_note = ""
+                            previous_raw_text = str(self._ocr_raw_first_by_label.get(str(label), "") or "")
+                            try:
+                                local_ocr_text = str(
+                                    self._transcribir_local_ocr(path, label=label, start_n=start_number_hint) or ""
+                                ).strip()
+                                local_ocr_ok, local_ocr_note = self._should_accept_local_ocr_fallback(
+                                    text=local_ocr_text,
+                                    start_n=start_number_hint,
+                                    curso=curso_now,
+                                    tema=tema_now,
+                                )
+                            except Exception as local_exc:
+                                local_ocr_exc = local_exc
+                            if local_ocr_text and local_ocr_ok:
+                                self._append_run_event(
+                                    run_path,
+                                    {
+                                        "event": "provider_fallback",
+                                        "mode": "raw_only",
+                                        "idx": idx,
+                                        "label": label,
+                                        "from": effective_provider,
+                                        "to": PROVIDER_OCR,
+                                        "reason": reason,
+                                    },
+                                )
+                                self._ocr_raw_first_by_label[str(label)] = local_ocr_text
+                                self.after(
+                                    0,
+                                    lambda l=label, n=local_ocr_note: self._log(
+                                        f"{l}: fallback automatico a OCR local ({n})."
+                                    ),
+                                )
+                                effective_provider = PROVIDER_OCR
+                            else:
+                                self._ocr_raw_first_by_label[str(label)] = previous_raw_text
+                            if local_ocr_text and not local_ocr_ok:
+                                self.after(
+                                    0,
+                                    lambda l=label, n=local_ocr_note: self._log(
+                                        f"{l}: OCR local descartado por baja calidad ({n})."
+                                    ),
+                                )
+                            if (not local_ocr_ok) and can_continue_without_text and (
+                                looks_like_textless_image
+                                or (
+                                    not raw_hint_after_failure
+                                    and not provider_config_error
+                                )
+                            ):
+                                self._ocr_raw_first_by_label[str(label)] = "[SIN TEXTO] Continuacion grafica sin texto OCR."
+                                self.after(
+                                    0,
+                                    lambda l=label: self._log(
+                                        f"{l}: se continua con segmentos aunque no haya texto OCR util."
+                                    ),
+                                )
+                                self._append_run_event(
+                                    run_path,
+                                    {
+                                        "event": "image_textless_continue",
+                                        "mode": "raw_only",
+                                        "idx": idx,
+                                        "label": label,
+                                        "reason": reason,
+                                        "segment_count": len(segment_boxes),
+                                    },
+                                )
+                            elif not local_ocr_ok:
+                                self._append_run_event(
+                                    run_path,
+                                    {
+                                        "event": "provider_fallback",
+                                        "mode": "raw_only",
+                                        "idx": idx,
+                                        "label": label,
+                                        "from": effective_provider,
+                                        "to": "none",
+                                        "reason": (
+                                            f"{reason} | ocr_local={local_ocr_exc}"
+                                            if local_ocr_exc is not None
+                                            else reason
+                                        ),
+                                    },
+                                )
+                                self._ocr_raw_first_by_label[str(label)] = (
+                                    f"[ERROR_IA] {reason} | ocr_local={local_ocr_exc}"
+                                    if local_ocr_exc is not None
+                                    else f"[ERROR_IA] {reason}"
+                                )
+                                err_count += 1
+                                continue
                     else:
                         self._ocr_raw_first_by_label[str(label)] = f"[ERROR] {trans_exc}"
                         self.after(0, lambda e=trans_exc, l=label: self._log(f"Error transcripcion {l}: {e}"))
@@ -11114,30 +19361,12 @@ class TranscriptorWindow(tk.Toplevel):
                 if not str(self._ocr_raw_first_by_label.get(str(label), "") or "").strip():
                     self._ocr_raw_first_by_label[str(label)] = "[SIN TEXTO] El modelo devolvio salida vacia."
                 raw_for_label = str(self._ocr_raw_first_by_label.get(str(label), "") or "")
-                ok_items, err_items = self._ingest_direct_ocr_output_for_label(
-                    label=str(label),
-                    path=path,
-                    raw_output=raw_for_label,
-                    image_index=idx,
-                    provider=effective_provider,
-                    model=model,
-                    timeout_s=timeout_s,
-                    retries=retries,
-                    tag_mode=tag_mode,
-                    catalog=catalog,
-                    openai_client=client if effective_provider == PROVIDER_OPENAI else None,  # type: ignore[arg-type]
-                    run_id=run_id,
-                    bbox_norm=bbox_norm,
-                    has_figure=has_figure,
-                    detector_source=detector_source,
-                    segment_boxes=segment_boxes,
-                )
-                label_diagnostics = list(self._direct_item_diagnostics_by_label.get(str(label), []) or [])
-                skipped_key = any(str(d.get("status", "")).upper() == "SKIPPED_KEY" for d in label_diagnostics)
-                self._transcribed_by_label[str(label)] = "RAW_OK"
+                self._ocr_structured_by_label.pop(str(label), None)
+                self._direct_item_diagnostics_by_label.pop(str(label), None)
                 self._set_merge_notes_for_label(str(label), [])
+                self._transcribed_by_label[str(label)] = "RAW_OK" if not raw_for_label.startswith("[ERROR") else "RAW_ERROR"
+                self._sync_ocr_label_to_golden(str(label))
                 self.after(0, self._refresh_image_list_colors)
-                self.after(0, self._render_output_from_items)
                 self.after(
                     0,
                     lambda i=idx, t=total, n=len(self._items), l=label: self._progress_update(
@@ -11146,8 +19375,8 @@ class TranscriptorWindow(tk.Toplevel):
                 )
                 self.after(
                     0,
-                    lambda l=label, o=ok_items, e=err_items, sk=skipped_key: self._log(
-                        f"{l}: OCR crudo registrado. items_directos_ok={o}, items_error_formato={e}, skipped_key={sk}"
+                    lambda l=label: self._log(
+                        f"{l}: OCR fiel registrado."
                     ),
                 )
                 self._append_run_event(
@@ -11158,21 +19387,24 @@ class TranscriptorWindow(tk.Toplevel):
                         "run_id": run_id,
                         "idx": idx,
                         "label": label,
-                        "items_ok_direct": ok_items,
-                        "items_error_formato": err_items,
+                        "ocr_saved": bool(raw_for_label and not raw_for_label.startswith("[ERROR")),
                         "detector_source": detector_source,
                         "detector_has_figure": bool(has_figure),
-                        "skipped_key": bool(skipped_key),
+                        "raw_length": len(raw_for_label),
                     },
                 )
-                if not skipped_key:
+                if raw_for_label and not raw_for_label.startswith("[ERROR"):
                     ok_count += 1
 
+            self.after(
+                0,
+                lambda: self._log("OCR fiel completado. Usa 'Paso 3: JSON estructurado' para convertirlo a items."),
+            )
             self.after(0, self._refresh_image_list_colors)
             self.after(
                 0,
                 lambda o=ok_count, e=err_count, t=total: self._log(
-                    f"OCR crudo completado. Lote={t}, OK={o}, Errores={e}."
+                    f"OCR fiel completado. Lote={t}, OK={o}, Errores={e}."
                 ),
             )
             self.after(
@@ -11215,10 +19447,578 @@ class TranscriptorWindow(tk.Toplevel):
             finally:
                 def _unlock() -> None:
                     self._transcribing = False
+                    self._set_main_flow_buttons_enabled(True)
+                    self._set_loading_bar(False, "Estado: inactivo")
+
+                self.after(0, _unlock)
+
+        threading.Thread(target=safe_worker, daemon=True).start()
+
+    def _generar_json_estructurado_async(self) -> None:
+        if self._transcribing:
+            messagebox.showinfo("JSON estructurado", "Ya hay un proceso en curso.")
+            return
+
+        total_list = self.list_files.size()
+        selected_indices = list(self.list_files.curselection())
+        if selected_indices:
+            sel = [self.list_files.get(i) for i in selected_indices]
+            selected_scope: Optional[Set[str]] = set(sel)
+        else:
+            sel = [self.list_files.get(i) for i in range(total_list)]
+            selected_scope = None
+        if not sel:
+            messagebox.showwarning("JSON estructurado", "Agrega al menos una imagen.")
+            return
+
+        if selected_scope is not None:
+            self._log(f"Paso 3 (JSON estructurado): seleccion actual ({len(sel)} imagen(es)).")
+        else:
+            self._log(f"Paso 3 (JSON estructurado): lote completo ({len(sel)} imagen(es)).")
+
+        review_sources = self._collect_review_sources(selected_labels=selected_scope)
+        if review_sources:
+            paths = [(label, src) for (_idx, label, src) in review_sources]
+        else:
+            paths = [(label, self._file_map[label]) for label in sel if label in self._file_map]
+
+        available_paths = [
+            (label, path)
+            for (label, path) in paths
+            if str(self._ocr_raw_first_by_label.get(str(label), "") or "").strip()
+        ]
+        if not available_paths:
+            messagebox.showwarning(
+                "Paso 3 bloqueado",
+                "Aun no hay OCR fiel disponible para las imagenes seleccionadas. Ejecuta primero 'Paso 2: OCR fiel'.",
+            )
+            return
+
+        if not self._refresh_segmentation_done_state(selected_labels=selected_scope):
+            reviewed, total_review, pending = self._segmentation_progress(selected_labels=selected_scope)
+            self._log(f"Paso 3 bloqueado: completa Paso 1 en el alcance actual ({reviewed}/{total_review}).")
+            if pending:
+                preview = ", ".join(pending[:3])
+                extra = "" if len(pending) <= 3 else f" (+{len(pending)-3} mas)"
+                self._log(f"Pendientes: {preview}{extra}")
+            messagebox.showwarning(
+                "Paso 3 bloqueado",
+                "Completa la segmentacion (Paso 1) antes de ejecutar JSON estructurado.",
+            )
+            return
+        else:
+            reviewed, total_review, _pending = self._segmentation_progress(selected_labels=selected_scope)
+            self._log(f"Segmentacion completa: {reviewed}/{total_review}.")
+
+        provider = self._normalize_provider_label(self.provider_var.get() or FIXED_PROVIDER)
+        model = (self.model_var.get() or "").strip() or self._default_vision_model_for_provider(provider)
+        render_provider = PROVIDER_OCR
+        render_model = ""
+        render_retries = 0
+        render_tag_mode = TAG_MODE_MANUAL
+        detect_model = self._resolve_bbox_detector_model_path() or "segmentacion_v2_fallback"
+        try:
+            timeout_s = int(self.timeout_var.get())
+        except Exception:
+            timeout_s = 180
+        timeout_s = max(30, min(timeout_s, 600))
+        try:
+            retries = int(self.retries_var.get())
+        except Exception:
+            retries = 2
+        retries = max(0, min(retries, 5))
+        run_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
+        skip_done = bool(self.skip_done_var.get())
+        to_process = [
+            (label, path)
+            for (label, path) in available_paths
+            if not (skip_done and str(self._ocr_structured_by_label.get(str(label), "") or "").strip())
+        ]
+        if not to_process:
+            messagebox.showinfo(
+                "Salida LaTeX",
+                "No hay nuevas imagenes para convertir.\n"
+                + ("(Tip: desmarca 'Omitir ya transcritos' para reprocesar.)" if skip_done else ""),
+            )
+            return
+
+        self._progress_start(len(to_process))
+        self._set_loading_bar(True, "Estado: JSON estructurado...")
+        self._transcribing = True
+        self._set_main_flow_buttons_enabled(False)
+        run_ctx: Dict[str, Optional[Path]] = {"path": None}
+
+        def worker() -> None:
+            total = len(to_process)
+            run_path = self._new_run_log_path(
+                provider=provider,
+                model=model,
+                detect_model=detect_model,
+                total=total,
+            )
+            run_ctx["path"] = run_path
+            self.after(
+                0,
+                lambda t=total, rp=str(run_path): self._log(
+                    f"Lote JSON estructurado iniciado: {t} imagen(es) | log={rp}"
+                ),
+            )
+            self._append_run_event(
+                run_path,
+                {
+                    "event": "run_started",
+                    "mode": "structured_only",
+                    "run_id": run_id,
+                    "total": total,
+                    "provider": provider,
+                    "model": model,
+                },
+            )
+
+            ok_count = 0
+            err_count = 0
+            for idx, (label, path) in enumerate(to_process, start=1):
+                raw_for_label = str(self._ocr_raw_first_by_label.get(str(label), "") or "").strip()
+                if not raw_for_label or raw_for_label.startswith("[ERROR"):
+                    self.after(0, lambda l=label: self._log(f"{l}: se omite JSON estructurado porque no hay OCR fiel valido."))
+                    err_count += 1
+                    continue
+                start_number_hint = self._next_item_number_hint(None, idx, current_label=label)
+                curso_now = (self.curso_var.get() or "").strip()
+                tema_now = (self.tema_var.get() or "").strip()
+                self.after(0, lambda l=label, i=idx, t=total: self._log(f"[{i}/{t}] JSON estructurado: {l}"))
+                _pipeline, structured_text, parsed_structured_items, structured_exc = self._generate_structured_ocr_for_label(
+                    label=str(label),
+                    path=path,
+                    raw_output=raw_for_label,
+                    provider=provider,
+                    model=model,
+                    timeout_s=timeout_s,
+                    retries=retries,
+                    start_number_hint=start_number_hint,
+                    curso_now=curso_now,
+                    tema_now=tema_now,
+                    prefer_cached=False,
+                )
+                ok = bool(structured_text.strip())
+                self._transcribed_by_label[str(label)] = "STRUCTURED_READY" if ok else "RAW_OK"
+                self.after(
+                    0,
+                    lambda l=label, cnt=len(parsed_structured_items), ok=ok, exc=structured_exc: self._log(
+                        f"{l}: JSON estructurado {'registrado' if ok else 'fallo'} "
+                        f"(items={cnt}, detalle={exc if exc and not ok else 'ok'})."
+                    ),
+                )
+                self._append_run_event(
+                    run_path,
+                    {
+                        "event": "image_completed",
+                        "mode": "structured_only",
+                        "run_id": run_id,
+                        "idx": idx,
+                        "label": label,
+                        "structured_ok": ok,
+                        "structured_items_count": len(parsed_structured_items),
+                        "structured_length": len(structured_text or ""),
+                        "error": str(structured_exc) if (structured_exc is not None and not ok) else "",
+                    },
+                )
+                if ok:
+                    ok_count += 1
+                else:
+                    err_count += 1
+                self.after(0, lambda i=idx, t=total, n=len(self._items), l=label: self._progress_update(i, t, n, current_label=l))
+
+            self.after(0, self._refresh_image_list_colors)
+            self.after(0, lambda: self._log("JSON estructurado completado. Usa 'Paso 4: Salida LaTeX' para convertirlo a items."))
+            self.after(0, lambda o=ok_count, e=err_count, t=total: self._log(f"JSON estructurado completado. Lote={t}, OK={o}, Errores={e}."))
+            self.after(0, lambda o=ok_count, e=err_count, t=total: self._progress_finish(ok=o, errors=e, total_images=t, detected_items=len(self._items)))
+            self._append_run_event(
+                run_path,
+                {
+                    "event": "run_completed",
+                    "mode": "structured_only",
+                    "run_id": run_id,
+                    "total": total,
+                    "ok": ok_count,
+                    "errors": err_count,
+                    "items_total_estado": len(self._items),
+                },
+            )
+
+        def safe_worker() -> None:
+            try:
+                worker()
+            except Exception as exc:
+                self.after(0, lambda e=exc: self._log(f"Fallo inesperado del lote JSON estructurado: {e}"))
+                if run_ctx.get("path") is not None:
                     try:
-                        self.btn_transcribir.configure(state="normal")
+                        self._append_run_event(
+                            run_ctx["path"],  # type: ignore[arg-type]
+                            {
+                                "event": "run_fatal_error",
+                                "mode": "structured_only",
+                                "error": str(exc),
+                                "traceback": traceback.format_exc(),
+                            },
+                        )
                     except Exception:
                         pass
+            finally:
+                def _unlock() -> None:
+                    self._transcribing = False
+                    self._set_main_flow_buttons_enabled(True)
+                    self._set_loading_bar(False, "Estado: inactivo")
+
+                self.after(0, _unlock)
+
+        threading.Thread(target=safe_worker, daemon=True).start()
+
+    def _estructurar_desde_ocr_async(self) -> None:
+        if self._transcribing:
+            messagebox.showinfo("Salida LaTeX", "Ya hay un proceso en curso.")
+            return
+
+        total_list = self.list_files.size()
+        selected_indices = list(self.list_files.curselection())
+        if selected_indices:
+            sel = [self.list_files.get(i) for i in selected_indices]
+            selected_scope: Optional[Set[str]] = set(sel)
+        else:
+            sel = [self.list_files.get(i) for i in range(total_list)]
+            selected_scope = None
+        if not sel:
+            messagebox.showwarning("Salida LaTeX", "Agrega al menos una imagen.")
+            return
+
+        keep_state = messagebox.askyesnocancel(
+            "Paso 4 - estado previo",
+            "¿Conservar items/salida previos?\n\n"
+            "Si = conservar items/salida previos\n"
+            "No = limpiar items/salida previos, pero conservar JSON estructurado\n"
+            "Cancelar = no ejecutar",
+            default=messagebox.YES,
+        )
+        if keep_state is None:
+            return
+        if keep_state is False:
+            self._items.clear()
+            self._training_pairs_by_item.clear()
+            self._geometry_pass_by_label.clear()
+            self._geometry_pass_payload_by_label.clear()
+            self._ocr_merge_applied_by_label.clear()
+            self._direct_item_diagnostics_by_label.clear()
+            self._render_output_from_items()
+            self._log(
+                "Paso 4: estado previo limpiado "
+                "(_items/salida/training_pairs/cache_render), conservando JSON estructurado."
+            )
+        else:
+            self._log("Paso 4: estado previo conservado (_items/salida).")
+
+        if selected_scope is not None:
+            self._log(f"Paso 4 (Salida LaTeX): seleccion actual ({len(sel)} imagen(es)).")
+        else:
+            self._log(f"Paso 4 (Salida LaTeX): lote completo ({len(sel)} imagen(es)).")
+
+        review_sources = self._collect_review_sources(selected_labels=selected_scope)
+        if review_sources:
+            paths = [(label, src) for (_idx, label, src) in review_sources]
+        else:
+            paths = [(label, self._file_map[label]) for label in sel if label in self._file_map]
+
+        available_paths = [
+            (label, path)
+            for (label, path) in paths
+            if str(self._ocr_raw_first_by_label.get(str(label), "") or "").strip()
+        ]
+        if not available_paths:
+            messagebox.showwarning(
+                "Paso 4 bloqueado",
+                "Aun no hay OCR fiel disponible para las imagenes seleccionadas. Ejecuta primero 'Paso 2: OCR fiel'.",
+            )
+            return
+
+        available_structured = [
+            (label, path)
+            for (label, path) in available_paths
+            if str(self._ocr_structured_by_label.get(str(label), "") or "").strip()
+        ]
+        if not available_structured:
+            self._log("Paso 4 bloqueado: aun no hay JSON estructurado valido en el alcance actual.")
+            messagebox.showwarning(
+                "Paso 4 bloqueado",
+                "Aun no hay JSON estructurado disponible para las imagenes seleccionadas. Ejecuta primero 'Paso 3: JSON estructurado'.",
+            )
+            return
+
+        if not self._refresh_segmentation_done_state(selected_labels=selected_scope):
+            reviewed, total_review, pending = self._segmentation_progress(selected_labels=selected_scope)
+            self._log(f"Paso 4 bloqueado: completa Paso 1 en el alcance actual ({reviewed}/{total_review}).")
+            if pending:
+                preview = ", ".join(pending[:3])
+                extra = "" if len(pending) <= 3 else f" (+{len(pending)-3} mas)"
+                self._log(f"Pendientes: {preview}{extra}")
+            messagebox.showwarning(
+                "Paso 4 bloqueado",
+                "Completa la segmentacion (Paso 1) antes de ejecutar Salida LaTeX.",
+            )
+            return
+        else:
+            reviewed, total_review, _pending = self._segmentation_progress(selected_labels=selected_scope)
+            self._log(f"Segmentacion completa: {reviewed}/{total_review}.")
+
+        provider = self._normalize_provider_label(self.provider_var.get() or FIXED_PROVIDER)
+        model = (self.model_var.get() or "").strip() or self._default_vision_model_for_provider(provider)
+        render_provider = PROVIDER_OCR
+        render_model = ""
+        render_retries = 0
+        render_tag_mode = TAG_MODE_MANUAL
+        detect_model = self._resolve_bbox_detector_model_path() or "segmentacion_v2_fallback"
+        try:
+            timeout_s = int(self.timeout_var.get())
+        except Exception:
+            timeout_s = 180
+        timeout_s = max(30, min(timeout_s, 600))
+        db_name = (self.db_name_var.get() or "").strip()
+        catalog = self._get_catalog(db_name)
+        run_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
+
+        # Paso 4 renderiza el JSON estructurado. Tener JSON cacheado significa
+        # "listo para renderizar", no "ya renderizado"; por eso no aplicamos
+        # el filtro global de "Omitir ya transcritos" aqui.
+        to_process = list(available_structured)
+        if not to_process:
+            messagebox.showinfo(
+                "Salida LaTeX",
+                "No hay imagenes con JSON estructurado para renderizar.",
+            )
+            return
+
+        source_segment_boxes: Dict[str, List[Tuple[int, int, int, int]]] = {}
+        for _label, src in to_process:
+            key = self._seg_v2_source_key(src)
+            try:
+                source_segment_boxes[key] = list(self._get_segment_boxes_for_ocr_flow(src))
+            except Exception:
+                source_segment_boxes[key] = []
+
+        self._progress_start(len(to_process))
+        self._set_loading_bar(True, "Estado: Salida LaTeX...")
+        self._transcribing = True
+        self._set_main_flow_buttons_enabled(False)
+        run_ctx: Dict[str, Optional[Path]] = {"path": None}
+
+        def worker() -> None:
+            client = None
+
+            total = len(to_process)
+            run_path = self._new_run_log_path(
+                provider=provider,
+                model=model,
+                detect_model=detect_model,
+                total=total,
+            )
+            run_ctx["path"] = run_path
+            self.after(
+                0,
+                lambda t=total, rp=str(run_path): self._log(
+                    f"Lote Salida LaTeX iniciado: {t} imagen(es) | log={rp}"
+                ),
+            )
+            self.after(
+                0,
+                lambda: self._log(
+                    "Paso 4: modo reglas activo. Se usa el JSON estructurado cacheado; no se llama a OpenAI/HuggingFace."
+                ),
+            )
+            self._append_run_event(
+                run_path,
+                {
+                    "event": "run_started",
+                    "mode": "render_from_structured",
+                    "run_id": run_id,
+                    "total": total,
+                    "provider": render_provider,
+                    "model": render_model,
+                    "rules_only": True,
+                    "source_provider": provider,
+                    "source_model": model,
+                },
+            )
+
+            ok_count = 0
+            err_count = 0
+            pending_incomplete_idx: Optional[int] = self._find_last_incomplete_item_idx()
+            if pending_incomplete_idx is not None:
+                pending_num = self._pending_item_number(pending_incomplete_idx, fallback=0)
+                self.after(
+                    0,
+                    lambda n=pending_num: self._log(
+                        f"Paso 4: se retoma item incompleto previo {n} para continuar su fusion."
+                    ),
+                )
+
+            for idx, (label, path) in enumerate(to_process, start=1):
+                structured_for_label = str(self._ocr_structured_by_label.get(str(label), "") or "").strip()
+                if not structured_for_label:
+                    self.after(
+                        0,
+                        lambda l=label: self._log(
+                            f"{l}: se omite render porque no hay JSON estructurado valido."
+                        ),
+                    )
+                    err_count += 1
+                    continue
+
+                raw_for_label = str(self._ocr_raw_first_by_label.get(str(label), "") or "").strip()
+                if not raw_for_label:
+                    raw_for_label = structured_for_label
+
+                segment_boxes = list(source_segment_boxes.get(self._seg_v2_source_key(path), []))
+                bbox_norm: Optional[Tuple[float, float, float, float]] = None
+                bbox_conf = 0.0
+                has_figure = False
+                detector_source = "none"
+                if self.detect_figure_var.get():
+                    bbox_norm, bbox_conf, has_figure, detector_source = self._detect_figure_bbox_separate(
+                        path=path,
+                        segment_boxes=segment_boxes,
+                    )
+                    self.after(
+                        0,
+                        lambda l=label, h=has_figure, c=bbox_conf, s=detector_source: self._log(
+                            f"{l}: detector_bbox={s} has_figure={h} conf={c:.2f}"
+                        ),
+                    )
+
+                self.after(
+                    0,
+                    lambda l=label, i=idx, t=total: self._log(
+                        f"[{i}/{t}] Salida LaTeX: {l}"
+                    ),
+                )
+                ok_items, err_items, pending_incomplete_idx, merge_notes = self._ingest_direct_ocr_output_for_label(
+                    label=str(label),
+                    path=path,
+                    raw_output=raw_for_label,
+                    image_index=idx,
+                    provider=render_provider,
+                    model=render_model,
+                    timeout_s=timeout_s,
+                    retries=render_retries,
+                    tag_mode=render_tag_mode,
+                    catalog=catalog,
+                    openai_client=None,
+                    run_id=run_id,
+                    bbox_norm=bbox_norm,
+                    has_figure=has_figure,
+                    detector_source=detector_source,
+                    segment_boxes=segment_boxes,
+                    pending_incomplete_idx=pending_incomplete_idx,
+                )
+                label_diagnostics = list(self._direct_item_diagnostics_by_label.get(str(label), []) or [])
+                skipped_key = any(str(d.get("status", "")).upper() == "SKIPPED_KEY" for d in label_diagnostics)
+                self._transcribed_by_label[str(label)] = "SKIPPED_KEY" if skipped_key else "STRUCTURED_OK"
+                self._set_merge_notes_for_label(str(label), merge_notes)
+                self.after(0, self._refresh_image_list_colors)
+                self.after(
+                    0,
+                    lambda i=idx, t=total, n=len(self._items), l=label: self._progress_update(
+                        i, t, n, current_label=l
+                    ),
+                )
+                self.after(
+                    0,
+                    lambda l=label, o=ok_items, e=err_items, sk=skipped_key: self._log(
+                        f"{l}: salida LaTeX registrada. items_ok={o}, items_error_formato={e}, skipped_key={sk}"
+                    ),
+                )
+                self._append_run_event(
+                    run_path,
+                    {
+                        "event": "image_completed",
+                        "mode": "render_from_structured",
+                        "run_id": run_id,
+                        "idx": idx,
+                        "label": label,
+                        "items_ok_direct": ok_items,
+                        "items_error_formato": err_items,
+                        "detector_source": detector_source,
+                        "detector_has_figure": bool(has_figure),
+                        "skipped_key": bool(skipped_key),
+                        "rules_only": True,
+                    },
+                )
+                if not skipped_key:
+                    ok_count += 1
+
+            recovered_missing_items = self._recover_missing_items_from_structured_scope(
+                labels=[str(label) for (label, _path) in to_process],
+                timeout_s=timeout_s,
+            )
+            if recovered_missing_items:
+                self.after(
+                    0,
+                    lambda nums=list(recovered_missing_items): self._log(
+                        "Salida LaTeX: reconciliacion final recupero item(s) faltante(s) desde structured -> "
+                        + ", ".join(str(v) for v in nums)
+                    ),
+                )
+
+            self.after(0, self._render_output_from_items)
+            self.after(
+                0,
+                lambda: self._log("Salida LaTeX: salida final consolidada al cierre del lote."),
+            )
+            self.after(0, self._refresh_image_list_colors)
+            self.after(
+                0,
+                lambda o=ok_count, e=err_count, t=total: self._log(
+                    f"Salida LaTeX completada. Lote={t}, OK={o}, Errores={e}."
+                ),
+            )
+            self.after(
+                0,
+                lambda o=ok_count, e=err_count, t=total: self._progress_finish(
+                    ok=o, errors=e, total_images=t, detected_items=len(self._items)
+                ),
+            )
+            self._append_run_event(
+                run_path,
+                {
+                    "event": "run_completed",
+                    "mode": "render_from_structured",
+                    "run_id": run_id,
+                    "total": total,
+                    "ok": ok_count,
+                    "errors": err_count,
+                    "items_total_estado": len(self._items),
+                },
+            )
+
+        def safe_worker() -> None:
+            try:
+                worker()
+            except Exception as exc:
+                self.after(0, lambda e=exc: self._log(f"Fallo inesperado del lote Salida LaTeX: {e}"))
+                if run_ctx.get("path") is not None:
+                    try:
+                        self._append_run_event(
+                            run_ctx["path"],  # type: ignore[arg-type]
+                            {
+                                "event": "run_fatal_error",
+                                "mode": "render_from_structured",
+                                "error": str(exc),
+                                "traceback": traceback.format_exc(),
+                            },
+                        )
+                    except Exception:
+                        pass
+            finally:
+                def _unlock() -> None:
+                    self._transcribing = False
+                    self._set_main_flow_buttons_enabled(True)
                     self._set_loading_bar(False, "Estado: inactivo")
 
                 self.after(0, _unlock)
@@ -11226,7 +20026,7 @@ class TranscriptorWindow(tk.Toplevel):
         threading.Thread(target=safe_worker, daemon=True).start()
 
     def _transcribir_async(self) -> None:
-        # Modo actual: vision directa + validacion/formato por item.
+        # Paso 2: OCR fiel. La estructuracion corre en un paso separado.
         self._transcribir_async_raw_only()
         return
 
@@ -11237,7 +20037,7 @@ class TranscriptorWindow(tk.Toplevel):
         self.provider_var.set(FIXED_PROVIDER)
         current_model = (self.model_var.get() or "").strip()
         if current_model not in HF_MODELS:
-            self.model_var.set(DEFAULT_HF_VISION_MODEL)
+            self.model_var.set(TRAINED_OCR_VISION_MODEL)
         current_format = (self.format_model_var.get() or "").strip()
         if current_format not in HF_FORMAT_MODELS:
             self.format_model_var.set(DEFAULT_HF_FORMAT_MODEL)
@@ -11284,7 +20084,7 @@ class TranscriptorWindow(tk.Toplevel):
             self._log(f"Segmentacion completa: {reviewed}/{total_review}.")
 
         provider = FIXED_PROVIDER
-        model = (self.model_var.get() or "").strip() or DEFAULT_HF_VISION_MODEL
+        model = (self.model_var.get() or "").strip() or TRAINED_OCR_VISION_MODEL
         detect_model = self._resolve_detect_model(provider, model)
         hf_native_ocr_mode = False
         tag_mode = (self.tag_mode_var.get() or FIXED_TAG_MODE).strip()
@@ -11306,7 +20106,7 @@ class TranscriptorWindow(tk.Toplevel):
         else:
             paths = [(label, self._file_map[label]) for label in sel if label in self._file_map]
         original_count = len(paths)
-        self._log(f"Segmentos V2 se guardan en: {self._runs_dir / 'v2_segments'}")
+        self._log(f"Segmentos V2 se guardan en: {self._segmentador_v2.out_root}")
         source_segment_boxes: Dict[str, List[Tuple[int, int, int, int]]] = {}
         total_segments = 0
         for _label, src in paths:
@@ -11355,6 +20155,14 @@ class TranscriptorWindow(tk.Toplevel):
                 return
             self.after(0, lambda t=total: self._progress_start(t))
             self.after(0, lambda t=total: self._set_loading_bar(True, f"Estado: ejecutando OCR ({t} imagen(es))..."))
+            batch_size, batch_pause_seconds = self._ocr_batch_settings()
+            if total > batch_size:
+                self.after(
+                    0,
+                    lambda t=total, bs=batch_size, ps=batch_pause_seconds: self._log(
+                        f"OCR directo particionado: {t} imagen(es) en lotes de {bs}; pausa={ps:.0f}s."
+                    ),
+                )
             run_path = self._new_run_log_path(
                 provider=provider,
                 model=model,
@@ -11390,6 +20198,13 @@ class TranscriptorWindow(tk.Toplevel):
             run_start_item_idx = len(self._items)
 
             for idx, (label, path) in enumerate(to_process, start=1):
+                self._pause_between_ocr_batches(
+                    idx=idx,
+                    total=total,
+                    batch_size=batch_size,
+                    pause_seconds=batch_pause_seconds,
+                    phase="OCR directo",
+                )
                 merge_notes: List[str] = []
                 self._ocr_merge_applied_by_label.pop(str(label), None)
                 pending_idx_start = (
@@ -11564,6 +20379,7 @@ class TranscriptorWindow(tk.Toplevel):
                                 retries=retries,
                                 label=label,
                                 path=ocr_path,
+                                start_n=start_number_hint,
                             )
                         elif effective_provider == PROVIDER_HF:
                             text = self._transcribir_huggingface(
@@ -11572,9 +20388,10 @@ class TranscriptorWindow(tk.Toplevel):
                                 retries=retries,
                                 label=label,
                                 path=ocr_path,
+                                start_n=start_number_hint,
                             )
                         else:
-                            text = self._transcribir_local_ocr(ocr_path, label=label)
+                            text = self._transcribir_local_ocr(ocr_path, label=label, start_n=start_number_hint)
                     except Exception as trans_exc:
                         if effective_provider in (PROVIDER_OPENAI, PROVIDER_HF):
                             reason = str(trans_exc)
@@ -11604,7 +20421,7 @@ class TranscriptorWindow(tk.Toplevel):
                                     "reason": reason,
                                 },
                             )
-                            text = self._transcribir_local_ocr(ocr_path, label=label)
+                            text = self._transcribir_local_ocr(ocr_path, label=label, start_n=start_number_hint)
                             effective_provider = PROVIDER_OCR
                         else:
                             raise
@@ -12594,6 +21411,735 @@ class TranscriptorWindow(tk.Toplevel):
             return f"{header} {tags} {rest}".strip()
         return f"{header} {tags}".strip()
 
+    def _remove_named_tag(self, item_text: str, *, tag_re: re.Pattern) -> str:
+        txt = self.controller.normalizar_item_una_linea(item_text or "")
+        txt = tag_re.sub(" ", txt)
+        return re.sub(r"\s+", " ", txt).strip()
+
+    def _normalize_solution_paths_payload(self, raw_value: Any) -> List[str]:
+        paths: List[str] = []
+        if isinstance(raw_value, (list, tuple, set)):
+            iterable = list(raw_value)
+        else:
+            iterable = [raw_value]
+        for raw_path in iterable:
+            clean_path = self._normalize_path_string(raw_path)
+            if clean_path and clean_path not in paths:
+                paths.append(clean_path)
+        return paths
+
+    def _normalize_solution_groups_payload(self, raw_value: Any) -> List[List[str]]:
+        groups: List[List[str]] = []
+        if isinstance(raw_value, dict):
+            if "images" in raw_value:
+                clean = self._normalize_solution_paths_payload(raw_value.get("images"))
+                return [clean] if clean else []
+            if "paths" in raw_value:
+                clean = self._normalize_solution_paths_payload(raw_value.get("paths"))
+                return [clean] if clean else []
+        if not isinstance(raw_value, (list, tuple, set)):
+            clean = self._normalize_solution_paths_payload(raw_value)
+            return [clean] if clean else []
+
+        raw_list = list(raw_value)
+        if not raw_list:
+            return []
+
+        contains_nested = any(isinstance(v, (list, tuple, set, dict)) for v in raw_list)
+        if not contains_nested:
+            clean = self._normalize_solution_paths_payload(raw_list)
+            return [clean] if clean else []
+
+        for raw_group in raw_list:
+            clean_group = self._normalize_solution_paths_payload(
+                raw_group.get("images") if isinstance(raw_group, dict) else raw_group
+            )
+            if clean_group:
+                groups.append(clean_group)
+        return groups
+
+    def _flatten_solution_groups(self, groups: Any) -> List[str]:
+        flat: List[str] = []
+        for group in self._normalize_solution_groups_payload(groups):
+            for path in group:
+                if path not in flat:
+                    flat.append(path)
+        return flat
+
+    def _get_solution_groups_for_item_number(self, item_num: int) -> List[List[str]]:
+        try:
+            key = int(item_num)
+        except Exception:
+            return []
+        return [list(group) for group in self._solution_path_by_item_num.get(key, []) or []]
+
+    def _get_solution_paths_for_item_number(self, item_num: int) -> List[str]:
+        return self._flatten_solution_groups(self._get_solution_groups_for_item_number(item_num))
+
+    def _get_solution_path_for_item_number(self, item_num: int) -> str:
+        paths = self._get_solution_paths_for_item_number(item_num)
+        return str(paths[0] if paths else "").strip()
+
+    def _set_solution_groups_for_item_number(self, item_num: int, solution_groups: Any) -> bool:
+        try:
+            key = int(item_num)
+        except Exception:
+            return False
+        if key <= 0:
+            return False
+        clean_groups = self._normalize_solution_groups_payload(solution_groups)
+        if clean_groups:
+            self._solution_path_by_item_num[key] = clean_groups
+            return True
+        self._solution_path_by_item_num.pop(key, None)
+        return True
+
+    def _set_solution_paths_for_item_number(self, item_num: int, solution_paths: Any) -> bool:
+        clean_paths = self._normalize_solution_paths_payload(solution_paths)
+        return self._set_solution_groups_for_item_number(item_num, [clean_paths] if clean_paths else [])
+
+    def _set_solution_path_for_item_number(self, item_num: int, solution_path: str) -> bool:
+        return self._set_solution_paths_for_item_number(item_num, [solution_path])
+
+    def _append_solution_group_for_item_number(self, item_num: int, initial_paths: Any = None) -> int:
+        try:
+            key = int(item_num)
+        except Exception:
+            return -1
+        if key <= 0:
+            return -1
+        groups = self._get_solution_groups_for_item_number(key)
+        clean_group = self._normalize_solution_paths_payload(initial_paths)
+        groups.append(clean_group)
+        self._solution_path_by_item_num[key] = groups
+        return len(groups) - 1
+
+    def _append_solution_path_for_item_number(
+        self,
+        item_num: int,
+        solution_path: str,
+        *,
+        solution_index: Optional[int] = None,
+    ) -> bool:
+        try:
+            key = int(item_num)
+        except Exception:
+            return False
+        if key <= 0:
+            return False
+        clean_path = str(solution_path or "").strip()
+        if not clean_path:
+            return False
+        groups = self._get_solution_groups_for_item_number(key)
+        if solution_index is None:
+            if not groups:
+                groups.append([])
+            target_idx = len(groups) - 1
+        else:
+            target_idx = max(0, int(solution_index))
+            while len(groups) <= target_idx:
+                groups.append([])
+        current_group = list(groups[target_idx] or [])
+        if clean_path not in current_group:
+            current_group.append(clean_path)
+        groups[target_idx] = current_group
+        self._solution_path_by_item_num[key] = [g for g in groups if g]
+        return True
+
+    def _get_active_output_item_number(self) -> int:
+        txt = getattr(self, "txt_out", None)
+        if not self._widget_alive(txt):
+            return 0
+        try:
+            idx = self.txt_out.index("insert")
+            line_no = int(str(idx).split(".", 1)[0])
+            line_text = self.txt_out.get(f"{line_no}.0", f"{line_no}.end")
+        except Exception:
+            return 0
+        return int(self.controller.parsear_numero_original(line_text) or 0)
+
+    def _resolve_solution_target_indices(self) -> Tuple[List[int], str]:
+        if not self._items:
+            return [], "sin items"
+
+        active_num = self._get_active_output_item_number()
+        if active_num > 0:
+            target = [
+                idx
+                for idx, entry in enumerate(self._items)
+                if self.controller.parsear_numero_original(str(entry[1] if len(entry) > 1 else "") or "") == active_num
+            ]
+            if target:
+                return target, f"item {active_num}"
+
+        selected_labels = self._get_selected_labels()
+        if selected_labels:
+            target = [
+                idx
+                for idx, entry in enumerate(self._items)
+                if str(entry[0] if len(entry) > 0 else "").strip() in selected_labels
+            ]
+            return target, f"seleccion ({len(target)} item(s))"
+
+        return list(range(len(self._items))), f"lote ({len(self._items)} item(s))"
+
+    def _apply_solution_tag_to_items(self) -> None:
+        self._sync_items_from_output_text()
+        if not self._items:
+            messagebox.showwarning("Solucion", "No hay items para actualizar.")
+            return
+
+        target_indices, scope = self._resolve_solution_target_indices()
+        if not target_indices:
+            messagebox.showwarning("Solucion", "No hay items dentro del alcance actual.")
+            return
+
+        chosen_path = ""
+        try:
+            chosen_path = str(
+                filedialog.askopenfilename(
+                    title="Seleccionar archivo de solucion (Cancelar para escribir ruta manual)"
+                )
+                or ""
+            ).strip()
+        except Exception:
+            chosen_path = ""
+        if not chosen_path:
+            typed = simpledialog.askstring(
+                "Asignar solucion",
+                f"Ruta de solucion para {scope}.\n\nPuedes pegar una ruta de archivo o dejar vacio para cancelar.",
+                parent=self,
+            )
+            if typed is None:
+                return
+            chosen_path = str(typed or "").strip()
+        if not chosen_path:
+            return
+
+        changed = 0
+        new_items: List[Tuple[str, str, List[str]]] = []
+        target_set = set(int(i) for i in target_indices)
+        for idx, entry in enumerate(self._items):
+            archivo = str(entry[0] if len(entry) > 0 else "")
+            item_text = str(entry[1] if len(entry) > 1 else "")
+            imgs = list(entry[2] if len(entry) > 2 else [])
+            updated = item_text
+            if idx in target_set:
+                item_num = int(self.controller.parsear_numero_original(item_text) or 0)
+                updated = self._remove_named_tag(item_text, tag_re=TAG_SOLUCION_RE)
+                solution_before = self._get_solution_paths_for_item_number(item_num)
+                changed_now = False
+                if updated != item_text:
+                    changed_now = True
+                if item_num > 0 and self._set_solution_path_for_item_number(item_num, chosen_path):
+                    if solution_before != [str(chosen_path or "").strip()]:
+                        changed_now = True
+                if changed_now:
+                    changed += 1
+            new_items.append((archivo, updated, imgs))
+
+        self._items = new_items
+        self._render_output_from_items()
+        self._log(f"Ruta de solucion asignada en {changed} item(s) ({scope}).")
+        messagebox.showinfo("Solucion", f"Ruta de solucion asignada en {changed} item(s).\nAlcance: {scope}.")
+
+    def _remove_solution_tag_from_items(self) -> None:
+        self._sync_items_from_output_text()
+        if not self._items:
+            messagebox.showwarning("Solucion", "No hay items para actualizar.")
+            return
+
+        target_indices, scope = self._resolve_solution_target_indices()
+        if not target_indices:
+            messagebox.showwarning("Solucion", "No hay items dentro del alcance actual.")
+            return
+
+        changed = 0
+        new_items: List[Tuple[str, str, List[str]]] = []
+        target_set = set(int(i) for i in target_indices)
+        for idx, entry in enumerate(self._items):
+            archivo = str(entry[0] if len(entry) > 0 else "")
+            item_text = str(entry[1] if len(entry) > 1 else "")
+            imgs = list(entry[2] if len(entry) > 2 else [])
+            updated = item_text
+            if idx in target_set:
+                item_num = int(self.controller.parsear_numero_original(item_text) or 0)
+                solution_before = self._get_solution_paths_for_item_number(item_num)
+                updated = self._remove_named_tag(item_text, tag_re=TAG_SOLUCION_RE)
+                changed_now = updated != item_text
+                if item_num > 0 and (solution_before or item_num in self._solution_path_by_item_num):
+                    self._set_solution_paths_for_item_number(item_num, [])
+                    changed_now = True
+                if changed_now:
+                    changed += 1
+            new_items.append((archivo, updated, imgs))
+
+        self._items = new_items
+        self._render_output_from_items()
+        self._log(f"Solucion eliminada en {changed} item(s) ({scope}).")
+        messagebox.showinfo("Solucion", f"Solucion eliminada en {changed} item(s).\nAlcance: {scope}.")
+
+    def _default_solutions_output_dir(self) -> Path:
+        linked = self._normalize_path_string(self._linked_solutions_dir)
+        if linked:
+            try:
+                return Path(linked)
+            except Exception:
+                pass
+        if self._session_file_path is not None:
+            try:
+                project_root = infer_workspace_from_session_path(self._session_file_path)
+                if project_root is not None:
+                    instance_type = normalize_instance_name(
+                        self._infer_instance_type_for_session_path(self._session_file_path),
+                        "sesion",
+                    )
+                    return project_dirs(project_root, instance_type)["solutions_dir"]
+                return self._session_file_path.parent / "solutions"
+            except Exception:
+                pass
+        pdf_raw = str(self.pdf_path_var.get() or "").strip()
+        if pdf_raw:
+            try:
+                pdf_path = Path(pdf_raw)
+                if pdf_path.parent.exists():
+                    return pdf_path.parent / "solutions"
+            except Exception:
+                pass
+        return Path.cwd() / ".cache" / "solution_images"
+
+    def _store_solution_image_for_item(self, *, item_num: int, image_obj: Any) -> str:
+        out_dir = self._default_solutions_output_dir()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        book_code = re.sub(r"[^A-Za-z0-9_-]+", "-", str(self.book_code_var.get() or "").strip()).strip("-")
+        instance_type = re.sub(r"[^A-Za-z0-9_-]+", "-", str(self.instance_type_var.get() or "").strip()).strip("-")
+        prefix_parts = [part for part in (book_code, instance_type) if part]
+        prefix = "_".join(prefix_parts) if prefix_parts else "solucion"
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_name = f"{prefix}_item{int(item_num)}_{ts}.png"
+        out_path = out_dir / out_name
+        image_obj.save(out_path, format="PNG")
+        return str(out_path)
+
+    def _assign_solution_path_to_item(
+        self,
+        *,
+        item_num: int,
+        solution_path: str,
+        append: bool = False,
+        solution_index: Optional[int] = None,
+    ) -> bool:
+        target_num = int(item_num)
+        changed = 0
+        new_items: List[Tuple[str, str, List[str]]] = []
+        solution_before = self._get_solution_groups_for_item_number(target_num)
+        for entry in self._items:
+            archivo = str(entry[0] if len(entry) > 0 else "")
+            item_text = str(entry[1] if len(entry) > 1 else "")
+            imgs = list(entry[2] if len(entry) > 2 else [])
+            updated = item_text
+            if (self.controller.parsear_numero_original(item_text) or 0) == target_num:
+                updated = self._remove_named_tag(item_text, tag_re=TAG_SOLUCION_RE)
+                if updated != item_text:
+                    changed += 1
+            new_items.append((archivo, updated, imgs))
+        if append:
+            stored_ok = self._append_solution_path_for_item_number(
+                target_num,
+                solution_path,
+                solution_index=solution_index,
+            )
+        else:
+            if solution_index is None:
+                stored_ok = self._set_solution_path_for_item_number(target_num, solution_path)
+            else:
+                groups = self._get_solution_groups_for_item_number(target_num)
+                idx = max(0, int(solution_index))
+                while len(groups) <= idx:
+                    groups.append([])
+                groups[idx] = self._normalize_solution_paths_payload([solution_path])
+                stored_ok = self._set_solution_groups_for_item_number(target_num, groups)
+        if not stored_ok:
+            return False
+        solution_after = self._get_solution_groups_for_item_number(target_num)
+        if solution_before != solution_after:
+            changed += 1
+        if changed <= 0:
+            return False
+        self._items = new_items
+        self._render_output_from_items()
+        return True
+
+    def _open_solution_image_dialog(self, *, parent: Optional[tk.Misc] = None) -> None:
+        self._open_solution_gallery_dialog(parent=parent)
+
+    def _open_solution_gallery_dialog(self, *, parent: Optional[tk.Misc] = None) -> None:
+        self._sync_items_from_output_text()
+        if not self._items:
+            messagebox.showwarning("Solucion", "No hay items cargados.", parent=parent or self)
+            return
+
+        try:
+            from PIL import Image, ImageGrab, ImageTk  # type: ignore
+        except Exception:
+            messagebox.showwarning(
+                "Solucion",
+                "Para gestionar imagenes de solucion instala Pillow:\n\npython -m pip install pillow",
+                parent=parent or self,
+            )
+            return
+
+        item_numbers = sorted(
+            {
+                int(self.controller.parsear_numero_original(str(entry[1] if len(entry) > 1 else "") or "") or 0)
+                for entry in self._items
+            }
+        )
+        item_numbers = [num for num in item_numbers if num > 0]
+        if not item_numbers:
+            messagebox.showwarning("Solucion", "No se encontraron numeros de item en la salida actual.", parent=parent or self)
+            return
+
+        target_indices, _scope = self._resolve_solution_target_indices()
+        current_item_num = 0
+        for idx in target_indices:
+            if idx < 0 or idx >= len(self._items):
+                continue
+            candidate_num = int(self.controller.parsear_numero_original(self._items[idx][1]) or 0)
+            if candidate_num > 0:
+                current_item_num = candidate_num
+                break
+        if current_item_num not in item_numbers:
+            current_item_num = item_numbers[0]
+
+        top = tk.Toplevel(parent or self)
+        top.title("Soluciones por problema")
+        top.transient(parent or self)
+        top.grab_set()
+        top.geometry("1080x820")
+
+        frame = ttk.Frame(top, padding=12)
+        frame.pack(fill="both", expand=True)
+
+        header = ttk.Frame(frame)
+        header.pack(fill="x")
+
+        item_var = tk.StringVar(value="")
+        info_var = tk.StringVar(value="")
+        path_var = tk.StringVar(value="")
+        status_var = tk.StringVar(
+            value="Pega una imagen con Ctrl+V para agregarla automaticamente a la solucion seleccionada."
+        )
+
+        ttk.Label(header, textvariable=item_var, style="Section.TLabel").pack(anchor="w")
+        ttk.Label(header, textvariable=info_var, style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
+        ttk.Label(header, textvariable=path_var, wraplength=920, justify="left").pack(anchor="w", pady=(4, 0))
+
+        body = ttk.Frame(frame)
+        body.pack(fill="both", expand=True, pady=(10, 0))
+
+        left = ttk.Frame(body)
+        left.pack(side="left", fill="y")
+
+        ttk.Label(left, text="Soluciones").pack(anchor="w")
+        solution_list = tk.Listbox(left, width=26, height=8, exportselection=False)
+        solution_list.pack(fill="x", expand=False, pady=(6, 0))
+
+        ttk.Label(left, text="Imagenes de la solucion").pack(anchor="w", pady=(10, 0))
+        image_list = tk.Listbox(left, width=34, height=18, exportselection=False)
+        image_list.pack(fill="y", expand=False, pady=(6, 0))
+
+        right = ttk.Frame(body)
+        right.pack(side="left", fill="both", expand=True, padx=(12, 0))
+        image_label = ttk.Label(right, anchor="center")
+        image_label.pack(fill="both", expand=True)
+        ttk.Label(right, textvariable=status_var, wraplength=660, justify="left").pack(anchor="w", pady=(8, 0))
+
+        nav = ttk.Frame(frame)
+        nav.pack(fill="x", pady=(10, 0))
+
+        state = {
+            "item_idx": item_numbers.index(current_item_num),
+            "solution_idx": 0,
+            "tk_img": None,
+        }
+
+        def current_item() -> int:
+            return int(item_numbers[int(state["item_idx"])])
+
+        def current_groups() -> List[List[str]]:
+            return list(self._get_solution_groups_for_item_number(current_item()) or [])
+
+        def current_solution_index() -> int:
+            groups = current_groups()
+            if not groups:
+                return -1
+            idx = int(state.get("solution_idx", 0) or 0)
+            idx = max(0, min(idx, len(groups) - 1))
+            state["solution_idx"] = idx
+            return idx
+
+        def selected_group_paths() -> List[str]:
+            groups = current_groups()
+            idx = current_solution_index()
+            if idx < 0 or idx >= len(groups):
+                return []
+            return list(groups[idx] or [])
+
+        def populate_solution_list() -> None:
+            solution_list.delete(0, "end")
+            groups = current_groups()
+            for idx, group in enumerate(groups, start=1):
+                existing = sum(1 for p in group if Path(p).exists())
+                label = f"Solucion {idx} ({len(group)} img / {existing} ok)"
+                solution_list.insert("end", label)
+            if solution_list.size() > 0:
+                idx = current_solution_index()
+                solution_list.selection_clear(0, "end")
+                solution_list.selection_set(idx)
+                solution_list.activate(idx)
+            else:
+                state["solution_idx"] = 0
+
+        def populate_image_list() -> None:
+            image_list.delete(0, "end")
+            for idx, p in enumerate(selected_group_paths(), start=1):
+                label = f"{idx}. {Path(p).name}"
+                if p and not Path(p).exists():
+                    label += " (Falta)"
+                image_list.insert("end", label)
+            if image_list.size() > 0:
+                image_list.selection_clear(0, "end")
+                image_list.selection_set(0)
+                image_list.activate(0)
+
+        def render_current_image() -> None:
+            paths = selected_group_paths()
+            selected = image_list.curselection()
+            selected_idx = int(selected[0]) if selected else 0
+            if not paths:
+                image_label.configure(
+                    image="",
+                    text="Esta solucion no tiene imagenes registradas.\nCrea una solucion y pega imagenes.",
+                )
+                state["tk_img"] = None
+                path_var.set("")
+                return
+            selected_idx = max(0, min(selected_idx, len(paths) - 1))
+            current_path = paths[selected_idx]
+            if not Path(current_path).exists():
+                image_label.configure(image="", text="La ruta registrada no existe en disco.")
+                state["tk_img"] = None
+                path_var.set(current_path)
+                return
+            try:
+                with Image.open(current_path) as opened:
+                    display = opened.convert("RGBA")
+                    display.thumbnail((640, 580))
+                    tk_img = ImageTk.PhotoImage(display)
+            except Exception as exc:
+                image_label.configure(image="", text=f"No se pudo abrir la imagen.\n{exc}")
+                state["tk_img"] = None
+                path_var.set(current_path)
+                return
+            image_label.configure(image=tk_img, text="")
+            state["tk_img"] = tk_img
+            path_var.set(current_path)
+
+        def render_current_item() -> None:
+            item_num = current_item()
+            groups = current_groups()
+            flat_paths = self._flatten_solution_groups(groups)
+            item_var.set(f"Problema {item_num}")
+            existing_count = sum(1 for p in flat_paths if Path(p).exists())
+            info_var.set(
+                f"Soluciones: {len(groups)} | Imagenes: {len(flat_paths)} | Disponibles: {existing_count} | Problema {int(state['item_idx']) + 1} de {len(item_numbers)}"
+            )
+            current_solution_index()
+            populate_solution_list()
+            populate_image_list()
+            render_current_image()
+
+        def step_problem(delta: int) -> None:
+            state["item_idx"] = (int(state["item_idx"]) + delta) % len(item_numbers)
+            state["solution_idx"] = 0
+            render_current_item()
+
+        def ensure_solution_group() -> int:
+            groups = current_groups()
+            idx = current_solution_index()
+            if idx >= 0 and idx < len(groups):
+                return idx
+            idx = self._append_solution_group_for_item_number(current_item())
+            state["solution_idx"] = max(0, idx)
+            return int(state["solution_idx"])
+
+        def on_add_solution() -> None:
+            idx = self._append_solution_group_for_item_number(current_item())
+            if idx < 0:
+                messagebox.showwarning("Solucion", "No se pudo crear la solucion.", parent=top)
+                return
+            state["solution_idx"] = idx
+            status_var.set(f"Se creo Solucion {idx + 1} para el problema {current_item()}.")
+            render_current_item()
+
+        def on_paste() -> None:
+            grabbed = ImageGrab.grabclipboard()
+            img = None
+            if grabbed is None:
+                messagebox.showinfo("Solucion", "No hay imagen en el portapapeles.", parent=top)
+                return
+            if isinstance(grabbed, list):
+                for candidate in grabbed:
+                    try:
+                        candidate_path = Path(str(candidate))
+                        if candidate_path.suffix.lower() in IMAGE_EXTS and candidate_path.exists():
+                            with Image.open(candidate_path) as opened:
+                                img = opened.convert("RGBA")
+                            break
+                    except Exception:
+                        continue
+                if img is None:
+                    messagebox.showinfo(
+                        "Solucion",
+                        "El portapapeles contiene archivos, pero no se encontro una imagen valida.",
+                        parent=top,
+                    )
+                    return
+            else:
+                try:
+                    img = grabbed.copy()
+                except Exception:
+                    img = grabbed
+            item_num = current_item()
+            solution_idx = ensure_solution_group()
+            try:
+                stored_path = self._store_solution_image_for_item(item_num=item_num, image_obj=img)
+            except Exception as exc:
+                messagebox.showerror("Solucion", f"No se pudo guardar la imagen.\n{exc}", parent=top)
+                return
+            if not self._assign_solution_path_to_item(
+                item_num=item_num,
+                solution_path=stored_path,
+                append=True,
+                solution_index=solution_idx,
+            ):
+                try:
+                    Path(stored_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+                messagebox.showwarning("Solucion", f"No se encontro el item {item_num} en la salida actual.", parent=top)
+                return
+            self._log(f"Imagen agregada a Solucion {solution_idx + 1} del item {item_num}: {stored_path}")
+            status_var.set(f"Imagen agregada automaticamente a Solucion {solution_idx + 1} del problema {item_num}.")
+            render_current_item()
+
+        def on_remove_selected() -> None:
+            item_num = current_item()
+            groups = current_groups()
+            solution_idx = current_solution_index()
+            if solution_idx < 0 or solution_idx >= len(groups):
+                messagebox.showinfo("Solucion", "No hay solucion seleccionada.", parent=top)
+                return
+            paths = list(groups[solution_idx] or [])
+            selected = image_list.curselection()
+            if not paths or not selected:
+                messagebox.showinfo("Solucion", "No hay imagen seleccionada para eliminar.", parent=top)
+                return
+            idx = int(selected[0])
+            if idx < 0 or idx >= len(paths):
+                return
+            removed_path = paths.pop(idx)
+            if paths:
+                groups[solution_idx] = paths
+            else:
+                groups.pop(solution_idx)
+                state["solution_idx"] = max(0, min(solution_idx, len(groups) - 1))
+            self._set_solution_groups_for_item_number(item_num, groups)
+            try:
+                if removed_path and Path(removed_path).exists():
+                    Path(removed_path).unlink()
+            except Exception:
+                pass
+            self._log(f"Solucion eliminada del item {item_num}: {removed_path}")
+            status_var.set(f"Imagen eliminada del problema {item_num}.")
+            render_current_item()
+
+        def on_remove_solution() -> None:
+            item_num = current_item()
+            groups = current_groups()
+            solution_idx = current_solution_index()
+            if solution_idx < 0 or solution_idx >= len(groups):
+                messagebox.showinfo("Solucion", "No hay solucion seleccionada para eliminar.", parent=top)
+                return
+            removed_group = list(groups.pop(solution_idx) or [])
+            self._set_solution_groups_for_item_number(item_num, groups)
+            for removed_path in removed_group:
+                try:
+                    if removed_path and Path(removed_path).exists():
+                        Path(removed_path).unlink()
+                except Exception:
+                    continue
+            state["solution_idx"] = max(0, min(solution_idx, len(groups) - 1))
+            self._log(f"Solucion {solution_idx + 1} eliminada del item {item_num}.")
+            status_var.set(f"Se elimino una solucion completa del problema {item_num}.")
+            render_current_item()
+
+        ttk.Button(nav, text="Anterior (A)", command=lambda: step_problem(-1), style="Ghost.TButton").pack(side="left")
+        ttk.Button(nav, text="Siguiente (S)", command=lambda: step_problem(1), style="Ghost.TButton").pack(side="left", padx=(8, 0))
+        ttk.Button(nav, text="Nueva solucion (N)", command=on_add_solution, style="Ghost.TButton").pack(side="left", padx=(12, 0))
+        ttk.Button(nav, text="Pegar imagen (Ctrl+V)", command=on_paste, style="Accent.TButton").pack(side="left", padx=(8, 0))
+        ttk.Button(nav, text="Eliminar imagen (Del)", command=on_remove_selected, style="Ghost.TButton").pack(side="left", padx=(8, 0))
+        ttk.Button(nav, text="Eliminar solucion (Shift+Del)", command=on_remove_solution, style="Ghost.TButton").pack(side="left", padx=(8, 0))
+        ttk.Button(nav, text="Cerrar", command=top.destroy, style="Secondary.TButton").pack(side="right")
+
+        def previous_shortcut(_event=None):
+            step_problem(-1)
+            return "break"
+
+        def next_shortcut(_event=None):
+            step_problem(1)
+            return "break"
+
+        def add_solution_shortcut(_event=None):
+            on_add_solution()
+            return "break"
+
+        def paste_shortcut(_event=None):
+            on_paste()
+            return "break"
+
+        def remove_image_shortcut(_event=None):
+            on_remove_selected()
+            return "break"
+
+        def remove_solution_shortcut(_event=None):
+            on_remove_solution()
+            return "break"
+
+        solution_list.bind(
+            "<<ListboxSelect>>",
+            lambda _e: (
+                state.__setitem__("solution_idx", int(solution_list.curselection()[0]) if solution_list.curselection() else 0),
+                populate_image_list(),
+                render_current_image(),
+            ),
+        )
+        image_list.bind("<<ListboxSelect>>", lambda _e: render_current_image())
+        top.bind("<Left>", previous_shortcut)
+        top.bind("<Right>", next_shortcut)
+        top.bind("<KeyPress-a>", previous_shortcut)
+        top.bind("<KeyPress-A>", previous_shortcut)
+        top.bind("<KeyPress-s>", next_shortcut)
+        top.bind("<KeyPress-S>", next_shortcut)
+        top.bind("<KeyPress-n>", add_solution_shortcut)
+        top.bind("<KeyPress-N>", add_solution_shortcut)
+        top.bind("<Control-v>", paste_shortcut)
+        top.bind("<Delete>", remove_image_shortcut)
+        top.bind("<Shift-Delete>", remove_solution_shortcut)
+        render_current_item()
+        top.wait_window(top)
+
     def _parse_claves_text(self, raw_text: str) -> Dict[int, str]:
         txt = (raw_text or "").replace("\r\n", "\n").replace("\r", "\n")
         txt = self._decode_scan_escapes(txt).replace(",", ";")
@@ -12654,7 +22200,7 @@ class TranscriptorWindow(tk.Toplevel):
         if not token:
             raise Exception("Falta HF token. Define HF_TOKEN en .env.local/.env o en el campo HF token.")
 
-        model = (self.model_var.get() or DEFAULT_HF_VISION_MODEL).strip()
+        model = (self.model_var.get() or TRAINED_OCR_VISION_MODEL).strip()
         timeout_s = max(30, int(self.timeout_var.get() or 180))
         retries = max(0, int(self.retries_var.get() or 2))
         prompt_pairs = self._build_claves_ocr_prompt()
@@ -12668,7 +22214,7 @@ class TranscriptorWindow(tk.Toplevel):
                 return self._format_claves_pairs(parsed_native)
             return raw_native
 
-        base_url = self._resolve_hf_base_url()
+        base_url = self._resolve_hf_base_url(model)
         client = OpenAI(base_url=base_url, api_key=token, timeout=timeout_s)
         img_url = self._encode_image_data_url(image_path)
 
@@ -12728,6 +22274,31 @@ class TranscriptorWindow(tk.Toplevel):
                 outputs.append(out)
 
         if not outputs:
+            detail_text = " | ".join(errors)
+            detail_lower = detail_text.lower()
+            if "40301" in detail_lower or ("allowed now" in detail_lower and "your model" in detail_lower):
+                local_exc: Exception | None = None
+                try:
+                    raw_local = self._transcribir_local_ocr(image_path, label="claves-local")
+                    parsed_local = self._parse_claves_text(raw_local)
+                    if parsed_local:
+                        normalized_local = self._format_claves_pairs(parsed_local)
+                        self._log(
+                            f"Paso 3: router HF no permite el modelo vision actual para claves; "
+                            f"fallback OCR local OK ({len(parsed_local)} claves)."
+                        )
+                        return normalized_local
+                except Exception as exc:
+                    local_exc = exc
+                message = (
+                    "No se pudieron extraer claves desde imagen.\n"
+                    f"El token HF es valido, pero el router actual no permite usar el modelo vision seleccionado ({model}) "
+                    "para este paso.\n"
+                    "Usa un modelo/endpoint vision permitido, o ingresa las claves manualmente, o usa 'Dictar microfono'."
+                )
+                if local_exc is not None:
+                    message += f"\n\nFallback OCR local no disponible:\n{local_exc}"
+                raise Exception(message)
             raise Exception(
                 "No se pudieron extraer claves desde imagen."
                 + (f" Detalle: {' | '.join(errors)}" if errors else "")
@@ -12826,15 +22397,15 @@ class TranscriptorWindow(tk.Toplevel):
 
     def _open_step3_dialog(self) -> None:
         if self._transcribing:
-            messagebox.showwarning("Paso 3", "Espera a que termine el Paso 2 antes de aplicar claves.")
+            messagebox.showwarning("Paso 5", "Espera a que termine el Paso 4 antes de aplicar claves.")
             return
         self._sync_items_from_output_text()
         if not self._items:
-            messagebox.showwarning("Paso 3", "Aun no hay items. Ejecuta primero el Paso 2.")
+            messagebox.showwarning("Paso 5", "Aun no hay items. Ejecuta primero el Paso 4.")
             return
 
         dlg = tk.Toplevel(self)
-        dlg.title("Paso 3 (opcional) - Claves y solucion")
+        dlg.title("Paso 5 (opcional) - Claves y solucion")
         dlg.geometry("760x520")
         dlg.minsize(640, 420)
         dlg.transient(self)
@@ -12962,6 +22533,12 @@ class TranscriptorWindow(tk.Toplevel):
             )
 
         ttk.Button(buttons, text="Aplicar claves", command=on_apply, style="Accent.TButton").pack(side="left")
+        ttk.Button(
+            buttons,
+            text="Ver soluciones...",
+            command=lambda: self._open_solution_gallery_dialog(parent=dlg),
+            style="Ghost.TButton",
+        ).pack(side="left", padx=(8, 0))
         ttk.Button(buttons, text="Cerrar", command=dlg.destroy, style="Ghost.TButton").pack(side="left", padx=(8, 0))
 
     def _copiar_salida(self) -> None:
@@ -12987,6 +22564,165 @@ class TranscriptorWindow(tk.Toplevel):
         if labels:
             return labels
         return sorted(str(k) for k in self._ocr_raw_first_by_label.keys())
+
+    def _get_structured_ocr_text_for_label(self, label: str) -> str:
+        structured = self._ensure_structured_ocr_for_label(label)
+        if structured:
+            return structured
+        return str(self._ocr_raw_first_by_label.get(str(label), "") or "").strip()
+
+    def _ensure_structured_ocr_for_label(self, label: str) -> str:
+        key = str(label)
+        structured = str(self._ocr_structured_by_label.get(key, "") or "").strip()
+        if structured:
+            return structured
+        raw = str(self._ocr_raw_first_by_label.get(key, "") or "").strip()
+        if not raw or raw.startswith("[ERROR"):
+            return ""
+        try:
+            extractor = ScanExtractor(provider="ocr", model="", strict_json=False)
+            start_number_hint = self._next_item_number_hint(None, 1, current_label=label)
+            rebuilt_items, structured = extractor.build_local_structured_output(
+                raw_output=raw,
+                curso=(self.curso_var.get() or "").strip(),
+                tema=(self.tema_var.get() or "").strip(),
+                start_n=start_number_hint,
+            )
+            structured, rebuilt_items, normalize_notes = self._normalize_small_number_outliers_in_structured_result(
+                label=key,
+                structured_text=str(structured or ""),
+                structured_items=[dict(it) for it in rebuilt_items if isinstance(it, dict)],
+                start_number_hint=start_number_hint,
+            )
+            structured, rebuilt_items, renumber_notes = self._apply_continuous_numbering_to_structured_result(
+                label=key,
+                structured_text=str(structured or ""),
+                structured_items=[dict(it) for it in rebuilt_items if isinstance(it, dict)],
+                start_number_hint=start_number_hint,
+            )
+            structured, rebuilt_items, fragment_notes = self._collapse_fragmented_structured_items(
+                label=key,
+                structured_text=str(structured or ""),
+                structured_items=[dict(it) for it in rebuilt_items if isinstance(it, dict)],
+            )
+            for note in normalize_notes + renumber_notes + fragment_notes:
+                self._log(note)
+            structured = str(structured or "").strip()
+            if structured:
+                self._ocr_structured_by_label[key] = structured
+                return structured
+        except Exception as exc:
+            self._log(f"{key}: no se pudo reconstruir JSON estructurado local para la vista. Detalle: {exc}")
+        return ""
+
+    def _format_structured_math_value_for_view(self, value: str, *, option: bool) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return raw
+        if option:
+            normalized = normalize_latex_option(raw)
+            return str(normalized.text or raw)
+        return self._wrap_statement_math_segments_for_view(raw)
+
+    def _wrap_statement_math_segments_for_view(self, text: str) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return raw
+        segments = [seg.strip() for seg in str(raw).split(SEP_LINE)]
+        if len(segments) <= 1:
+            return raw
+
+        def _looks_math(seg: str) -> bool:
+            value = str(seg or "").strip()
+            if not value or "$" in value:
+                return False
+            if value.endswith(":"):
+                return False
+            math_signals = (
+                "=",
+                "∈",
+                "π",
+                "√",
+                "\\frac",
+                "\\sqrt",
+                "\\pi",
+                "sen",
+                "cos",
+                "tan",
+                "cot",
+                "sec",
+                "csc",
+                "cov",
+                "vers",
+            )
+            return any(signal in value for signal in math_signals)
+
+        wrapped: List[str] = []
+        for seg in segments:
+            if _looks_math(seg):
+                wrapped.append(f"${seg}$")
+            else:
+                wrapped.append(seg)
+        return SEP_LINE.join(wrapped)
+
+    def _format_structured_ocr_json_for_view(self, label: str) -> str:
+        raw = self._ensure_structured_ocr_for_label(label)
+        if not raw:
+            return ""
+        candidate = raw
+        if candidate.startswith("```"):
+            candidate = re.sub(r"^```(?:json|JSON)?", "", candidate).strip()
+            candidate = re.sub(r"```$", "", candidate).strip()
+        try:
+            payload = json.loads(candidate)
+        except Exception:
+            return raw
+        if not isinstance(payload, dict):
+            return raw
+
+        formatted = dict(payload)
+        lead_cont, lead_opts_extracted, _cleaned = self._extract_structured_leading_payload(candidate)
+        if lead_cont:
+            normalized_lead = normalize_latex_scan_item_text(lead_cont)
+            formatted["leading_continuation"] = str(normalized_lead.text or lead_cont)
+        else:
+            formatted["leading_continuation"] = ""
+
+        payload_lead_opts = self._non_placeholder_options(formatted.get("leading_options", {}))
+        lead_opts = lead_opts_extracted if lead_opts_extracted else payload_lead_opts
+        if isinstance(lead_opts, dict):
+            formatted["leading_options"] = {
+                str(opt): self._format_structured_math_value_for_view(str(val or ""), option=True)
+                for opt, val in lead_opts.items()
+            }
+        else:
+            formatted["leading_options"] = {}
+        formatted["leading_option_labels"] = self._extract_structured_leading_option_labels(candidate)
+
+        raw_items = formatted.get("items", [])
+        if isinstance(raw_items, list):
+            pretty_items: List[Dict[str, Any]] = []
+            for entry in raw_items:
+                if not isinstance(entry, dict):
+                    continue
+                item_payload = dict(entry)
+                item_payload["statement"] = self._format_structured_math_value_for_view(
+                    str(item_payload.get("statement", "") or ""),
+                    option=False,
+                )
+                raw_options = item_payload.get("options", {})
+                if isinstance(raw_options, dict):
+                    item_payload["options"] = {
+                        label_key: self._format_structured_math_value_for_view(
+                            str(raw_options.get(label_key, "") or ""),
+                            option=True,
+                        )
+                        for label_key in ("A", "B", "C", "D", "E")
+                    }
+                pretty_items.append(item_payload)
+            formatted["items"] = pretty_items
+
+        return json.dumps(formatted, ensure_ascii=False, indent=2)
 
     def _parse_structured_items_from_raw(self, raw_text: str) -> List[Dict[str, Any]]:
         raw = self.controller.normalizar_item_una_linea(self._decode_scan_escapes(raw_text or ""))
@@ -13062,6 +22798,172 @@ class TranscriptorWindow(tk.Toplevel):
             )
         return out
 
+    def _current_output_item_numbers(self) -> Set[int]:
+        numbers: Set[int] = set()
+        for entry in self._items:
+            if len(entry) < 2:
+                continue
+            num = self.controller.parsear_numero_original(str(entry[1] or "")) or 0
+            if num > 0:
+                numbers.add(int(num))
+        return numbers
+
+    def _insert_item_entry_in_numeric_order(
+        self,
+        *,
+        archivo_origen: str,
+        item_text: str,
+        image_paths: Optional[List[str]] = None,
+    ) -> bool:
+        normalized = self.controller.normalizar_item_una_linea(str(item_text or ""))
+        if not normalized:
+            return False
+        num = self.controller.parsear_numero_original(normalized) or 0
+        if num <= 0:
+            return False
+        current_numbers = self._current_output_item_numbers()
+        if num in current_numbers:
+            return False
+
+        insert_at = len(self._items)
+        for idx, entry in enumerate(self._items):
+            if len(entry) < 2:
+                continue
+            existing_num = self.controller.parsear_numero_original(str(entry[1] or "")) or 0
+            if existing_num > num:
+                insert_at = idx
+                break
+        self._items.insert(
+            insert_at,
+            (
+                str(archivo_origen or "").strip() or f"manual_{num}",
+                normalized,
+                list(image_paths or []),
+            ),
+        )
+        return True
+
+    def _recover_missing_items_from_structured_scope(
+        self,
+        *,
+        labels: Iterable[str],
+        timeout_s: int,
+    ) -> List[int]:
+        ordered_labels: List[str] = []
+        seen_labels: Set[str] = set()
+        for raw_label in labels:
+            label = str(raw_label or "").strip()
+            if not label or label in seen_labels:
+                continue
+            seen_labels.add(label)
+            ordered_labels.append(label)
+        if not ordered_labels:
+            return []
+
+        current_numbers = self._current_output_item_numbers()
+        recovered: List[int] = []
+        recovery_pipeline = ScanPipeline(
+            provider="ocr",
+            model="",
+            max_retries=0,
+            parse_max_retries=0,
+            timeout_s=max(30, int(timeout_s or 180)),
+            debug_dir=str(self._runs_dir / "scan_pipeline_debug"),
+            ocr_lang=(self.ocr_lang_var.get() or "spa+eng"),
+            temperature=0.0,
+            top_p=1.0,
+            max_tokens=3200,
+            seed=42,
+            strict_json=False,
+        )
+
+        for label in ordered_labels:
+            structured_text = str(self._ocr_structured_by_label.get(label, "") or "").strip()
+            image_path = self._file_map.get(label)
+            if not structured_text or image_path is None:
+                continue
+
+            initial_items: List[Dict[str, Any]] = []
+            try:
+                structured_payload = json.loads(structured_text)
+            except Exception:
+                structured_payload = {}
+            if isinstance(structured_payload, dict):
+                for raw_item in list(structured_payload.get("items") or []):
+                    if not isinstance(raw_item, dict):
+                        continue
+                    try:
+                        n_val = int(raw_item.get("n", 0) or 0)
+                    except Exception:
+                        n_val = 0
+                    if n_val > 0:
+                        initial_items.append(dict(raw_item))
+            if not initial_items:
+                continue
+
+            missing_here = sorted(
+                {
+                    int(item.get("n", 0) or 0)
+                    for item in initial_items
+                    if int(item.get("n", 0) or 0) > 0 and int(item.get("n", 0) or 0) not in current_numbers
+                }
+            )
+            if not missing_here:
+                continue
+
+            raw_for_label = str(self._ocr_raw_first_by_label.get(label, "") or "").strip() or structured_text
+            try:
+                start_n = max(0, min(missing_here) - 1)
+            except Exception:
+                start_n = 0
+            try:
+                pipeline_run = recovery_pipeline.process_raw_output(
+                    raw_output=raw_for_label,
+                    image_path=image_path,
+                    start_n=start_n,
+                    curso="",
+                    tema="",
+                    has_figure_hint=False,
+                    initial_items=[dict(item) for item in initial_items],
+                )
+            except Exception as exc:
+                self._log(f"{label}: no se pudo reconciliar items faltantes desde structured. Detalle: {exc}")
+                continue
+
+            rendered_by_num = {int(row.item.n): str(row.rendered or "") for row in list(pipeline_run.items or [])}
+            recovered_here: List[int] = []
+            for num in missing_here:
+                rendered = self.controller.normalizar_item_una_linea(
+                    self._normalize_math_delimiters(rendered_by_num.get(int(num), ""))
+                )
+                if not rendered:
+                    continue
+                inserted = self._insert_item_entry_in_numeric_order(
+                    archivo_origen=image_path.stem,
+                    item_text=rendered,
+                    image_paths=[],
+                )
+                if not inserted:
+                    continue
+                recovered.append(int(num))
+                recovered_here.append(int(num))
+                current_numbers.add(int(num))
+
+            if recovered_here:
+                existing_diag = list(self._direct_item_diagnostics_by_label.get(label, []) or [])
+                existing_diag.append(
+                    {
+                        "status": "RECOVERED_FROM_STRUCTURED",
+                        "item_nums": list(recovered_here),
+                    }
+                )
+                self._direct_item_diagnostics_by_label[label] = existing_diag
+                self._log(
+                    f"{label}: reconciliacion final desde JSON estructurado -> recuperados {', '.join(str(v) for v in recovered_here)}."
+                )
+
+        return recovered
+
     def _clean_summary_continuation_text(self, text: str) -> str:
         value = self._normalize_merge_note_text(text or "", max_len=0)
         if not value:
@@ -13111,11 +23013,7 @@ class TranscriptorWindow(tk.Toplevel):
         if not current:
             item["enunciado"] = add
             return
-        base_key = self._norm_key(current)
-        add_key = self._norm_key(add)
-        if add_key and add_key in base_key:
-            return
-        item["enunciado"] = f"{current} {add}".strip()
+        item["enunciado"] = merge_statement_fragments(current, add)
 
     def _summary_merge_options(self, item: Dict[str, Any], extra_options: Dict[str, str]) -> None:
         if not extra_options:
@@ -13155,13 +23053,20 @@ class TranscriptorWindow(tk.Toplevel):
 
     def _figure_flags_from_unified_items(self) -> Dict[int, bool]:
         flags: Dict[int, bool] = {}
-        for _archivo_origen, item_text, image_paths in self._items:
+        for entry in self._items:
+            archivo_origen = str(entry[0] if len(entry) > 0 else "")
+            item_text = str(entry[1] if len(entry) > 1 else "")
+            image_paths = list(entry[2] if len(entry) > 2 else [])
             item = self.controller.normalizar_item_una_linea(self._decode_scan_escapes(item_text or ""))
             num = self.controller.parsear_numero_original(item) or self._extract_structured_item_number(item) or 0
             if num <= 0:
                 continue
-            has_fig = self._has_image_marker(item) or bool(image_paths)
-            if has_fig:
+            binding = self._build_runtime_item_image_binding(
+                archivo_origen=archivo_origen,
+                item_text=item,
+                image_paths=image_paths,
+            )
+            if binding.is_confirmed:
                 flags[num] = True
             else:
                 flags.setdefault(num, False)
@@ -13179,117 +23084,31 @@ class TranscriptorWindow(tk.Toplevel):
             pass
 
     def _compute_figure_flags_sequence(self, labels: List[str]) -> Dict[int, bool]:
-        """
-        Sequence-aware figure assignment for OCR-unified summary.
-        Balance policy:
-        - if there is a pending incomplete item and current image starts with continuation/options,
-          consume one segment for that pending item;
-        - remaining segments are assigned to parsed items by hint score,
-          with fallback only when there is a single parsed item.
-        """
         flags: Dict[int, bool] = {}
-        pending_num: Optional[int] = None
-
         for lb in labels:
             label = str(lb or "").strip()
             if not label:
                 continue
-
-            raw = str(self._ocr_raw_first_by_label.get(label, "") or "").strip()
-            merge_applied = str(self._ocr_merge_applied_by_label.get(label, "") or "").strip()
-
             src = self._file_map.get(label)
-            seg_count = 0
-            if src is not None:
-                try:
-                    seg_count = len(self._get_segments_v2_for_source(src))
-                except Exception:
-                    seg_count = 0
-
-            if not raw and not merge_applied:
-                if seg_count <= 0:
-                    self._log_figure_assignment_debug(
-                        f"{label}: figura_no_asignada -> imagen {label} (sin segmentos)"
-                    )
-                else:
-                    self._log_figure_assignment_debug(
-                        f"{label}: figura_no_asignada -> imagen {label} (sin OCR util)"
-                    )
+            if src is None:
                 continue
-
-            cont, lead_opts, cleaned = self._extract_structured_leading_payload(raw)
-            parsed_items = self._parse_structured_items_from_raw(cleaned if cleaned else raw)
-
-            has_merge_cont = bool(
-                re.search(r"(?i)prepass_continuacion_inicio|continuacion_", merge_applied)
-            )
-            has_merge_opts = bool(
-                re.search(r"(?i)prepass_claves_inicio|claves_|opciones_", merge_applied)
-            )
-            has_continuation = bool(cont) or bool(lead_opts) or has_merge_cont or has_merge_opts
-
             assigned_any = False
-
-            if pending_num is not None and seg_count > 0 and has_continuation:
-                flags[pending_num] = True
-                seg_count -= 1
-                assigned_any = True
-                self._log_figure_assignment_debug(
-                    f"{label}: figura_asignada_pending -> item {pending_num} (continuacion detectada)"
-                )
-
-            if seg_count > 0 and parsed_items:
-                item_count = len(parsed_items)
-                scored: List[Tuple[int, int]] = []
-                for pos, it in enumerate(parsed_items, start=1):
-                    enu = self._decode_scan_escapes(str(it.get("enunciado", "") or ""))
-                    score = self._item_image_hint_score(enu)
-                    if score > 0:
-                        scored.append((score, pos))
-                scored.sort(key=lambda t: (-t[0], t[1]))
-
-                chosen_pos: List[int] = []
-                assign_mode = "hint"
-                for _score, pos in scored:
-                    if len(chosen_pos) >= seg_count:
-                        break
-                    if pos not in chosen_pos:
-                        chosen_pos.append(pos)
-
-                if not chosen_pos and item_count == 1:
-                    chosen_pos.append(1)
-                    assign_mode = "fallback"
-
-                for pos in chosen_pos:
-                    if pos < 1 or pos > item_count:
-                        continue
-                    num = int(parsed_items[pos - 1].get("num", 0) or 0)
-                    if num <= 0:
-                        continue
-                    flags[num] = True
-                    assigned_any = True
-                    reason = "hint score" if assign_mode == "hint" else "fallback unico item"
-                    self._log_figure_assignment_debug(
-                        f"{label}: figura_asignada_item -> item {num} ({reason})"
-                    )
-
-                seg_count = max(0, seg_count - len(chosen_pos))
-
-            if not assigned_any:
-                if seg_count <= 0:
-                    self._log_figure_assignment_debug(
-                        f"{label}: figura_no_asignada -> imagen {label} (sin segmentos)"
-                    )
-                else:
-                    self._log_figure_assignment_debug(
-                        f"{label}: figura_no_asignada -> imagen {label} (sin candidato)"
-                    )
-
-            for it in parsed_items:
-                num = int(it.get("num", 0) or 0)
+            source_key = self._seg_v2_source_key(src)
+            for payload in self._get_segment_bindings_by_source_key(source_key).values():
+                if not self._as_bool(payload.get("confirmed"), False):
+                    continue
+                num = int(self._safe_int(payload.get("item_num", 0), 0))
                 if num <= 0:
                     continue
-                pending_num = num if not self._summary_item_is_complete(it) else None
+                flags[num] = True
+                assigned_any = True
+                self._log_figure_assignment_debug(
+                    f"{label}: figura_asignada_binding -> item {num} (segmentacion confirmada)"
+                )
+            if not assigned_any:
+                self._log_figure_assignment_debug(
+                    f"{label}: figura_no_asignada -> imagen {label} (sin binding confirmado)"
+                )
 
         return flags
 
@@ -13303,7 +23122,7 @@ class TranscriptorWindow(tk.Toplevel):
         """
         flags: Dict[int, bool] = {}
         for lb in labels:
-            raw = str(self._ocr_raw_first_by_label.get(lb, "") or "").strip()
+            raw = self._get_structured_ocr_text_for_label(lb)
             if not raw:
                 continue
             cont, lead_opts, cleaned = self._extract_structured_leading_payload(raw)
@@ -13366,7 +23185,7 @@ class TranscriptorWindow(tk.Toplevel):
         pending_num: Optional[int] = None
 
         for lb in labels:
-            raw = str(self._ocr_raw_first_by_label.get(lb, "") or "").strip()
+            raw = self._get_structured_ocr_text_for_label(lb)
             merge_applied = str(self._ocr_merge_applied_by_label.get(lb, "") or "").strip()
             if not raw and not merge_applied:
                 continue
@@ -13421,7 +23240,7 @@ class TranscriptorWindow(tk.Toplevel):
                         ordered_nums.append(target_num)
                     target = summary_by_num[target_num]
                     payload_clean = re.sub(
-                        r"(?is)^\s*(?:prepass_[^:]+|leading_[^:]+|continuacion_[^:]+|claves_[^:]+|opciones_[^:]+)\s*:\s*",
+                        r"(?is)^\s*(?:prepass_[^:]+|leading_[^:]+|structured_[^:]+|continuacion_[^:]+|claves_[^:]+|opciones_[^:]+|topband_[^:]+)\s*:\s*",
                         "",
                         payload,
                     ).strip()
@@ -13437,12 +23256,18 @@ class TranscriptorWindow(tk.Toplevel):
         figure_flags: Dict[int, bool] = {}
         sequence_flags = self._compute_figure_flags_sequence(labels)
         unified_flags = self._figure_flags_from_unified_items()
+        raw_flags = self._figure_flags_from_raw_labels(labels)
         for k, v in sequence_flags.items():
             if v:
                 figure_flags[k] = True
             else:
                 figure_flags.setdefault(k, False)
         for k, v in unified_flags.items():
+            if v:
+                figure_flags[k] = True
+            else:
+                figure_flags.setdefault(k, False)
+        for k, v in raw_flags.items():
             if v:
                 figure_flags[k] = True
             else:
@@ -13626,10 +23451,19 @@ class TranscriptorWindow(tk.Toplevel):
             style="SubHeader.TLabel",
         ).pack(side="left")
 
-        body = ttk.Frame(dlg)
+        body = ttk.Panedwindow(dlg, orient="horizontal")
         body.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+
+        left = ttk.Frame(body)
+        right = ttk.Frame(body)
+        body.add(left, weight=1)
+        body.add(right, weight=1)
+
+        ttk.Label(left, text="OCR fiel", style="SubHeader.TLabel").pack(anchor="w", padx=2, pady=(0, 6))
+        ttk.Label(right, text="JSON estructurado", style="SubHeader.TLabel").pack(anchor="w", padx=2, pady=(0, 6))
+
         txt = tk.Text(
-            body,
+            left,
             wrap="word",
             bg=self.palette["surface"],
             fg=self.palette["text"],
@@ -13641,35 +23475,80 @@ class TranscriptorWindow(tk.Toplevel):
             highlightcolor=self.palette["border"],
             font=("Consolas", 10),
         )
-        scr = ttk.Scrollbar(body, orient="vertical", command=txt.yview)
+        scr = ttk.Scrollbar(left, orient="vertical", command=txt.yview)
         txt.configure(yscrollcommand=scr.set)
         txt.pack(side="left", fill="both", expand=True)
         scr.pack(side="right", fill="y")
 
+        txt_json = tk.Text(
+            right,
+            wrap="word",
+            bg=self.palette["surface"],
+            fg=self.palette["text"],
+            insertbackground=self.palette["text"],
+            relief="solid",
+            bd=1,
+            highlightthickness=1,
+            highlightbackground=self.palette["border"],
+            highlightcolor=self.palette["border"],
+            font=("Consolas", 10),
+        )
+        scr_json = ttk.Scrollbar(right, orient="vertical", command=txt_json.yview)
+        txt_json.configure(yscrollcommand=scr_json.set)
+        txt_json.pack(side="left", fill="both", expand=True)
+        scr_json.pack(side="right", fill="y")
+
         sections: List[str] = []
+        structured_sections: List[str] = []
         for lb in labels:
             raw = str(self._ocr_raw_first_by_label.get(lb, "") or "").strip()
+            merge_applied = str(self._ocr_merge_applied_by_label.get(lb, "") or "").strip()
+            structured = self._format_structured_ocr_json_for_view(lb)
             if not raw:
                 raw = "(sin respuesta OCR cruda para esta imagen)"
+            if not structured:
+                structured = "(sin respuesta JSON estructurada para esta imagen)"
+            extras: List[str] = []
+            if merge_applied:
+                extras.append(
+                    "----- LEADING_CONTINUATION / LEADING_OPTIONS detectadas o aplicadas -----\n"
+                    f"{merge_applied}"
+                )
             section = f"{'=' * 24} {lb} {'=' * 24}\n{raw}"
+            if extras:
+                section = f"{section}\n\n" + "\n\n".join(extras)
             sections.append(section + "\n")
+            structured_sections.append(f"{'=' * 24} {lb} {'=' * 24}\n{structured}\n")
         txt.insert("1.0", "\n".join(sections).strip() + "\n")
         txt.configure(state="disabled")
+        txt_json.insert("1.0", "\n".join(structured_sections).strip() + "\n")
+        txt_json.configure(state="disabled")
 
         btns = ttk.Frame(dlg)
         btns.pack(fill="x", padx=12, pady=(0, 12))
 
-        def on_copy() -> None:
+        def on_copy_raw() -> None:
             data = "\n".join(sections).strip()
             try:
                 self.clipboard_clear()
                 self.clipboard_append(data + "\n")
                 self.update_idletasks()
-                messagebox.showinfo("OCR crudo", "Texto OCR crudo copiado al portapapeles.")
+                messagebox.showinfo("OCR crudo", "OCR fiel copiado al portapapeles.")
             except Exception as exc:
                 messagebox.showerror("OCR crudo", f"No se pudo copiar:\n{exc}")
 
-        ttk.Button(btns, text="Copiar", command=on_copy, style="Ghost.TButton").pack(side="left")
+        def on_copy_json() -> None:
+            data = "\n".join(structured_sections).strip()
+            try:
+                self.clipboard_clear()
+                self.clipboard_append(data + "\n")
+                self.update_idletasks()
+                messagebox.showinfo("OCR crudo", "JSON estructurado copiado al portapapeles.")
+            except Exception as exc:
+                messagebox.showerror("OCR crudo", f"No se pudo copiar:\n{exc}")
+
+        ttk.Button(btns, text="Copiar OCR fiel", command=on_copy_raw, style="Ghost.TButton").pack(side="left")
+        ttk.Button(btns, text="Copiar JSON", command=on_copy_json, style="Ghost.TButton").pack(side="left", padx=(8, 0))
         ttk.Button(btns, text="Cerrar", command=dlg.destroy, style="Secondary.TButton").pack(side="right")
 
     def _open_vision_model_raw_view(self) -> None:
@@ -13941,10 +23820,10 @@ class TranscriptorWindow(tk.Toplevel):
             )
             return
 
-        provider = (self.provider_var.get() or FIXED_PROVIDER).strip()
+        provider = self._normalize_provider_label(self.provider_var.get() or FIXED_PROVIDER)
         if provider not in {PROVIDER_OPENAI, PROVIDER_HF}:
             provider = FIXED_PROVIDER
-        model = (self.model_var.get() or "").strip() or DEFAULT_HF_VISION_MODEL
+        model = (self.model_var.get() or "").strip() or self._default_vision_model_for_provider(provider)
 
         try:
             timeout_s = int(self.timeout_var.get())
@@ -14135,10 +24014,10 @@ class TranscriptorWindow(tk.Toplevel):
             )
             return
 
-        provider = (self.provider_var.get() or FIXED_PROVIDER).strip()
+        provider = self._normalize_provider_label(self.provider_var.get() or FIXED_PROVIDER)
         if provider not in {PROVIDER_OPENAI, PROVIDER_HF}:
             provider = FIXED_PROVIDER
-        model = (self.model_var.get() or "").strip() or DEFAULT_HF_VISION_MODEL
+        model = (self.model_var.get() or "").strip() or self._default_vision_model_for_provider(provider)
         tag_mode = (self.tag_mode_var.get() or FIXED_TAG_MODE).strip()
         db_name = (self.db_name_var.get() or "").strip()
         can_use_llm = bool(self.format_with_llm_var.get())
@@ -14349,10 +24228,10 @@ class TranscriptorWindow(tk.Toplevel):
             messagebox.showwarning("Formateo", "No hay items en salida para formatear.")
             return
 
-        provider = (self.provider_var.get() or FIXED_PROVIDER).strip().lower()
+        provider = self._normalize_provider_label(self.provider_var.get() or FIXED_PROVIDER)
         if provider not in {PROVIDER_OPENAI, PROVIDER_HF}:
             provider = FIXED_PROVIDER
-        model = (self.model_var.get() or "").strip() or DEFAULT_HF_VISION_MODEL
+        model = (self.model_var.get() or "").strip() or self._default_vision_model_for_provider(provider)
         db_name = (self.db_name_var.get() or "").strip()
         tag_mode = (self.tag_mode_var.get() or FIXED_TAG_MODE).strip()
 
@@ -14515,8 +24394,10 @@ class TranscriptorWindow(tk.Toplevel):
         threading.Thread(target=safe_worker, daemon=True).start()
 
     def _guardar_tex(self) -> None:
-        txt = (self.txt_out.get("1.0", "end") or "").strip()
-        if not txt:
+        # First sync any pending edits from editor to canonical items.
+        self._sync_items_from_output_then_preview()
+        txt_full = self._build_output_text_from_items(review_only=False)
+        if not txt_full:
             messagebox.showwarning("Guardar", "No hay salida para guardar.")
             return
         path = filedialog.asksaveasfilename(
@@ -14527,8 +24408,14 @@ class TranscriptorWindow(tk.Toplevel):
         if not path:
             return
         out_path = Path(path)
-        items = [line.strip() for line in txt.splitlines() if line.strip()]
-        self.controller.exportar_a_tex(items=items, out_path=out_path)
+        self._sync_state_snapshot()
+        # Ensure TeX export always uses the full dataset, even if filter view is active.
+        self.state.output_text = txt_full
+        try:
+            self.workflow.save_tex(self.state, out_path)
+        except Exception as exc:
+            messagebox.showerror("Guardar", str(exc))
+            return
         messagebox.showinfo("Guardar", f"Guardado: {out_path}")
 
     def _guardar_bd(self) -> None:
@@ -14543,28 +24430,22 @@ class TranscriptorWindow(tk.Toplevel):
 
         # Siempre usamos la salida actual del textbox. Si el usuario editÃ³ lÃ­neas,
         # intentamos preservar archivo_origen por matching exacto; si no, asignamos uno nuevo.
-        lines = [l.strip() for l in txt.splitlines() if l.strip()]
-        remaining = list(self._items)
+        self._sync_items_from_output_then_preview()
+        current_items = list(self._items)
         items_for_db: List[Tuple[str, str, List[str]]] = []
         unmatched = 0
         moved_paths: Dict[str, str] = {}
 
-        for i, line in enumerate(lines, start=1):
-            archivo_origen = f"transcripcion_{i}"
-            image_paths: List[str] = []
-            match_idx = None
-            for j, entry in enumerate(remaining):
-                a = entry[0]
-                it = entry[1]
-                imgs = entry[2] if len(entry) > 2 else []
-                if it == line:
-                    match_idx = j
-                    archivo_origen = a
-                    image_paths = list(imgs or [])
-                    break
-            if match_idx is not None:
-                remaining.pop(match_idx)
-            else:
+        for i, entry in enumerate(current_items, start=1):
+            archivo_origen = str(entry[0] if len(entry) > 0 else "").strip()
+            line = str(entry[1] if len(entry) > 1 else "").strip()
+            image_paths = list(entry[2] if len(entry) > 2 else [] or [])
+            if not line:
+                continue
+            if not archivo_origen:
+                archivo_origen = f"transcripcion_{i}"
+                unmatched += 1
+            elif archivo_origen.lower().startswith("manual_"):
                 unmatched += 1
             final_paths: List[str] = []
             for p in image_paths:
@@ -14582,21 +24463,42 @@ class TranscriptorWindow(tk.Toplevel):
             self._preview_images = refreshed
             self._push_preview_text(force=True)
 
+        self.workflow.refresh_items(self.state, items_for_db, corrected=self._corrected_item_numbers)
+        self.state.output_text = txt
         try:
-            stats = self.controller.insertar_items(db, items=items_for_db)
+            stats = self.workflow.save_db(
+                self.state,
+                db,
+                libro_codigo=(self.book_code_var.get() or "").strip(),
+                instancia_tipo=(self.instance_type_var.get() or "").strip(),
+                pdf_path=(self.pdf_path_var.get() or "").strip(),
+                solution_paths_by_number=dict(self._solution_path_by_item_num),
+            )
         except Exception as exc:
             messagebox.showerror("BD", str(exc))
             return
         messagebox.showinfo(
             "BD",
-            f"BD: {db}\nInsertados: {stats['inserted']}\nDuplicados: {stats['skipped']}\nInvalidos: {stats['invalid']}\nEditados sin origen: {unmatched}",
+            "BD: {db}\nInsertados: {inserted}\nActualizados: {updated}\nEliminados sobrantes del grupo: {deleted}\nOmitidos: {skipped}\nInvalidos: {invalid}\nItems sin origen heredado: {unmatched}".format(
+                db=db,
+                inserted=int(stats.get("inserted", 0)),
+                updated=int(stats.get("updated", 0)),
+                deleted=int(stats.get("deleted", 0)),
+                skipped=int(stats.get("skipped", 0)),
+                invalid=int(stats.get("invalid", 0)),
+                unmatched=int(unmatched),
+            ),
         )
     def _open_preview(self) -> None:
         self._push_preview_text(force=True)
+        preview_warning = self._get_preview_format_warning()
         try:
             self._preview.ensure_open()
             self._schedule_preview_nav_poll()
             self._log("Vista previa: usa 'Corregir #n' para editar en ventana flotante o clic en item para saltar al editor.")
+            if preview_warning:
+                self._log(f"Vista previa: alerta de formato -> {preview_warning}")
+                messagebox.showwarning("Vista previa", preview_warning)
         except Exception as exc:
             messagebox.showerror("Vista previa", str(exc))
 
@@ -14742,22 +24644,75 @@ class TranscriptorWindow(tk.Toplevel):
         except Exception:
             return False
 
+    def _get_preview_format_warning(self) -> str:
+        try:
+            raw = self.txt_out.get("1.0", "end-1c")
+        except Exception:
+            return ""
+        text = str(raw or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not text:
+            return ""
+        if re.search(r"""\\item\s*\[\s*\\textbf\{\s*\d+\.?\s*\}\s*\]""", text, flags=re.IGNORECASE):
+            return ""
+        if re.search(r"""(?m)^\s*\\textbf\{\s*\d+\.?\s*\}""", text, flags=re.IGNORECASE):
+            return (
+                "La salida actual no usa el formato estándar de vista previa "
+                r"(\item[\textbf{n.}] ...). "
+                "Se detectó un formato tipo \\textbf{n.} al inicio del bloque; "
+                "la opción de corregir puede no aparecer hasta normalizarlo."
+            )
+        return (
+            "La salida actual no está en el formato estándar de vista previa "
+            r"(\item[\textbf{n.}] ...). "
+            "Algunas acciones como corregir o saltar al item pueden no estar disponibles."
+        )
+
     def _sync_items_from_output_text(self) -> int:
         """
         Sync internal `_items` with the current output textbox.
         This prevents deleted/edited lines from reappearing in later steps.
         Returns count of removed items.
         """
+        # Safety guard: when review filter is active, textbox contains only a subset.
+        # In that mode we must never perform destructive full-sync.
+        if bool(getattr(self, "_filter_review_only", False)):
+            try:
+                self._sync_filtered_items_from_output_text()
+            except Exception:
+                pass
+            return 0
+
         try:
             raw = (self.txt_out.get("1.0", "end") or "").strip()
         except Exception:
             return 0
 
-        lines = [self.controller.normalizar_item_una_linea(l) for l in raw.splitlines() if str(l).strip()]
+        blocks = self._extract_direct_scan_items(raw)
+        if blocks:
+            lines = [self.controller.normalizar_item_una_linea(b) for b in blocks if str(b or "").strip()]
+        else:
+            ignored_wrappers = (
+                r"^\s*\\begin\s*\{\s*enumerate\s*\}\s*$",
+                r"^\s*\\end\s*\{\s*enumerate\s*\}\s*$",
+            )
+            lines = []
+            for l in raw.splitlines():
+                line_raw = str(l or "").strip()
+                if not line_raw:
+                    continue
+                if any(re.match(pat, line_raw, flags=re.IGNORECASE) for pat in ignored_wrappers):
+                    continue
+                normalized_line = self.controller.normalizar_item_una_linea(line_raw)
+                if normalized_line:
+                    lines.append(normalized_line)
+
         old_items = list(self._items)
         old_lines = [self.controller.normalizar_item_una_linea(str(e[1] or "")) for e in old_items if len(e) > 1]
         if lines == old_lines:
             return 0
+
+        line_numbers = [int(self.controller.parsear_numero_original(line) or 0) for line in lines]
+        estado_db_map = self._load_estado_map_from_db([n for n in line_numbers if n > 0])
 
         remaining = list(old_items)
         rebuilt: List[Tuple[str, str, List[str]]] = []
@@ -14788,12 +24743,16 @@ class TranscriptorWindow(tk.Toplevel):
                 src_entry = remaining.pop(match_idx)
                 archivo = str(src_entry[0] or "").strip() or f"manual_{idx}"
                 imgs = list(src_entry[2] if len(src_entry) > 2 else [])
+                default_estado = self._extract_estado_tag_value(str(src_entry[1] if len(src_entry) > 1 else ""))
             else:
                 archivo = f"manual_{idx}"
                 imgs = []
+                default_estado = "sin_revisar"
 
             # Binding truth: ensure configured segment->item/slot markers are present.
             line_num = self.controller.parsear_numero_original(line) or 0
+            if line_num > 0 and (not default_estado):
+                default_estado = self._normalize_estado_tag_value(estado_db_map.get(int(line_num), ""))
             if line_num > 0 and archivo and (archivo != f"manual_{idx}"):
                 src = self._find_source_path_by_stem(archivo)
                 if src is not None:
@@ -14834,10 +24793,21 @@ class TranscriptorWindow(tk.Toplevel):
                 if mapped_imgs:
                     imgs = mapped_imgs
 
+            line = self._ensure_estado_tag_in_item(line, default_estado=default_estado)
             rebuilt.append((archivo, line, imgs))
 
         removed_count = max(0, len(old_items) - len(rebuilt))
         self._items = rebuilt
+        valid_solution_nums = {
+            int(self.controller.parsear_numero_original(str(entry[1] if len(entry) > 1 else "") or "") or 0)
+            for entry in self._items
+        }
+        valid_solution_nums.discard(0)
+        self._solution_path_by_item_num = {
+            int(k): self._normalize_solution_groups_payload(v)
+            for k, v in self._solution_path_by_item_num.items()
+            if int(k) in valid_solution_nums and self._normalize_solution_groups_payload(v)
+        }
         self._reconcile_corrected_items()
 
         # Drop stale preview mappings for removed markers.
@@ -14852,6 +24822,72 @@ class TranscriptorWindow(tk.Toplevel):
 
         self._refresh_training_pairs_from_items()
         return removed_count
+
+    def _sync_filtered_items_from_output_text(self) -> int:
+        """
+        Sync only currently visible (filtered) items from output textbox.
+        Unlike `_sync_items_from_output_text`, this must never drop hidden items.
+        Returns count of updated items.
+        """
+        try:
+            raw = (self.txt_out.get("1.0", "end") or "").strip()
+        except Exception:
+            return 0
+
+        if not raw:
+            return 0
+
+        blocks = self._extract_direct_scan_items(raw)
+        if blocks:
+            lines = [self.controller.normalizar_item_una_linea(b) for b in blocks if str(b or "").strip()]
+        else:
+            ignored_wrappers = (
+                r"^\s*\\begin\s*\{\s*enumerate\s*\}\s*$",
+                r"^\s*\\end\s*\{\s*enumerate\s*\}\s*$",
+            )
+            lines = []
+            for l in raw.splitlines():
+                line_raw = str(l or "").strip()
+                if not line_raw:
+                    continue
+                if any(re.match(pat, line_raw, flags=re.IGNORECASE) for pat in ignored_wrappers):
+                    continue
+                normalized_line = self.controller.normalizar_item_una_linea(line_raw)
+                if normalized_line:
+                    lines.append(normalized_line)
+
+        if not lines:
+            return 0
+
+        edited_by_num: Dict[int, str] = {}
+        for line in lines:
+            n = int(self.controller.parsear_numero_original(line) or 0)
+            if n > 0:
+                edited_by_num[n] = line
+
+        if not edited_by_num:
+            return 0
+
+        updated = 0
+        rebuilt: List[Tuple[str, str, List[str]]] = []
+        for entry in self._items:
+            archivo = str(entry[0] if len(entry) > 0 else "")
+            item_text = str(entry[1] if len(entry) > 1 else "")
+            imgs = list(entry[2] if len(entry) > 2 else [])
+            item_num = int(self.controller.parsear_numero_original(item_text) or 0)
+            if self._is_review_filter_target(item_text) and item_num > 0 and item_num in edited_by_num:
+                new_line = str(edited_by_num[item_num] or "").strip()
+                if new_line and self.controller.normalizar_item_una_linea(new_line) != self.controller.normalizar_item_una_linea(item_text):
+                    default_estado = self._extract_estado_tag_value(item_text) or "sin_revisar"
+                    new_line = self._ensure_estado_tag_in_item(new_line, default_estado=default_estado)
+                    item_text = new_line
+                    updated += 1
+            rebuilt.append((archivo, item_text, imgs))
+
+        if updated > 0:
+            self._items = rebuilt
+            self._refresh_training_pairs_from_items()
+        return updated
 
     def _reconcile_corrected_items(self) -> None:
         present: Set[int] = set()
@@ -14875,6 +24911,7 @@ class TranscriptorWindow(tk.Toplevel):
             return
         if n > 0:
             self._corrected_item_numbers.add(n)
+            self._sync_item_correction_to_ocr_golden(n)
             self.after(0, self._refresh_corrected_item_highlights)
 
     def _find_output_item_line(self, item_num: int) -> Optional[int]:
@@ -14918,13 +24955,71 @@ class TranscriptorWindow(tk.Toplevel):
             except Exception:
                 continue
 
-    def _sync_items_from_output_then_preview(self) -> None:
+    def _output_numbering_discontinuities(self) -> List[Tuple[int, int, int]]:
+        """
+        Return (line_no, actual_num, expected_num) for visible output items whose
+        numbering does not continue naturally from the previous visible item.
+        The first visible item is treated as the local starting point.
+        """
+        txt = getattr(self, "txt_out", None)
+        if not self._widget_alive(txt):
+            return []
         try:
-            removed = self._sync_items_from_output_text()
-            if removed > 0:
-                self._log(f"Salida editada: {removed} item(s) removido(s) del estado interno.")
+            raw = self.txt_out.get("1.0", "end-1c")
+        except Exception:
+            return []
+        if not str(raw or "").strip():
+            return []
+
+        issues: List[Tuple[int, int, int]] = []
+        expected_next: Optional[int] = None
+        for line_no, line in enumerate(str(raw or "").splitlines(), start=1):
+            item_num = int(self.controller.parsear_numero_original(str(line or "")) or 0)
+            if item_num <= 0:
+                continue
+            if expected_next is not None and item_num != expected_next:
+                issues.append((line_no, item_num, expected_next))
+            expected_next = item_num + 1
+        return issues
+
+    def _refresh_numbering_highlights(self) -> None:
+        if not self._ui_alive():
+            return
+        txt = getattr(self, "txt_out", None)
+        if not self._widget_alive(txt):
+            return
+        try:
+            self.txt_out.tag_remove("numbering_gap_item", "1.0", "end")
+            self.txt_out.tag_configure("numbering_gap_item", background="#FDE68A")
+        except Exception:
+            return
+
+        issues = self._output_numbering_discontinuities()
+        for line_no, _actual, _expected in issues:
+            try:
+                self.txt_out.tag_add("numbering_gap_item", f"{line_no}.0", f"{line_no}.end")
+            except Exception:
+                continue
+        try:
+            self.txt_out.tag_raise("numbering_gap_item")
         except Exception:
             pass
+
+    def _sync_items_from_output_then_preview(self) -> None:
+        if not self._filter_review_only:
+            try:
+                removed = self._sync_items_from_output_text()
+                if removed > 0:
+                    self._log(f"Salida editada: {removed} item(s) removido(s) del estado interno.")
+            except Exception:
+                pass
+        else:
+            try:
+                updated = self._sync_filtered_items_from_output_text()
+                if updated > 0:
+                    self._log(f"Salida filtrada editada: {updated} item(s) actualizado(s) en memoria.")
+            except Exception:
+                pass
         try:
             current_text = self.controller.normalizar_item_una_linea(
                 (self.txt_out.get("1.0", "end") or "").strip()
@@ -14933,7 +25028,13 @@ class TranscriptorWindow(tk.Toplevel):
             current_text = ""
         expected_text = self.controller.normalizar_item_una_linea(
             "\n".join(
-                [str(entry[1] or "").strip() for entry in self._items if len(entry) > 1 and str(entry[1] or "").strip()]
+                [
+                    str(entry[1] or "").strip()
+                    for entry in self._items
+                    if len(entry) > 1
+                    and str(entry[1] or "").strip()
+                    and ((not self._filter_review_only) or self._is_review_filter_target(str(entry[1] or "")))
+                ]
             ).strip()
         )
         if expected_text and expected_text != current_text:
@@ -14966,9 +25067,11 @@ class TranscriptorWindow(tk.Toplevel):
             self._sync_preview_images_from_items()
             self._reconcile_corrected_items()
             self._refresh_corrected_item_highlights()
+            self._refresh_numbering_highlights()
             text = (self.txt_out.get("1.0", "end") or "").strip()
             self._preview.set_images(dict(self._preview_images))
             self._preview.set_corrected_items(sorted(self._corrected_item_numbers))
+            self._preview.set_item_image_statuses(dict(self._preview_item_image_statuses))
             self._preview.set_text(text)
         except Exception:
             return
@@ -14982,19 +25085,38 @@ class TranscriptorWindow(tk.Toplevel):
                 return
             self._suppress_output_sync = True
             try:
-                lines = [entry[1] for entry in self._items if len(entry) > 1 and str(entry[1]).strip()]
-                text = "\n".join(lines).strip()
+                if self._filter_review_only:
+                    text = self._build_output_text_from_items(review_only=True)
+                else:
+                    text = self._build_output_text_from_items(review_only=False)
                 self.txt_out.delete("1.0", "end")
                 if text:
                     self.txt_out.insert("end", text + "\n")
             finally:
                 self._suppress_output_sync = False
             self._refresh_corrected_item_highlights()
+            self._refresh_numbering_highlights()
             self._push_preview_text(force=True)
 
         if not self._ui_alive():
+            return
+        if threading.current_thread() is threading.main_thread():
+            apply()
             return
         try:
             self.after(0, apply)
         except Exception:
             return
+
+    def _build_output_text_from_items(self, *, review_only: bool) -> str:
+        lines: List[str] = []
+        for entry in self._items:
+            if len(entry) < 2:
+                continue
+            item_text = str(entry[1] or "").strip()
+            if not item_text:
+                continue
+            if review_only and (not self._is_review_filter_target(item_text)):
+                continue
+            lines.append(item_text)
+        return "\n".join(lines).strip()

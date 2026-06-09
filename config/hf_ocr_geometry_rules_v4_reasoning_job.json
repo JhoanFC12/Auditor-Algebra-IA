@@ -1,0 +1,15 @@
+{
+  "dataset_local_path": "E:/Github/Auditor-IA/.cache/transcriptor_runs/datasets/ocr_geometry_rules_training_20260607_1430",
+  "dataset_repo_id": "Jhoan12/math-ocr-geometry-rules-golden-v4",
+  "model_repo_id": "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-rules-lora-v4",
+  "merged_model_repo_id": "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-rules-merged-v4",
+  "base_model": "Qwen/Qwen2.5-VL-3B-Instruct",
+  "flavor": "a10g-small",
+  "epochs": 5,
+  "learning_rate": 0.0002,
+  "batch": 1,
+  "grad_accum": 8,
+  "timeout_seconds": 14400,
+  "last_job_id": "6a25e837368e0b5dc80666cf",
+  "last_job_status": "RUNNING"
+}

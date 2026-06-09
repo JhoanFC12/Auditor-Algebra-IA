@@ -19,9 +19,11 @@ def _option_math(text: str) -> str:
 def render_item(item: ScanItem) -> str:
     n = max(1, int(item.n))
     statement = normalize_statement(item.statement).text
+    answer_key = str(getattr(item, "answer_key", "") or "").strip().upper()
+    answer_token = f" [[Clave={answer_key}]]" if answer_key in {"A", "B", "C", "D", "E"} else ""
     image_token = ""
-    if item.has_figure:
-        tag = _safe_text(item.figure_tag) or f"img-{n}"
+    if item.has_figure and item.image_binding.is_confirmed:
+        tag = _safe_text(item.figure_tag) or _safe_text(item.image_binding.marker_name) or f"img-{n}"
         image_token = f" [[Imagen={tag}]]"
 
     options: Dict[str, str] = {label: _option_math(item.options.get(label, "...")) for label in OPTION_LABELS}
@@ -34,7 +36,7 @@ def render_item(item: ScanItem) -> str:
     )
     return (
         f"\\item[\\textbf{{{n}.}}] [[curso={_safe_text(item.curso)}]] "
-        f"[[tema={_safe_text(item.tema)}]] {statement}{image_token}{option_block}"
+        f"[[tema={_safe_text(item.tema)}]]{answer_token} {statement}{image_token}{option_block}"
     ).strip()
 
 

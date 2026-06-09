@@ -1,0 +1,106 @@
+from modulos.modulo9_organizador_libros.controlador_organizador_libros import BookProgressController
+
+
+class _FakeCursor:
+    def __init__(self, fetches=None, rowcounts=None):
+        self._fetches = list(fetches or [])
+        self._rowcounts = list(rowcounts or [])
+        self.executed = []
+        self.rowcount = 0
+        self.description = []
+
+    def execute(self, query, params=None):
+        self.executed.append((" ".join(str(query).split()), params))
+        self.rowcount = self._rowcounts.pop(0) if self._rowcounts else 0
+
+    def fetchone(self):
+        if self._fetches:
+            return self._fetches.pop(0)
+        return None
+
+
+class _FakeConnection:
+    def __init__(self, cursor):
+        self._cursor = cursor
+        self.commits = 0
+        self.rollbacks = 0
+
+    def cursor(self):
+        return self._cursor
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+    def close(self):
+        pass
+
+
+class _FakeDb:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def get_connection(self, _db_name):
+        return self._conn
+
+
+def _controller_with_conn(conn):
+    controller = BookProgressController.__new__(BookProgressController)
+    controller.db = _FakeDb(conn)
+    controller._ensured_dbs = set()
+    controller._ensure_schema = lambda _db_name: None
+    controller._instance_column_name = lambda _conn: "codigo_instancia"
+    controller._problem_instance_column_name = lambda _conn: "codigo_instancia"
+    controller._touch_book = lambda cur, libro_id: cur.execute(
+        "UPDATE libros_escaneo SET updated_at = NOW() WHERE id = %s",
+        (int(libro_id),),
+    )
+    return controller
+
+
+def test_eliminar_instancia_removes_pending_and_problems_before_instance():
+    cursor = _FakeCursor(
+        fetches=[(17, 8, "s01_teoria_de_exponentes", "vesalius-algebra-temas")],
+        rowcounts=[0, 3, 5, 1, 1],
+    )
+    conn = _FakeConnection(cursor)
+    controller = _controller_with_conn(conn)
+    controller._pg_table_exists = lambda _conn, table: table in {"problemas", "problema_pending_changes"}
+    controller._pg_column_exists = lambda _conn, table, column: (
+        (table == "problema_pending_changes" and column in {"libro_codigo", "codigo_instancia"})
+        or (table == "problemas" and column == "codigo_instancia")
+    )
+
+    summary = controller.eliminar_instancia("demo_db", 17)
+
+    assert summary == {
+        "instancia_id": 17,
+        "libro_id": 8,
+        "problems_deleted": 5,
+        "pending_deleted": 3,
+    }
+    assert conn.commits == 1
+    assert conn.rollbacks == 0
+    assert "DELETE FROM problema_pending_changes" in cursor.executed[1][0]
+    assert "DELETE FROM problemas" in cursor.executed[2][0]
+    assert "DELETE FROM libro_instancias_escaneo" in cursor.executed[3][0]
+
+
+def test_eliminar_instancia_raises_when_not_found():
+    cursor = _FakeCursor(fetches=[None], rowcounts=[0])
+    conn = _FakeConnection(cursor)
+    controller = _controller_with_conn(conn)
+    controller._pg_table_exists = lambda _conn, _table: False
+    controller._pg_column_exists = lambda _conn, _table, _column: False
+
+    try:
+        controller.eliminar_instancia("demo_db", 999)
+    except ValueError as exc:
+        assert "Instancia no encontrada" in str(exc)
+    else:
+        raise AssertionError("Se esperaba ValueError para instancia inexistente.")
+
+    assert conn.commits == 0
+    assert conn.rollbacks == 1

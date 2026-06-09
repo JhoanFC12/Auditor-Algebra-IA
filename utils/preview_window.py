@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import webbrowser
 from dataclasses import dataclass
 from importlib.util import find_spec
 from typing import Optional
@@ -19,6 +20,16 @@ class PreviewWindow:
     def __post_init__(self) -> None:
         self._server = PreviewServer()
         self._proc: Optional[subprocess.Popen] = None
+        self._browser_opened = False
+
+    def _open_external_browser_once(self, url: str) -> None:
+        if (not url) or self._browser_opened:
+            return
+        try:
+            webbrowser.open(url, new=2)
+            self._browser_opened = True
+        except Exception:
+            pass
 
     def ensure_open(self) -> str:
         self._server.start()
@@ -30,11 +41,9 @@ class PreviewWindow:
             return url
 
         if find_spec("webview") is None:
-            raise RuntimeError(
-                "No se pudo abrir la vista previa porque falta `pywebview`.\n"
-                "Instala con: python -m pip install pywebview\n"
-                f"URL (alternativa manual): {url}"
-            )
+            self._browser_opened = False
+            self._open_external_browser_once(url)
+            return url
 
         args = [
             sys.executable,
@@ -59,14 +68,12 @@ class PreviewWindow:
                 self._proc.wait(timeout=0.35)
             except subprocess.TimeoutExpired:
                 return url
-            # Terminó demasiado rápido: algo falló (WebView2, pywebview, etc.)
-            raise RuntimeError(
-                "No se pudo abrir la ventana de vista previa (pywebview cerró inmediatamente).\n"
-                f"URL (alternativa manual): {url}"
-            )
-        except Exception as exc:
-            raise RuntimeError(f"No se pudo lanzar la vista previa: {exc}\nURL: {url}") from exc
-        return url
+            # Termino demasiado rapido: fallback a navegador externo.
+            self._open_external_browser_once(url)
+            return url
+        except Exception:
+            self._open_external_browser_once(url)
+            return url
 
     def ensure_open_at(self, *, x: int | None, y: int | None, on_top: bool = False) -> str:
         self._server.start()
@@ -78,11 +85,9 @@ class PreviewWindow:
             return url
 
         if find_spec("webview") is None:
-            raise RuntimeError(
-                "No se pudo abrir la vista previa porque falta `pywebview`.\n"
-                "Instala con: python -m pip install pywebview\n"
-                f"URL (alternativa manual): {url}"
-            )
+            self._browser_opened = False
+            self._open_external_browser_once(url)
+            return url
 
         args = [
             sys.executable,
@@ -107,13 +112,11 @@ class PreviewWindow:
                 self._proc.wait(timeout=0.35)
             except subprocess.TimeoutExpired:
                 return url
-            raise RuntimeError(
-                "No se pudo abrir la ventana de vista previa (pywebview cerró inmediatamente).\n"
-                f"URL (alternativa manual): {url}"
-            )
-        except Exception as exc:
-            raise RuntimeError(f"No se pudo lanzar la vista previa: {exc}\nURL: {url}") from exc
-
+            self._open_external_browser_once(url)
+            return url
+        except Exception:
+            self._open_external_browser_once(url)
+            return url
 
     def set_text(self, text: str) -> None:
         self._server.set_text(text)
@@ -123,6 +126,12 @@ class PreviewWindow:
 
     def set_corrected_items(self, items: list[int]) -> None:
         self._server.set_corrected_items(items)
+
+    def set_item_image_statuses(self, statuses: dict[int, str]) -> None:
+        self._server.set_item_image_statuses(statuses)
+
+    def set_active_item(self, item_num: int | None) -> None:
+        self._server.set_active_item(item_num)
 
     def pop_goto_item(self) -> Optional[int]:
         return self._server.pop_goto_item()
@@ -141,4 +150,5 @@ class PreviewWindow:
             except Exception:
                 pass
         self._proc = None
+        self._browser_opened = False
         self._server.stop()

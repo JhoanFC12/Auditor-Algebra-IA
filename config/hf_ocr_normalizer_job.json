@@ -1,0 +1,13 @@
+{
+  "dataset_repo_id": "Jhoan12/math-ocr-normalization-golden-v1",
+  "model_repo_id": "Jhoan12/math-ocr-normalizer-qwen2.5-0.5b-lora-v1",
+  "base_model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "epochs": 8,
+  "learning_rate": 0.0002,
+  "batch": 2,
+  "grad_accum": 4,
+  "max_length": 2048,
+  "flavor": "t4-small",
+  "timeout_seconds": 7200,
+  "image": "pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime"
+}

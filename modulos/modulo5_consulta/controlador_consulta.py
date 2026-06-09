@@ -16,10 +16,12 @@ def _where_estado(estado_filtro: str) -> tuple[str, List[object]]:
     estado = (estado_filtro or "").strip()
     if not estado or estado == "Todos":
         return "", []
-    if estado == "Pendiente Revision":
-        return "(p.estado_consistencia IS NULL OR p.estado_consistencia = 'Pendiente Revision')", []
-    if estado in {"Bien Planteado", "Mal Planteado"}:
-        return "p.estado_consistencia = %s", [estado]
+    if estado in {"Pendiente Revision", "Sin revisar"}:
+        return "(p.consistencia_matematica IS NULL OR p.consistencia_matematica = 'Sin revisar')", []
+    if estado in {"Bien Planteado", "Consistente"}:
+        return "p.consistencia_matematica = %s", ["Consistente"]
+    if estado in {"Mal Planteado", "Inconsistente"}:
+        return "p.consistencia_matematica = %s", ["Inconsistente"]
     return "", []
 
 
@@ -180,7 +182,7 @@ class ConsultaController:
                 SELECT
                     p.id,
                     COALESCE(p.archivo_origen,''),
-                    COALESCE(p.estado_consistencia,''),
+                    COALESCE(p.consistencia_matematica,''),
                     p.tema_id,
                     COALESCE(t.nombre,''),
                     COALESCE(t.area,''),
@@ -201,7 +203,7 @@ class ConsultaController:
                     {
                         "id": int(pid),
                         "archivo_origen": archivo,
-                        "estado_consistencia": estado,
+                        "consistencia_matematica": estado,
                         "tema_id": tema_id,
                         "tema": tema_nombre,
                         "area": area,
@@ -220,7 +222,7 @@ class ConsultaController:
             cur.execute(
                 """
                 SELECT
-                    p.id, p.enunciado_latex, COALESCE(p.archivo_origen,''), COALESCE(p.estado_consistencia,''),
+                    p.id, p.enunciado_latex, COALESCE(p.archivo_origen,''), COALESCE(p.consistencia_matematica,''),
                     p.tema_id, COALESCE(t.nombre,''), COALESCE(t.area,''),
                     COALESCE(p.respuesta_correcta,''), p.nivel_dificultad, COALESCE(p.razon_inconsistencia,'')
                 FROM problemas p
@@ -237,7 +239,7 @@ class ConsultaController:
                 "id": int(row[0]),
                 "enunciado_latex": row[1] or "",
                 "archivo_origen": row[2] or "",
-                "estado_consistencia": row[3] or "",
+                "consistencia_matematica": row[3] or "",
                 "tema_id": row[4],
                 "tema": row[5] or "",
                 "area": row[6] or "",

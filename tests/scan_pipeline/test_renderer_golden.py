@@ -58,6 +58,49 @@ class RendererGoldenTests(unittest.TestCase):
         out = render_item(item)
         self.assertIn(f" [[Imagen=img-7]]{SEP_LINE}A)", out)
 
+    def test_render_preserves_answer_key_from_structured_json(self) -> None:
+        item = ScanItem.from_dict(
+            {
+                "schema": "ScanItemJSON-v1",
+                "n": 11,
+                "curso": "Algebra",
+                "tema": "Binomio de Newton",
+                "has_figure": False,
+                "figure_tag": "",
+                "statement": "Calcule el termino independiente",
+                "options": {"A": "1", "B": "2", "C": "3", "D": "4", "E": "5"},
+                "clave": "C",
+                "needs_review": False,
+            },
+            default_n=11,
+            curso="Algebra",
+            tema="Binomio de Newton",
+        )
+        out = render_item(item)
+        self.assertIn("[[Clave=C]]", out)
+        self.assertIn("[[tema=Binomio de Newton]] [[Clave=C]]", out)
+
+    def test_render_preserves_answer_key_from_final_latex_candidate(self) -> None:
+        item = ScanItem.from_dict(
+            {
+                "schema": "ScanItemJSON-v1",
+                "n": 12,
+                "curso": "Algebra",
+                "tema": "Binomio de Newton",
+                "has_figure": False,
+                "figure_tag": "",
+                "statement": "Calcule el coeficiente",
+                "options": {"A": "1", "B": "2", "C": "3", "D": "4", "E": "5"},
+                "final_latex_candidate": r"\item[\textbf{12.}] [[Clave=E]] Calcule...",
+                "needs_review": False,
+            },
+            default_n=12,
+            curso="Algebra",
+            tema="Binomio de Newton",
+        )
+        out = render_item(item)
+        self.assertIn("[[Clave=E]]", out)
+
     def test_render_statement_with_line_and_equation(self) -> None:
         item = ScanItem.from_dict(
             {

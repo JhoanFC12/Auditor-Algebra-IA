@@ -260,7 +260,7 @@ class ConsultaWindow(tk.Toplevel):
         lines = [
             f"ID: {detail.get('id')}",
             f"Archivo: {detail.get('archivo_origen')}",
-            f"Estado: {detail.get('estado_consistencia')}",
+            f"Consistencia: {detail.get('consistencia_matematica')}",
             f"Area/Tema: {detail.get('area')} / {detail.get('tema')} (tema_id={detail.get('tema_id')})",
             f"Dificultad: {detail.get('nivel_dificultad')}",
             f"Respuesta: {detail.get('respuesta_correcta')}",

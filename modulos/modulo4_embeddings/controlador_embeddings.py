@@ -9,10 +9,12 @@ def _where_estado(estado_filtro: str) -> tuple[str, List[object]]:
     estado = (estado_filtro or "").strip()
     if not estado or estado == "Todos":
         return "", []
-    if estado == "Pendiente Revision":
-        return "(estado_consistencia IS NULL OR estado_consistencia = 'Pendiente Revision')", []
-    if estado in {"Bien Planteado", "Mal Planteado"}:
-        return "estado_consistencia = %s", [estado]
+    if estado in {"Pendiente Revision", "Sin revisar"}:
+        return "(consistencia_matematica IS NULL OR consistencia_matematica = 'Sin revisar')", []
+    if estado in {"Bien Planteado", "Consistente"}:
+        return "consistencia_matematica = %s", ["Consistente"]
+    if estado in {"Mal Planteado", "Inconsistente"}:
+        return "consistencia_matematica = %s", ["Inconsistente"]
     return "", []
 
 

@@ -27,7 +27,12 @@ def _html_page() -> str:
     .item.clickable { cursor: pointer; border-color: #94a3b8; }
     .item.clickable:hover { border-color: #64748b; box-shadow: 0 0 0 2px rgba(100,116,139,.15); }
     .item.corrected { border-color: #16a34a; background: #f0fdf4; }
+    .item.active { border-color: #0f766e; box-shadow: 0 0 0 3px rgba(15,118,110,.15); background: #ecfeff; }
     .item.corrected .corr-badge { color: #166534; border: 1px solid #86efac; background: #dcfce7; }
+    .item .img-state-badge { float: right; margin-right: 8px; font-size: 11px; padding: 3px 8px; border-radius: 999px; border: 1px solid #cbd5e1; background: #f8fafc; color: #334155; }
+    .item .img-state-badge.status-imagen_confirmada { color: #166534; border-color: #86efac; background: #dcfce7; }
+    .item .img-state-badge.status-revision { color: #92400e; border-color: #fcd34d; background: #fef3c7; }
+    .item .img-state-badge.status-sin_imagen { color: #475569; border-color: #cbd5e1; background: #f8fafc; }
     .jump-hint { margin: 0 0 8px 0; font-size: 12px; color: #0f766e; }
     .jump-btn { float: right; font-size: 12px; padding: 3px 8px; border: 1px solid #94a3b8; border-radius: 6px; background: #f8fafc; color: #0f172a; }
     .jump-btn:hover { background: #e2e8f0; }
@@ -90,6 +95,8 @@ def _html_page() -> str:
     let itemByNum = {};
     let currentEditItem = null;
     let correctedSet = new Set();
+    let itemImageStatuses = {};
+    let activeItem = null;
 
     function escapeHtml(s) {
       return s.replaceAll('&', '&amp;')
@@ -208,9 +215,20 @@ def _html_page() -> str:
         if (n) {
           itemByNum[n] = item;
           const corr = correctedSet.has(n);
-          const cls = corr ? 'item clickable corrected' : 'item clickable';
+          const isActive = Number(activeItem) === Number(n);
+          const cls = [
+            'item',
+            'clickable',
+            corr ? 'corrected' : '',
+            isActive ? 'active' : '',
+          ].filter(Boolean).join(' ');
           const badge = corr ? '<span class=\"corr-badge\">Corregido</span>' : '';
-          return `<div class=\"${cls}\" data-item=\"${n}\" onclick=\"onItemClick(event)\"><button class=\"jump-btn\" onclick=\"event.stopPropagation(); openEditor(${n});\">Corregir #${n}</button>${badge}${decorate(item)}</div>`;
+          const rawStatus = String(itemImageStatuses[n] || 'sin_imagen').trim() || 'sin_imagen';
+          const statusLabel = rawStatus === 'imagen_confirmada'
+            ? 'Imagen confirmada'
+            : (rawStatus === 'revision' ? 'Revision' : 'Sin imagen');
+          const statusBadge = `<span class=\"img-state-badge status-${escapeHtml(rawStatus)}\">${escapeHtml(statusLabel)}</span>`;
+          return `<div class=\"${cls}\" data-item=\"${n}\" onclick=\"onItemClick(event)\"><button class=\"jump-btn\" onclick=\"event.stopPropagation(); openEditor(${n});\">Corregir #${n}</button>${badge}${statusBadge}${decorate(item)}</div>`;
         }
         return `<div class=\"item\">${decorate(item)}</div>`;
       });
@@ -230,6 +248,10 @@ def _html_page() -> str:
         lastRev = data.rev;
         const corr = Array.isArray(data.corrected) ? data.corrected : [];
         correctedSet = new Set(corr.map(v => parseInt(v, 10)).filter(v => Number.isFinite(v) && v > 0));
+        itemImageStatuses = (data && typeof data.item_image_statuses === 'object' && data.item_image_statuses !== null)
+          ? data.item_image_statuses
+          : {};
+        activeItem = Number(data && data.active_item ? data.active_item : 0) || null;
         render(data.text || '');
       } catch (e) {}
     }
@@ -250,6 +272,8 @@ class _State:
     text: str = ""
     images: dict[str, str] | None = None
     corrected_items: Set[int] = field(default_factory=set)
+    item_image_statuses: Dict[int, str] = field(default_factory=dict)
+    active_item: Optional[int] = None
     goto_item: Optional[int] = None
     edit_requests: List[Dict[str, Any]] = field(default_factory=list)
     rev: int = 0
@@ -315,6 +339,12 @@ class PreviewServer:
                             "text": state.text,
                             "rev": state.rev,
                             "corrected": sorted(int(v) for v in state.corrected_items if int(v) > 0),
+                            "item_image_statuses": {
+                                str(int(k)): str(v)
+                                for k, v in state.item_image_statuses.items()
+                                if int(k) > 0 and str(v or "").strip()
+                            },
+                            "active_item": int(state.active_item or 0) if int(state.active_item or 0) > 0 else None,
                         }
                     self._send(200, json.dumps(payload).encode("utf-8"), "application/json; charset=utf-8")
                     return
@@ -450,6 +480,33 @@ class PreviewServer:
                 vals.add(iv)
         with self._state.lock:
             self._state.corrected_items = vals
+            self._state.rev += 1
+
+    def set_item_image_statuses(self, statuses: Dict[int, str]) -> None:
+        clean: Dict[int, str] = {}
+        for raw_key, raw_value in (statuses or {}).items():
+            try:
+                key = int(raw_key)
+            except Exception:
+                continue
+            value = str(raw_value or "").strip()
+            if key <= 0 or not value:
+                continue
+            clean[key] = value
+        with self._state.lock:
+            self._state.item_image_statuses = clean
+            self._state.rev += 1
+
+    def set_active_item(self, item_num: int | None) -> None:
+        value: Optional[int] = None
+        try:
+            current = int(item_num or 0)
+        except Exception:
+            current = 0
+        if current > 0:
+            value = current
+        with self._state.lock:
+            self._state.active_item = value
             self._state.rev += 1
 
     def pop_goto_item(self) -> Optional[int]:

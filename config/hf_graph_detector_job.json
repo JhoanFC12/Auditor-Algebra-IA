@@ -1,0 +1,24 @@
+﻿{
+    "dataset_local_path":  "E:/Github/Auditor-IA/.cache/transcriptor_runs/datasets/hf_yolo_segmentacion_20260607_141419",
+    "dataset_repo_id":  "Jhoan12/problem-segmentation-yolo-golden-v1",
+    "dataset_private":  true,
+    "model_repo_id":  "Jhoan12/problem-segmentation-yolov8n-golden-v1",
+    "model_private":  true,
+    "flavor":  "l4x1",
+    "timeout_seconds":  14400,
+    "epochs":  50,
+    "batch":  16,
+    "imgsz":  1024,
+    "base_model":  "yolov8n.pt",
+    "job_name":  "problem_segmentation_yolov8n_golden_v4",
+    "last_job_id":  "6a25c430ece949d7b3dcb217",
+    "last_job_status":  "RUNNING",
+    "last_metrics":  {
+        "precision":  0.98965,
+        "recall":  1.0,
+        "map50":  0.9949,
+        "map50_95":  0.90939
+    },
+    "best_weights_path":  "weights/best.pt",
+    "last_weights_path":  "weights/last.pt"
+}

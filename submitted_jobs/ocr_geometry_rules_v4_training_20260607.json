@@ -1,0 +1,25 @@
+{
+  "created_at": "2026-06-07T16:52:00",
+  "purpose": "OCR Geometria rules v4: refuerzo de reglas geometricas sin etiquetas de imagen",
+  "dataset_local_path": "E:/Github/Auditor-IA/.cache/transcriptor_runs/datasets/ocr_geometry_rules_training_20260607_1430",
+  "dataset_repo_id": "Jhoan12/math-ocr-geometry-rules-golden-v4",
+  "reviewed_records": 333,
+  "base_model": "Qwen/Qwen2.5-VL-3B-Instruct",
+  "lora_model_repo_id": "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-rules-lora-v4",
+  "merged_model_repo_id": "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-rules-merged-v4",
+  "hf_job_id": "6a25e837368e0b5dc80666cf",
+  "flavor": "a10g-small",
+  "epochs": 5,
+  "prompt_focus": [
+    "No insertar etiquetas de imagen",
+    "Puntos, segmentos, medidas, arcos, angulos y triangulos en convenciones geometricas",
+    "Usar \\sphericalangle y m\\sphericalangle",
+    "Usar \\overparen para arcos",
+    "Usar \\dfrac y no \\displaystyle"
+  ],
+  "next_steps": [
+    ".\\.venv\\Scripts\\python.exe tools\\submit_merge_ocr_reasoning_hf_job.py --base-model Qwen/Qwen2.5-VL-3B-Instruct --adapter-model Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-rules-lora-v4 --merged-model Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-rules-merged-v4 --flavor a10g-small --timeout 7200",
+    ".\\.venv\\Scripts\\python.exe tools\\create_ocr_reasoning_endpoint.py --name math-ocr-geometry-rules-v4 --repository Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-rules-merged-v4 --timeout 180",
+    ".\\.venv\\Scripts\\python.exe tools\\activate_trained_ocr_model.py --env-file .env.local --model Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-rules-merged-v4 --endpoint-url <URL_DEL_ENDPOINT>/v1 --endpoint-name math-ocr-geometry-rules-v4"
+  ]
+}

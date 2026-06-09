@@ -1,0 +1,2880 @@
+const STAGES = [
+  { id: "pages", title: "Paginas", action: "Elegir paginas del PDF" },
+  { id: "boxes", title: "Boxes", action: "Confirmar cajas de problemas" },
+  { id: "crops", title: "Staging", action: "Revisar crops trazables" },
+  { id: "ocr", title: "OCR", action: "Leer texto y graficos" },
+  { id: "review", title: "Revision", action: "Corregir formulario final" },
+  { id: "candidate", title: "Candidato", action: "Verificar bloqueo de BD" },
+];
+
+const state = {
+  view: "boot",
+  snapshot: null,
+  currentInstance: null,
+  library: {
+    databases: [],
+    selectedDb: "",
+    books: [],
+    details: {},
+    selectedBookId: "",
+    selectedInstanceId: "",
+    screen: "books",
+    query: "",
+    status: "all",
+    error: "",
+    loading: false,
+    showBookForm: false,
+    showInstanceForm: false,
+  },
+  stage: "pages",
+  pdfPage: 1,
+  selectedPages: new Set(),
+  selectedPageRecordId: "",
+  selectedRecordId: "",
+  selectedOcrIndex: 0,
+  boxes: [],
+  boxMode: "select",
+  selectedBox: -1,
+  drag: null,
+  boxDirty: false,
+  boxZoom: 1,
+  figureSegments: [],
+  selectedFigureSegment: -1,
+  figureSegmentMode: "select",
+  figureSegmentDirty: false,
+  figureDrag: null,
+  reviewDraft: null,
+};
+
+const $ = (id) => document.getElementById(id);
+const THEME_STORAGE_KEY = "pdfFactoryTheme";
+const FACTORY_UI_STORAGE_PREFIX = "pdfFactoryUiState:v1";
+const BOX_ZOOM_MIN = 0.35;
+const BOX_ZOOM_MAX = 8;
+const BOX_SCALE_MAX = 2;
+
+function currentTheme() {
+  return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+}
+
+function applyTheme(theme, { persist = true } = {}) {
+  const next = theme === "dark" ? "dark" : "light";
+  document.documentElement.dataset.theme = next;
+  if (persist) {
+    try { localStorage.setItem(THEME_STORAGE_KEY, next); } catch (_) {}
+  }
+  syncThemeToggle();
+}
+
+function toggleTheme() {
+  applyTheme(currentTheme() === "dark" ? "light" : "dark");
+}
+
+function syncThemeToggle() {
+  const btn = $("themeToggle");
+  if (!btn) return;
+  const dark = currentTheme() === "dark";
+  btn.textContent = dark ? "Modo claro" : "Modo oscuro";
+  btn.title = dark ? "Cambiar a modo claro" : "Cambiar a modo oscuro";
+  btn.setAttribute("aria-pressed", dark ? "true" : "false");
+}
+
+async function api(path, options = {}) {
+  const init = { ...options };
+  const isFormData = typeof FormData !== "undefined" && init.body instanceof FormData;
+  if (init.body && typeof init.body !== "string" && !isFormData) {
+    init.body = JSON.stringify(init.body);
+    init.headers = { "Content-Type": "application/json", ...(init.headers || {}) };
+  }
+  let response;
+  try {
+    response = await fetch(path, init);
+  } catch (err) {
+    throw new Error("No se pudo conectar con el servidor local de Fabrica. Cierra esta ventana y vuelve a abrir el acceso directo para reiniciar la Fabrica.");
+  }
+  const text = await response.text();
+  let payload = {};
+  try { payload = text ? JSON.parse(text) : {}; } catch (_) { payload = { raw: text }; }
+  if (!response.ok) {
+    throw new Error(payload.error || payload.raw || response.statusText);
+  }
+  return payload;
+}
+
+async function refresh(message = "") {
+  if (state.view === "library") return loadLibrary(message || "Biblioteca actualizada.");
+  setBusy("Actualizando...");
+  state.snapshot = await loadFactorySnapshot();
+  restoreFactoryUiState();
+  render();
+  setStatus(message || "Listo para trabajar.");
+}
+
+function render() {
+  if (state.view === "library") {
+    renderLibrary();
+    return;
+  }
+  renderFactoryShell();
+  const snap = state.snapshot;
+  if (!snap) return;
+  $("title").textContent = `${snap.context.book_code || "Libro"} / ${snap.context.instance_type || "Instancia"}`;
+  $("subtitle").textContent = `${snap.pdf.name || "PDF"} | Flujo revisable, sin insercion directa en problemas`;
+  renderTimeline();
+  renderMetrics();
+  renderStage();
+}
+
+function renderFactoryShell() {
+  $("workspace").classList.remove("library-mode");
+  const timelineCard = document.querySelector(".timeline-card");
+  if (timelineCard && !$("timeline")) {
+    timelineCard.innerHTML = `
+      <div class="timeline-heading">
+        <span class="section-label">Proceso</span>
+        <strong>De PDF a staging</strong>
+      </div>
+      <nav class="timeline" id="timeline"></nav>
+    `;
+  }
+  const inspector = document.querySelector(".inspector");
+  if (inspector && !$("metrics")) {
+    inspector.innerHTML = `
+      <div class="panel">
+        <h2>Resumen</h2>
+        <div id="metrics" class="metrics"></div>
+      </div>
+      <div class="panel">
+        <h2>Inspector</h2>
+        <div id="inspector" class="inspector-body muted">Selecciona una etapa o problema para ver el contexto util.</div>
+      </div>
+    `;
+  }
+}
+
+async function loadFactorySnapshot() {
+  const instance = state.currentInstance || {};
+  const id = instance.id || instance.instance_id || instance.code || "";
+  if (id) {
+    try {
+      return await api(`/api/library/instances/${encodeURIComponent(id)}/bootstrap`);
+    } catch (err) {
+      setStatus(`No encontre bootstrap de biblioteca para la instancia; probando Fabrica directa. ${err.message}`);
+    }
+    try {
+      return await api(`/api/bootstrap?instance_id=${encodeURIComponent(id)}`);
+    } catch (_) {
+      return api("/api/bootstrap");
+    }
+  }
+  return api("/api/bootstrap");
+}
+
+function factoryUiStorageKey() {
+  const snap = state.snapshot || {};
+  const context = snap.context || {};
+  const pdf = snap.pdf || {};
+  const parts = [
+    context.db_name || context.database || "",
+    context.book_code || context.book_id || context.book || "",
+    context.instance_type || context.instance_id || context.instance_name || "",
+    pdf.path || pdf.name || "",
+  ].map((part) => String(part || "").trim());
+  return `${FACTORY_UI_STORAGE_PREFIX}:${parts.join("|")}`;
+}
+
+function loadPersistedFactoryUiState() {
+  if (!state.snapshot) return {};
+  try {
+    const raw = localStorage.getItem(factoryUiStorageKey());
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function persistFactoryUiState() {
+  if (!state.snapshot || state.view !== "factory") return;
+  try {
+    localStorage.setItem(factoryUiStorageKey(), JSON.stringify({
+      stage: state.stage,
+      pdfPage: state.pdfPage,
+      selectedPages: [...state.selectedPages].sort((a, b) => a - b),
+      selectedPageRecordId: state.selectedPageRecordId,
+      selectedRecordId: state.selectedRecordId,
+      selectedOcrIndex: state.selectedOcrIndex,
+      savedAt: new Date().toISOString(),
+    }));
+  } catch (_) {}
+}
+
+function restoreFactoryUiState() {
+  if (!state.snapshot) return;
+  const persisted = loadPersistedFactoryUiState();
+  const pageCount = Number(state.snapshot.pdf?.page_count || 0);
+  const pages = factoryPages();
+  const records = state.snapshot.records || [];
+  const detectedPages = detectedPageNumbers(pages);
+  const persistedPages = sortedPageNumbers(persisted.selectedPages || []).filter((page) => !pageCount || page <= pageCount);
+  const selectedPages = persistedPages.length ? persistedPages : detectedPages;
+  state.selectedPages = new Set(selectedPages);
+  if (!state.selectedPages.size && pageCount) {
+    state.selectedPages.add(boundPageNumber(persisted.pdfPage || state.pdfPage || 1, pageCount));
+  }
+
+  const firstSelectedPage = [...state.selectedPages].sort((a, b) => a - b)[0] || 1;
+  state.pdfPage = boundPageNumber(persisted.pdfPage || firstSelectedPage, pageCount || Math.max(1, firstSelectedPage));
+
+  const persistedPageRecordId = String(persisted.selectedPageRecordId || state.selectedPageRecordId || "");
+  const matchingPage = pages.find((page) => page.record_id === persistedPageRecordId)
+    || pages.find((page) => Number(page.page_number || 0) === state.pdfPage)
+    || pages[0];
+  state.selectedPageRecordId = matchingPage?.record_id || "";
+  if (matchingPage) state.pdfPage = Number(matchingPage.page_number || state.pdfPage || 1);
+
+  const persistedRecordId = String(persisted.selectedRecordId || state.selectedRecordId || "");
+  const matchingRecord = records.find((record) => record.record_id === persistedRecordId)
+    || records.find((record) => recordPageNumber(record) === state.pdfPage)
+    || records[0];
+  state.selectedRecordId = matchingRecord?.record_id || "";
+  state.selectedOcrIndex = Math.max(0, Number(persisted.selectedOcrIndex || state.selectedOcrIndex || 0) || 0);
+  const inferredStage = inferStageFromSnapshot();
+  state.stage = mostAdvancedStage(normalizeUiStage(persisted.stage), inferredStage) || inferredStage || "pages";
+  persistFactoryUiState();
+}
+
+function inferStageFromSnapshot() {
+  const summary = state.snapshot?.summary || {};
+  const records = state.snapshot?.records || [];
+  const pages = factoryPages();
+  const recordsTotal = Number(summary.records_total || records.length || 0);
+  const normalizedDone = Number(summary.normalized_done || 0);
+  const ocrDone = Number(summary.ocr_done || 0);
+  const segmentsDone = Number(summary.segments_done || 0);
+  if (normalizedDone > 0 || records.some((record) => hasObjectData(record.normalized))) return "review";
+  if (ocrDone > 0 || segmentsDone > 0 || records.some((record) => hasObjectData(record.structured_ocr) || hasText(record.raw_ocr) || hasObjectData(record.figure_segmentation))) return "ocr";
+  if (recordsTotal > 0) return "crops";
+  if (pages.length || Number(summary.pages_total || 0) > 0) return "boxes";
+  return "pages";
+}
+
+function detectedPageNumbers(pages = factoryPages()) {
+  return sortedPageNumbers((pages || []).map((page) => page.page_number));
+}
+
+function sortedPageNumbers(values) {
+  const seen = new Set();
+  (values || []).forEach((value) => {
+    const page = Number(value);
+    if (Number.isFinite(page) && page > 0) seen.add(Math.floor(page));
+  });
+  return [...seen].sort((a, b) => a - b);
+}
+
+function boundPageNumber(page, count) {
+  const max = Math.max(1, Number(count || 1));
+  const next = Number(page || 1);
+  return Math.max(1, Math.min(max, Number.isFinite(next) ? Math.floor(next) : 1));
+}
+
+function normalizeUiStage(stage) {
+  const value = String(stage || "");
+  return STAGES.some((row) => row.id === value) ? value : "";
+}
+
+function stageRank(stage) {
+  return STAGES.findIndex((row) => row.id === stage);
+}
+
+function mostAdvancedStage(a, b) {
+  const rankA = stageRank(a);
+  const rankB = stageRank(b);
+  if (rankA < 0) return rankB >= 0 ? b : "";
+  if (rankB < 0) return a;
+  return rankA >= rankB ? a : b;
+}
+
+function recordPageNumber(record) {
+  const source = record?.source || {};
+  const page = Number(source.page_number || source.source_page_number || record?.page_number || 0);
+  return Number.isFinite(page) ? page : 0;
+}
+
+function hasObjectData(value) {
+  return Boolean(value && typeof value === "object" && Object.keys(value).length);
+}
+
+function hasText(value) {
+  return String(value || "").trim().length > 0;
+}
+
+async function loadLibrary(message = "") {
+  state.library.loading = true;
+  state.library.error = "";
+  setBusy("Cargando biblioteca...");
+  try {
+    if (!state.library.selectedDb) {
+      const dbPayload = await api("/api/library/databases");
+      state.library.databases = dbPayload.databases || [];
+      state.library.selectedDb = dbPayload.selected_db || state.library.databases[0] || "";
+    }
+    if (!state.library.selectedDb) throw new Error("No hay base de datos disponible.");
+    const payload = await api(`/api/library/books?db_name=${encodeURIComponent(state.library.selectedDb)}`);
+    state.library.books = normalizeLibraryBooks(payload);
+    ensureLibrarySelection();
+    renderLibrary();
+    setStatus(message || "Biblioteca lista.");
+    queueBookDetailLoad(state.library.selectedBookId);
+  } catch (err) {
+    state.library.error = friendlyLibraryError(err);
+    renderLibrary();
+    setStatus("Biblioteca lista para conectar con /api/library/books.");
+  } finally {
+    state.library.loading = false;
+    $("busyText").textContent = "";
+  }
+}
+
+function normalizeLibraryBooks(payload) {
+  const rawBooks = Array.isArray(payload) ? payload : (payload.books || payload.items || []);
+  return rawBooks.map((book, index) => {
+    const id = String(book.id || book.book_id || book.code || book.book_code || `book_${index + 1}`);
+    const instances = (book.instances || book.instance_list || []).map((instance, instanceIndex) => ({
+      ...instance,
+      id: String(instance.id || instance.instance_id || instance.code || `${id}_instance_${instanceIndex + 1}`),
+      title: instance.title || instance.name || instance.tipo || instance.instance_type || `Instancia ${instanceIndex + 1}`,
+      status: normalizeStatus(instance.status || instance.review_status || inferInstanceStatus(instance)),
+      summary: instance.summary || instance.metrics || instance.indicators || {},
+    }));
+    return {
+      ...book,
+      id,
+      title: book.title || book.titulo || book.name || book.nombre || id,
+      code: book.code || book.codigo || book.book_code || id,
+      author: book.author || book.autor || "",
+      subject: book.subject || book.curso || "",
+      pdfName: book.pdf_name || book.pdfName || book.filename || "",
+      coverPath: book.cover_path || book.coverPath || "",
+      coverUrl: book.cover_url || book.coverUrl || "",
+      instances,
+    };
+  });
+}
+
+function queueBookDetailLoad(bookId) {
+  const id = String(bookId || "");
+  if (!id || state.library.details[id]?.loaded || state.library.details[id]?.loading) return;
+  state.library.details[id] = { loading: true };
+  loadBookDetail(id).catch((err) => {
+    state.library.details[id] = { loaded: false, loading: false, error: err.message };
+    if (state.view === "library") renderLibraryContent();
+  });
+}
+
+async function loadBookDetail(bookId) {
+  const id = String(bookId || "");
+  if (!id || !state.library.selectedDb) return;
+  const detail = await api(`/api/library/books/${encodeURIComponent(id)}?db_name=${encodeURIComponent(state.library.selectedDb)}`);
+  state.library.details[id] = { ...detail, loaded: true, loading: false };
+  const book = (state.library.books || []).find((row) => row.id === id);
+  if (book) {
+    const normalized = normalizeLibraryBooks({ books: [{ ...book, instances: detail.instances || [] }] })[0];
+    book.instances = normalized.instances || [];
+    book.dashboard = detail.dashboard || {};
+  }
+  if (state.view === "library") {
+    ensureLibrarySelection();
+    renderLibraryContent();
+  }
+}
+
+function ensureLibrarySelection() {
+  const books = filteredBooks(false);
+  if (!books.some((book) => book.id === state.library.selectedBookId)) {
+    state.library.selectedBookId = books[0]?.id || "";
+  }
+  const book = selectedLibraryBook();
+  if (!book || !book.instances.some((item) => item.id === state.library.selectedInstanceId)) {
+    state.library.selectedInstanceId = book?.instances[0]?.id || "";
+  }
+}
+
+function renderLibrary() {
+  $("workspace").classList.add("library-mode");
+  $("title").textContent = "Biblioteca";
+  $("subtitle").textContent = "Registra libros, divide instancias y abre la Fabrica por tramo de trabajo.";
+  document.querySelector(".timeline-card").innerHTML = renderLibraryFilters();
+  bindLibrarySidebarEvents();
+  renderLibraryContent();
+}
+
+function renderLibraryContent() {
+  document.querySelector(".inspector").innerHTML = renderLibraryInspector();
+  $("stageHost").innerHTML = renderLibraryStage();
+  bindLibraryContentEvents();
+  syncLibraryBottomAction();
+}
+
+function renderLibraryFilters() {
+  const counts = libraryCounts();
+  return `
+    <div class="library-sidebar">
+      <div class="timeline-heading">
+        <span class="section-label">Biblioteca</span>
+        <strong>${counts.books} libro(s)</strong>
+      </div>
+      <label class="library-search">
+        <span class="muted">Base de datos</span>
+        <select id="libraryDb">
+          ${(state.library.databases || []).map((db) => `<option value="${escapeAttr(db)}" ${db === state.library.selectedDb ? "selected" : ""}>${escapeHtml(db)}</option>`).join("")}
+        </select>
+      </label>
+      <label class="library-search">
+        <span class="muted">Buscar</span>
+        <input id="librarySearch" value="${escapeAttr(state.library.query)}" placeholder="Titulo, codigo, curso" />
+      </label>
+      <div class="filter-stack" aria-label="Filtros por estado">
+        ${[
+          ["all", "Todos", counts.instances],
+          ["pendiente", "Pendientes", counts.pendiente],
+          ["procesando", "En progreso", counts.procesando],
+          ["requiere_revision", "Por revisar", counts.requiere_revision],
+          ["listo", "Revisadas", counts.listo],
+        ].map(([value, label, total]) => `
+          <button class="filter-chip ${state.library.status === value ? "active" : ""}" data-library-status="${value}" type="button">
+            <span>${label}</span><strong>${total}</strong>
+          </button>
+        `).join("")}
+      </div>
+      <button id="newBookBtn" class="primary wide-action" type="button">Registrar libro</button>
+      <button id="openFactoryDirectBtn" class="ghost wide-action" type="button">Abrir Fabrica sin biblioteca</button>
+      ${state.library.error ? `<div class="library-notice">${escapeHtml(state.library.error)}</div>` : ""}
+    </div>
+  `;
+}
+
+function renderLibraryStage() {
+  if (state.library.screen === "book") return renderLibraryBookStage();
+  return renderLibraryBooksStage();
+}
+
+function renderLibraryBooksStage() {
+  const books = filteredBooks();
+  return `
+    <div class="stage-header library-header">
+      <div>
+        <h2>Biblioteca de libros</h2>
+        <p class="muted">Explora las portadas y metadatos. Selecciona un libro para ver sus instancias en una pagina dedicada.</p>
+      </div>
+      <button id="showBookFormBtn" class="secondary" type="button">Registrar libro</button>
+    </div>
+    ${state.library.showBookForm ? renderBookForm() : ""}
+    <div class="library-books-page">
+      <section class="library-books library-books-grid" aria-label="Libros disponibles">
+        ${books.length ? books.map(bookCardHtml).join("") : renderLibraryEmptyState()}
+      </section>
+    </div>
+  `;
+}
+
+function renderLibraryBookStage() {
+  const selected = selectedLibraryBook();
+  if (!selected) {
+    state.library.screen = "books";
+    return renderLibraryBooksStage();
+  }
+  return `
+    <div class="stage-header library-header">
+      <div>
+        <button id="backToBooksBtn" class="ghost compact-action" type="button">Volver a libros</button>
+        <h2>Instancias del libro</h2>
+        <p class="muted">Revisa el avance por tramo y abre la Fabrica PDF solo para la instancia que quieras trabajar.</p>
+      </div>
+      <button id="createInstanceBtn" class="secondary" type="button">Crear instancia</button>
+    </div>
+    ${state.library.showInstanceForm ? renderInstanceForm(selected) : ""}
+    <section class="library-detail library-detail-page" aria-label="Detalle de instancias">
+      ${renderBookDetail(selected)}
+    </section>
+  `;
+}
+
+function renderBookForm() {
+  return `
+    <form id="bookForm" class="panel form-grid library-form">
+      ${field("bookCode", "Codigo", "")}
+      ${field("bookTitle", "Titulo", "")}
+      ${field("bookAuthor", "Autor", "")}
+      ${field("bookEditorial", "Editorial", "")}
+      ${field("bookEdition", "Edicion", "")}
+      ${field("bookSubject", "Curso/area", "")}
+      <label class="wide"><span class="muted">Ruta del PDF</span><input id="bookPdfPath" placeholder="E:\\Libros\\algebra.pdf" /></label>
+      <label class="wide"><span class="muted">Carpeta de trabajo</span><input id="bookWorkspace" placeholder="Opcional; si queda vacia se genera automaticamente" /></label>
+      <label class="wide"><span class="muted">Portada o imagen</span><input id="bookCover" placeholder="Opcional" /></label>
+      <div class="form-actions wide">
+        <button type="button" id="cancelBookForm">Cancelar</button>
+        <button type="submit" class="primary">Guardar libro</button>
+      </div>
+    </form>
+  `;
+}
+
+function renderInstanceForm(book) {
+  return `
+    <form id="instanceForm" class="panel form-grid library-form">
+      <label><span class="muted">Tipo</span><select id="instanceType">
+        <option value="capitulo">Capitulo</option>
+        <option value="rango">Rango de paginas</option>
+        <option value="evaluacion">Evaluacion</option>
+        <option value="personalizada">Personalizada</option>
+      </select></label>
+      ${field("instanceName", "Nombre", book ? `${book.code} - instancia ${(book.instances || []).length + 1}` : "")}
+      ${field("instancePages", "Paginas", "")}
+      ${field("instanceNotes", "Notas", "")}
+      <div class="form-actions wide">
+        <button type="button" id="cancelInstanceForm">Cancelar</button>
+        <button type="submit" class="primary">Crear instancia</button>
+      </div>
+    </form>
+  `;
+}
+
+function bookCardHtml(book) {
+  const counts = statusCounts(book.instances || []);
+  const isActive = book.id === state.library.selectedBookId;
+  return `
+    <button class="book-card ${isActive ? "active" : ""}" data-book="${book.id}" type="button">
+      ${bookCoverHtml(book)}
+      <span class="book-main">
+        <strong>${escapeHtml(book.title)}</strong>
+        <span>${escapeHtml([book.code, book.author, book.subject].filter(Boolean).join(" | ") || "Sin metadatos")}</span>
+      </span>
+      <span class="book-stats">
+        ${miniStat("Pend.", counts.pendiente)}
+        ${miniStat("Prog.", counts.procesando)}
+        ${miniStat("Rev.", counts.listo)}
+      </span>
+      <span class="book-card-action">Ver instancias</span>
+    </button>
+  `;
+}
+
+function bookCoverHtml(book, variant = "") {
+  const url = String(book.coverUrl || "").trim();
+  const label = bookCoverLabel(book);
+  return `
+    <span class="book-cover ${variant ? `book-cover-${variant}` : ""} ${url ? "has-image" : ""}">
+      ${url ? `<img src="${escapeAttr(url)}" alt="" loading="lazy" />` : `<span>${escapeHtml(label)}</span>`}
+    </span>
+  `;
+}
+
+function bookCoverLabel(book) {
+  const source = String(book.code || book.title || "Libro").trim();
+  const tokens = source.split(/[\s_-]+/).filter(Boolean);
+  const initials = tokens.slice(0, 2).map((token) => token[0]).join("").toUpperCase();
+  return initials || "LB";
+}
+
+function miniStat(label, value) {
+  return `<span><b>${Number(value || 0)}</b>${label}</span>`;
+}
+
+function renderBookDetail(book) {
+  const instances = filteredInstances(book.instances || []);
+  return `
+    <div class="panel book-detail-head">
+      <div class="book-detail-title">
+        ${bookCoverHtml(book, "large")}
+        <div>
+          <span class="section-label">${escapeHtml(book.code)}</span>
+          <h3>${escapeHtml(book.title)}</h3>
+          <p class="muted">${escapeHtml([book.author, book.subject, book.pdfName].filter(Boolean).join(" | ") || "Sin PDF asociado todavia.")}</p>
+        </div>
+      </div>
+      <span class="status-pill status-${instances.length ? "listo" : "pendiente"}">${instances.length} instancia(s)</span>
+    </div>
+    <div class="instance-list">
+      ${instances.length ? instances.map(instanceCardHtml).join("") : `<div class="panel muted">No hay instancias con este filtro. Crea una instancia o cambia el estado seleccionado.</div>`}
+    </div>
+  `;
+}
+
+function instanceCardHtml(instance) {
+  const status = normalizeStatus(instance.status || "pendiente");
+  const isActive = instance.id === state.library.selectedInstanceId;
+  const totals = instance.summary || instance.metrics || {};
+  return `
+    <article class="instance-card ${isActive ? "active" : ""}" data-instance="${instance.id}">
+      <button class="instance-select" data-instance-select="${instance.id}" type="button">
+        <span>
+          <strong>${escapeHtml(instance.title)}</strong>
+          <small>${escapeHtml(instance.pages || instance.page_range || instance.range || "Paginas por definir")}</small>
+        </span>
+        <span class="status-pill status-${status}">${displayStatus(status)}</span>
+      </button>
+      <div class="instance-progress" aria-label="Indicadores de avance">
+        ${progressMetric("Escaneados", totals.escaneados_sesion || totals.total || totals.pages_total || totals.pages || 0)}
+        ${progressMetric("Meta", totals.total_esperado || totals.boxes_total || totals.boxes || 0)}
+        ${progressMetric("Revisadas", totals.consistentes || totals.ready || totals.reviewed || 0)}
+      </div>
+      <div class="instance-actions">
+        <button data-open-factory="${instance.id}" class="primary" type="button">Abrir Fabrica</button>
+      </div>
+    </article>
+  `;
+}
+
+function progressMetric(label, value) {
+  return `<span><b>${Number(value || 0)}</b>${label}</span>`;
+}
+
+function renderLibraryInspector() {
+  const book = selectedLibraryBook();
+  const instance = selectedLibraryInstance();
+  const counts = libraryCounts();
+  return `
+    <div class="panel">
+      <h2>Estados</h2>
+      <div class="metrics">
+        <div class="metric"><span class="metric-label">Libros</span><strong>${counts.books}</strong></div>
+        <div class="metric"><span class="metric-label">Instancias</span><strong>${counts.instances}</strong></div>
+        <div class="metric"><span class="metric-label">Pendientes</span><strong>${counts.pendiente}</strong></div>
+        <div class="metric"><span class="metric-label">Revisadas</span><strong>${counts.listo}</strong></div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Seleccion</h2>
+      <div id="inspector" class="inspector-body">
+        ${book ? `
+          <div class="inspector-line"><strong>Libro</strong><span>${escapeHtml(book.title)}</span></div>
+          <div class="inspector-line"><strong>Codigo</strong><span>${escapeHtml(book.code)}</span></div>
+          <div class="inspector-line"><strong>Vista</strong><span>${state.library.screen === "book" ? "Instancias" : "Libros"}</span></div>
+          ${state.library.screen === "book" ? `
+            <div class="inspector-line"><strong>Instancia</strong><span>${escapeHtml(instance?.title || "Sin instancia seleccionada")}</span></div>
+            <div class="inspector-line"><strong>Estado</strong><span>${escapeHtml(instance ? displayStatus(normalizeStatus(instance.status)) : "-")}</span></div>
+          ` : ""}
+        ` : `<span class="muted">Sin libro seleccionado.</span>`}
+      </div>
+    </div>
+  `;
+}
+
+function renderLibraryEmptyState() {
+  return `
+    <div class="empty-state library-empty">
+      <div>
+        <strong>Aun no hay libros visibles</strong>
+        <p>Registra un libro o conecta el endpoint /api/library/books para poblar esta vista.</p>
+      </div>
+    </div>
+  `;
+}
+
+function bindLibrarySidebarEvents() {
+  if ($("libraryDb")) {
+    $("libraryDb").onchange = (event) => {
+      state.library.selectedDb = event.target.value;
+      state.library.details = {};
+      state.library.selectedBookId = "";
+      state.library.selectedInstanceId = "";
+      state.library.screen = "books";
+      loadLibrary("Base de datos cambiada.").catch((err) => setStatus(`Error de biblioteca: ${err.message}`));
+    };
+  }
+  if ($("librarySearch")) $("librarySearch").oninput = (event) => {
+    state.library.query = event.target.value;
+    state.library.screen = "books";
+    state.library.showInstanceForm = false;
+    ensureLibrarySelection();
+    renderLibraryContent();
+    queueBookDetailLoad(state.library.selectedBookId);
+  };
+  document.querySelectorAll("[data-library-status]").forEach((btn) => {
+    btn.onclick = () => {
+      state.library.status = btn.dataset.libraryStatus;
+      state.library.screen = "books";
+      ensureLibrarySelection();
+      renderLibrary();
+    };
+  });
+  $("newBookBtn").onclick = () => {
+    state.library.screen = "books";
+    state.library.showBookForm = true;
+    state.library.showInstanceForm = false;
+    renderLibraryContent();
+  };
+  $("openFactoryDirectBtn").onclick = () => openFactoryForInstance("");
+}
+
+function bindLibraryContentEvents() {
+  document.querySelectorAll("[data-book]").forEach((btn) => {
+    btn.onclick = () => {
+      state.library.selectedBookId = btn.dataset.book;
+      const nextBook = selectedLibraryBook();
+      state.library.selectedInstanceId = filteredInstances(nextBook?.instances || [])[0]?.id || nextBook?.instances?.[0]?.id || "";
+      state.library.screen = "book";
+      state.library.showBookForm = false;
+      renderLibraryContent();
+      queueBookDetailLoad(state.library.selectedBookId);
+    };
+  });
+  document.querySelectorAll("[data-instance-select]").forEach((btn) => {
+    btn.onclick = () => {
+      state.library.selectedInstanceId = btn.dataset.instanceSelect;
+      renderLibraryContent();
+    };
+  });
+  document.querySelectorAll("[data-open-factory]").forEach((btn) => {
+    btn.onclick = () => openFactoryForInstance(btn.dataset.openFactory);
+  });
+  if ($("showBookFormBtn")) $("showBookFormBtn").onclick = () => {
+    state.library.screen = "books";
+    state.library.showBookForm = true;
+    state.library.showInstanceForm = false;
+    renderLibraryContent();
+  };
+  if ($("backToBooksBtn")) $("backToBooksBtn").onclick = () => {
+    state.library.screen = "books";
+    state.library.showInstanceForm = false;
+    renderLibraryContent();
+  };
+  if ($("createInstanceBtn")) $("createInstanceBtn").onclick = () => {
+    state.library.screen = "book";
+    state.library.showInstanceForm = true;
+    state.library.showBookForm = false;
+    renderLibraryContent();
+  };
+  $("bookForm")?.addEventListener("submit", submitBookForm);
+  $("instanceForm")?.addEventListener("submit", submitInstanceForm);
+  if ($("cancelBookForm")) $("cancelBookForm").onclick = () => { state.library.showBookForm = false; renderLibraryContent(); };
+  if ($("cancelInstanceForm")) $("cancelInstanceForm").onclick = () => { state.library.showInstanceForm = false; renderLibraryContent(); };
+}
+
+function syncLibraryBottomAction() {
+  const book = selectedLibraryBook();
+  const instance = selectedLibraryInstance();
+  $("actionHint").textContent = state.library.screen === "book"
+    ? "Selecciona una instancia para abrir su flujo PDF revisable."
+    : "Selecciona un libro para ver sus instancias.";
+  $("primaryAction").textContent = state.library.screen === "book" && instance ? "Abrir Fabrica" : (book ? "Ver instancias" : "Registrar libro");
+  $("primaryAction").onclick = () => {
+    if (state.library.screen === "book" && instance) openFactoryForInstance(instance.id);
+    else if (book) {
+      state.library.screen = "book";
+      state.library.showBookForm = false;
+      renderLibraryContent();
+      queueBookDetailLoad(book.id);
+    }
+    else {
+      state.library.showBookForm = true;
+      renderLibraryContent();
+    }
+  };
+}
+
+async function submitBookForm(event) {
+  event.preventDefault();
+  await runAction("Registrando libro...", async () => {
+    await api("/api/library/books", {
+      method: "POST",
+      body: {
+        db_name: state.library.selectedDb || "",
+        title: $("bookTitle").value.trim(),
+        code: $("bookCode").value.trim(),
+        author: $("bookAuthor").value.trim(),
+        editorial: $("bookEditorial").value.trim(),
+        edition: $("bookEdition").value.trim(),
+        subject: $("bookSubject").value.trim(),
+        pdf_path: $("bookPdfPath").value.trim(),
+        workspace_dir: $("bookWorkspace").value.trim(),
+        cover_path: $("bookCover").value.trim(),
+      },
+    });
+    state.library.showBookForm = false;
+    state.library.screen = "books";
+    await loadLibrary("Libro registrado.");
+  }, "Libro registrado.");
+}
+
+async function submitInstanceForm(event) {
+  event.preventDefault();
+  const book = selectedLibraryBook();
+  if (!book) return setStatus("Selecciona un libro antes de crear una instancia.");
+  await runAction("Creando instancia...", async () => {
+    await api(`/api/library/books/${encodeURIComponent(book.id)}/instances`, {
+      method: "POST",
+      body: {
+        db_name: state.library.selectedDb || "",
+        type: $("instanceType").value,
+        name: $("instanceName").value.trim(),
+        pages: $("instancePages").value.trim(),
+        notes: $("instanceNotes").value.trim(),
+      },
+    });
+    state.library.showInstanceForm = false;
+    state.library.screen = "book";
+    await loadLibrary("Instancia creada.");
+  }, "Instancia creada.");
+}
+
+async function openFactoryForInstance(instanceId) {
+  const instance = instanceId ? findLibraryInstance(instanceId) : null;
+  if (!instance || !instance.book) {
+    state.view = "factory";
+    state.snapshot = null;
+    state.stage = "pages";
+    await refresh("Fabrica directa.");
+    return;
+  }
+  await runAction("Abriendo Fabrica...", async () => {
+    const result = await api(`/api/library/instances/${encodeURIComponent(instance.id)}/factory`, {
+      method: "POST",
+      body: {
+        db_name: state.library.selectedDb || "",
+        book_id: instance.book.id,
+        open: false,
+      },
+    });
+    if (result.url) window.open(result.url, "_blank", "noopener");
+  }, `Fabrica abierta para ${instance.title}.`);
+}
+
+function renderTimeline() {
+  const timeline = $("timeline");
+  const byName = Object.fromEntries((state.snapshot.timeline || []).map((row) => [normalizeStageName(row.stage), row]));
+  timeline.innerHTML = STAGES.map((stage, idx) => {
+    const row = byName[stage.id] || {};
+    const status = normalizeStatus(row.status || "pendiente");
+    const isActive = state.stage === stage.id;
+    return `
+      <button class="timeline-step ${isActive ? "active" : ""}" data-stage="${stage.id}" type="button">
+        <span class="timeline-index">${idx + 1}</span>
+        <span class="timeline-copy">
+          <span class="timeline-title-row">
+            <span class="timeline-title">${stage.title}</span>
+            ${isActive ? `<span class="timeline-current">Ahora</span>` : ""}
+          </span>
+          <span class="timeline-detail">${escapeHtml(row.detail || stageHint(stage.id))}</span>
+          <span class="timeline-action">${escapeHtml(stage.action)}</span>
+          <span class="status-pill status-${status}">${displayStatus(status)}</span>
+        </span>
+      </button>
+    `;
+  }).join("");
+  timeline.querySelectorAll("[data-stage]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.stage = btn.dataset.stage;
+      persistFactoryUiState();
+      renderStage();
+      renderTimeline();
+    });
+  });
+}
+
+function renderMetrics() {
+  const s = state.snapshot.summary || {};
+  const fields = [
+    ["pages_total", "Paginas"],
+    ["boxes_total", "Boxes"],
+    ["records_total", "Problemas"],
+    ["ocr_done", "OCR"],
+    ["segments_done", "Segmentos"],
+    ["normalized_done", "Normalizados"],
+    ["ready", "Listos"],
+    ["errors", "Errores"],
+  ];
+  $("metrics").innerHTML = fields.map(([key, label]) => `
+    <div class="metric ${key === "errors" && Number(s[key] || 0) ? "metric-warning" : ""}">
+      <span class="metric-label">${label}</span>
+      <strong>${Number(s[key] || 0)}</strong>
+    </div>
+  `).join("");
+}
+
+function activeModelPayload() {
+  const models = state.snapshot?.models || {};
+  return {
+    pdf_detector: String(models.pdf_detector || models.stages?.pdf_detector?.model_id || ""),
+    ocr: String(models.ocr || models.stages?.ocr?.model_id || ""),
+    figure_segmenter: String(models.figure_segmenter || models.stages?.figure_segmenter?.model_id || ""),
+  };
+}
+
+function modelStageInfo(stage) {
+  const models = state.snapshot?.models || {};
+  const stages = models.stages || {};
+  const row = stages[stage] || {};
+  const payload = activeModelPayload();
+  return {
+    label: {
+      pdf_detector: "Segmentacion de problemas",
+      ocr: "OCR entrenado",
+      figure_segmenter: "Segmentacion de graficos",
+    }[stage] || stage,
+    model_id: row.model_id || payload[stage] || "",
+    provider: row.provider || "",
+    source: row.source || "",
+    confidence: row.confidence,
+    fallback: row.fallback || "",
+  };
+}
+
+function renderModelStrip(stages) {
+  const rows = (stages || []).map((stage) => modelStageInfo(stage)).filter((row) => row.model_id);
+  if (!rows.length) return "";
+  return `
+    <div class="model-strip" aria-label="Modelos entrenados activos">
+      ${rows.map((row) => `
+        <div class="model-chip">
+          <span>${escapeHtml(row.label)}</span>
+          <strong title="${escapeAttr(row.model_id)}">${escapeHtml(compactModelName(row.model_id))}</strong>
+          <small>${escapeHtml([row.provider, row.source].filter(Boolean).join(" | ") || "modelo activo")}</small>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function compactModelName(value) {
+  const raw = String(value || "").replaceAll("\\", "/");
+  if (!raw) return "-";
+  const parts = raw.split("/").filter(Boolean);
+  if (parts.length >= 2 && !raw.includes(":")) return parts.slice(-2).join("/");
+  return compactText(parts.slice(-4).join("/") || raw, 58);
+}
+
+function renderStage() {
+  const renderers = {
+    pages: renderPagesStage,
+    boxes: renderBoxesStage,
+    crops: renderCropsStage,
+    ocr: renderOcrStage,
+    review: renderReviewStage,
+    candidate: renderCandidateStage,
+  };
+  (renderers[state.stage] || renderPagesStage)();
+  syncPrimaryAction();
+}
+
+function renderPagesStage() {
+  const pdf = state.snapshot.pdf || {};
+  const pageCount = Number(pdf.page_count || 0);
+  if (!state.selectedPages.size && pageCount) {
+    const detected = detectedPageNumbers();
+    state.selectedPages = new Set(detected.length ? detected : [state.pdfPage]);
+    persistFactoryUiState();
+  }
+  $("stageHost").innerHTML = `
+    <div class="stage-header">
+      <div>
+        <h2>Elegir paginas del PDF</h2>
+        <p class="muted">Define el tramo de trabajo. El detector solo analizara estas paginas y dejara todo en staging.</p>
+      </div>
+      <span class="status-pill status-${pdf.exists ? "listo" : "error"}">${pdf.exists ? pageCount + " paginas" : "PDF no encontrado"}</span>
+    </div>
+    <div class="toolbar">
+      <button id="prevPdf">Anterior</button>
+      <button id="nextPdf">Siguiente</button>
+      <div class="field"><input id="pageInput" value="${state.pdfPage}" /></div>
+      <button id="goPdf">Ir</button>
+      <button id="togglePdf" class="secondary">${state.selectedPages.has(state.pdfPage) ? "Quitar pagina" : "Seleccionar pagina"}</button>
+      <div class="field"><input id="rangeInput" value="${selectedRangeText() || (pageCount ? "1-" + pageCount : "")}" /></div>
+      <button id="applyRange">Usar rango</button>
+      <button id="selectAllPages">Todas</button>
+      <button id="clearPages">Limpiar</button>
+      <span class="selection-count">${state.selectedPages.size} seleccionada(s)</span>
+    </div>
+    ${renderModelStrip(["pdf_detector"])}
+    <div id="pagePicker" class="page-picker"></div>
+    <div class="grid-two">
+      <div class="canvas-wrap page-canvas ${state.selectedPages.has(state.pdfPage) ? "is-selected" : ""}">
+        <div class="canvas-badge">${state.selectedPages.has(state.pdfPage) ? "Pagina seleccionada" : "Pagina no seleccionada"}</div>
+        <canvas id="pdfCanvas"></canvas>
+      </div>
+      <div class="panel">
+        <h3>Seleccionadas</h3>
+        <div id="selectedPagesList" class="list"></div>
+      </div>
+    </div>
+  `;
+  $("prevPdf").onclick = () => setPdfPage(Math.max(1, state.pdfPage - 1));
+  $("nextPdf").onclick = () => setPdfPage(Math.min(pageCount || 1, state.pdfPage + 1));
+  $("goPdf").onclick = () => setPdfPage(Number($("pageInput").value || 1));
+  $("togglePdf").onclick = () => {
+    if (state.selectedPages.has(state.pdfPage)) state.selectedPages.delete(state.pdfPage);
+    else state.selectedPages.add(state.pdfPage);
+    persistFactoryUiState();
+    renderPagesStage();
+  };
+  $("applyRange").onclick = () => {
+    state.selectedPages = parseRange($("rangeInput").value, pageCount);
+    persistFactoryUiState();
+    renderPagesStage();
+  };
+  $("selectAllPages").onclick = () => {
+    state.selectedPages = new Set(Array.from({ length: pageCount }, (_, index) => index + 1));
+    persistFactoryUiState();
+    renderPagesStage();
+  };
+  $("clearPages").onclick = () => {
+    state.selectedPages = new Set();
+    persistFactoryUiState();
+    renderPagesStage();
+  };
+  renderPagePicker(pageCount);
+  renderSelectedPagesList();
+  drawImageOnCanvas($("pdfCanvas"), `/api/pdf/page?page=${state.pdfPage}&dpi=150`);
+  setInspector({
+    "PDF": pdf.path || "-",
+    "Pagina actual": state.pdfPage,
+    "Paginas elegidas": selectedRangeText() || "-",
+  });
+}
+
+function renderPagePicker(pageCount) {
+  const picker = $("pagePicker");
+  if (!picker) return;
+  if (!pageCount) {
+    picker.innerHTML = `<p class="muted">No hay paginas disponibles.</p>`;
+    return;
+  }
+  const pages = Array.from({ length: pageCount }, (_, index) => index + 1);
+  picker.innerHTML = pages.map((page) => `
+    <button class="page-chip ${page === state.pdfPage ? "current" : ""} ${state.selectedPages.has(page) ? "selected" : ""}" data-page="${page}" title="Pagina ${page}">
+      ${page}
+    </button>
+  `).join("");
+  picker.querySelectorAll("[data-page]").forEach((item) => {
+    item.onclick = () => setPdfPage(Number(item.dataset.page));
+    item.ondblclick = () => {
+      const page = Number(item.dataset.page);
+      if (state.selectedPages.has(page)) state.selectedPages.delete(page);
+      else state.selectedPages.add(page);
+      state.pdfPage = page;
+      persistFactoryUiState();
+      renderPagesStage();
+    };
+  });
+}
+
+function renderSelectedPagesList() {
+  const list = $("selectedPagesList");
+  const pages = [...state.selectedPages].sort((a, b) => a - b);
+  list.innerHTML = pages.length ? pages.map((page) => `
+    <div class="row-card page-row ${page === state.pdfPage ? "active" : ""}" data-page="${page}">
+      <div>
+        <strong>Pagina ${page}</strong>
+        <div class="muted">Seleccionada para deteccion.</div>
+      </div>
+      <button data-remove-page="${page}" title="Quitar pagina">X</button>
+    </div>
+  `).join("") : `<p class="muted">Sin paginas seleccionadas.</p>`;
+  list.querySelectorAll("[data-page]").forEach((item) => {
+    item.onclick = (event) => {
+      if (event.target.closest("[data-remove-page]")) return;
+      setPdfPage(Number(item.dataset.page));
+    };
+  });
+  list.querySelectorAll("[data-remove-page]").forEach((btn) => {
+    btn.onclick = (event) => {
+      event.stopPropagation();
+      state.selectedPages.delete(Number(btn.dataset.removePage));
+      persistFactoryUiState();
+      renderPagesStage();
+    };
+  });
+}
+
+function setPdfPage(page) {
+  const count = Number(state.snapshot.pdf.page_count || 1);
+  state.pdfPage = Math.max(1, Math.min(count, Number(page || 1)));
+  persistFactoryUiState();
+  renderPagesStage();
+}
+
+function renderBoxesStage() {
+  const pages = factoryPages();
+  syncSelectedBoxPage(pages);
+  const page = pages.find((row) => row.record_id === state.selectedPageRecordId) || pages[0];
+  syncCurrentPageBoxes(page);
+  $("stageHost").innerHTML = `
+    <div class="stage-header">
+      <div>
+        <h2>Revisar boxes de problemas</h2>
+        <p class="muted">Ajusta cada caja para que contenga un problema matematico completo.</p>
+      </div>
+    </div>
+    <div class="toolbar">
+      <button id="modeSelect" class="${state.boxMode === "select" ? "secondary" : ""}">Seleccionar/mover</button>
+      <button id="modeAdd" class="${state.boxMode === "add" ? "secondary" : ""}">Nuevo box</button>
+      <button id="deleteBox">Eliminar</button>
+      <button id="sortBoxes">Reordenar lectura</button>
+      <button id="moveBoxUp">Subir</button>
+      <button id="moveBoxDown">Bajar</button>
+      <div class="zoom-tools" aria-label="Zoom del editor de boxes">
+        <button id="boxZoomOut" type="button" title="Alejar">-</button>
+        <span id="boxZoomLabel" class="zoom-label">Auto</span>
+        <button id="boxZoomIn" type="button" title="Acercar">+</button>
+        <button id="boxZoomFit" type="button" title="Ajustar al panel">Ajustar</button>
+        <button id="boxZoomActual" type="button" title="Ver a tamano real">100%</button>
+      </div>
+      <select id="layoutMode" class="field">
+        ${["auto", "una_columna", "dos_columnas"].map((value) => `<option value="${value}" ${page && page.layout_mode === value ? "selected" : ""}>${value}</option>`).join("")}
+      </select>
+      <button id="saveBoxes" class="primary">Guardar pagina revisada</button>
+    </div>
+    <div class="grid-two boxes-editor-grid">
+      <div class="canvas-wrap boxes-canvas-wrap"><canvas id="boxCanvas"></canvas></div>
+      <div class="panel">
+        <h3>Paginas detectadas (${pages.length})</h3>
+        <div id="pagesList" class="list"></div>
+        <h3 class="section-title">Boxes de la pagina</h3>
+        <div id="boxesList" class="list compact-list"></div>
+      </div>
+    </div>
+  `;
+  renderPageRecordList(pages);
+  renderBoxList();
+  if (page) setupBoxCanvas(page);
+  $("modeSelect").onclick = () => { state.boxMode = "select"; renderBoxesStage(); };
+  $("modeAdd").onclick = () => { state.boxMode = "add"; renderBoxesStage(); };
+  $("deleteBox").onclick = () => deleteSelectedBox();
+  $("sortBoxes").onclick = () => {
+    state.boxes.sort((a, b) => (a[1] - b[1]) || (a[0] - b[0]));
+    state.selectedBox = Math.min(state.selectedBox, state.boxes.length - 1);
+    markBoxesDirty();
+  };
+  $("moveBoxUp").onclick = () => moveSelectedBox(-1);
+  $("moveBoxDown").onclick = () => moveSelectedBox(1);
+  $("layoutMode").onchange = () => { state.boxDirty = true; };
+  $("saveBoxes").onclick = saveCurrentBoxes;
+  bindBoxZoomControls();
+  setInspector(page ? {
+    "Pagina": page.page_number,
+    "Boxes": state.boxes.length,
+    "Modo": state.boxMode === "add" ? "Nuevo box" : "Seleccionar y ajustar",
+    "Zoom": currentBoxZoomLabel(),
+    "Cambios sin guardar": state.boxDirty ? "si" : "no",
+  } : "Ejecuta primero la deteccion de paginas.");
+}
+
+function renderPageRecordList(pages) {
+  const list = $("pagesList");
+  list.innerHTML = pages.length ? pages.map((page) => `
+    <div class="row-card ${page.record_id === state.selectedPageRecordId ? "active" : ""}" data-id="${page.record_id}">
+      <strong>Pagina ${page.page_number}</strong>
+      <div class="muted">${page.boxes_total} box(es) | ${page.reviewed ? "revisada" : "pendiente"}</div>
+    </div>
+  `).join("") : `<p class="muted">Aun no hay paginas detectadas.</p>`;
+  list.querySelectorAll("[data-id]").forEach((item) => item.onclick = () => {
+    selectBoxPage(item.dataset.id);
+  });
+}
+
+function factoryPages() {
+  return dedupePagesByNumber(state.snapshot.pages || []);
+}
+
+function dedupePagesByNumber(pages) {
+  const byPage = new Map();
+  (pages || []).forEach((page, index) => {
+    const pageNumber = Number(page.page_number || 0);
+    const key = pageNumber > 0 ? `page:${pageNumber}` : `record:${page.record_id || index}`;
+    const current = byPage.get(key);
+    if (!current || pageSyncScore(page, index) >= pageSyncScore(current.page, current.index)) {
+      byPage.set(key, { page, index });
+    }
+  });
+  return [...byPage.values()]
+    .map((item) => item.page)
+    .sort((a, b) => (Number(a.page_number || 0) - Number(b.page_number || 0)) || String(a.record_id || "").localeCompare(String(b.record_id || "")));
+}
+
+function pageSyncScore(page, index) {
+  const detector = String(page.detector_source || "").toLowerCase();
+  return (detector.startsWith("pdf_factory") ? 10_000_000_000 : 0)
+    + (page.reviewed ? 1_000_000_000 : 0)
+    + Number(page.boxes_total || (page.boxes || []).length || 0) * 10_000
+    + (page.image_url ? 1_000 : 0)
+    + Number(index || 0);
+}
+
+function syncSelectedBoxPage(pages) {
+  if (!pages.length) {
+    state.selectedPageRecordId = "";
+    syncCurrentPageBoxes(null);
+    return;
+  }
+  if (!pages.some((row) => row.record_id === state.selectedPageRecordId)) {
+    state.selectedPageRecordId = pages[0].record_id;
+  }
+  const page = pages.find((row) => row.record_id === state.selectedPageRecordId) || pages[0];
+  state.pdfPage = Number(page.page_number || state.pdfPage || 1);
+}
+
+function syncCurrentPageBoxes(page) {
+  const source = page ? String(page.record_id || "") : "";
+  const signature = page ? pageBoxesSignature(page) : "";
+  const shouldLoadPage = state._boxSource !== source || (!state.boxDirty && state._boxSourceSignature !== signature);
+  if (shouldLoadPage) {
+    state.boxes = page ? cloneBoxes(page.boxes) : [];
+    state._boxSource = source;
+    state._boxSourceSignature = signature;
+    state.selectedBox = -1;
+    state.boxDirty = false;
+    state.drag = null;
+    boxCanvasState = null;
+  }
+  if (state.selectedBox >= state.boxes.length) state.selectedBox = state.boxes.length - 1;
+}
+
+function syncSelectedRecord() {
+  const records = state.snapshot?.records || [];
+  if (!records.length) {
+    state.selectedRecordId = "";
+    state.selectedOcrIndex = 0;
+    return;
+  }
+  if (!records.some((record) => record.record_id === state.selectedRecordId)) {
+    state.selectedRecordId = records[0].record_id;
+    state.selectedOcrIndex = 0;
+  }
+}
+
+function pageBoxesSignature(page) {
+  return [
+    page.record_id || "",
+    page.layout_mode || "",
+    page.reviewed ? "1" : "0",
+    JSON.stringify(page.boxes || []),
+  ].join("|");
+}
+
+function selectBoxPage(recordId) {
+  const next = String(recordId || "");
+  if (!next || next === state.selectedPageRecordId) return;
+  if (state.boxDirty && !window.confirm("Hay cambios sin guardar en esta pagina. Cambiar de pagina descartara esos ajustes.")) {
+    return;
+  }
+  state.selectedPageRecordId = next;
+  state._boxSource = "";
+  state._boxSourceSignature = "";
+  state.boxes = [];
+  state.selectedBox = -1;
+  state.boxDirty = false;
+  state.drag = null;
+  persistFactoryUiState();
+  renderBoxesStage();
+}
+
+function renderBoxList() {
+  const list = $("boxesList");
+  if (!list) return;
+  list.innerHTML = state.boxes.length ? state.boxes.map((box, index) => {
+    const [x1, y1, x2, y2] = box;
+    return `
+      <div class="row-card box-row ${index === state.selectedBox ? "active" : ""}" data-box="${index}">
+        <div>
+          <strong>Box ${index + 1}</strong>
+          <div class="muted">${x1},${y1} -> ${x2},${y2}</div>
+        </div>
+        <button data-delete-box="${index}" title="Eliminar box">X</button>
+      </div>
+    `;
+  }).join("") : `<p class="muted">Sin boxes. Usa Nuevo box y arrastra sobre la pagina.</p>`;
+  list.querySelectorAll("[data-box]").forEach((item) => {
+    item.onclick = (event) => {
+      if (event.target.closest("[data-delete-box]")) return;
+      state.selectedBox = Number(item.dataset.box);
+      redrawBoxes();
+      renderBoxList();
+    };
+  });
+  list.querySelectorAll("[data-delete-box]").forEach((btn) => {
+    btn.onclick = (event) => {
+      event.stopPropagation();
+      state.selectedBox = Number(btn.dataset.deleteBox);
+      deleteSelectedBox();
+    };
+  });
+}
+
+function deleteSelectedBox() {
+  if (state.selectedBox < 0 || state.selectedBox >= state.boxes.length) return;
+  state.boxes.splice(state.selectedBox, 1);
+  state.selectedBox = Math.min(state.selectedBox, state.boxes.length - 1);
+  markBoxesDirty();
+}
+
+function moveSelectedBox(delta) {
+  const from = state.selectedBox;
+  const to = from + delta;
+  if (from < 0 || to < 0 || from >= state.boxes.length || to >= state.boxes.length) return;
+  const [box] = state.boxes.splice(from, 1);
+  state.boxes.splice(to, 0, box);
+  state.selectedBox = to;
+  markBoxesDirty();
+}
+
+function markBoxesDirty() {
+  state.boxDirty = true;
+  redrawBoxes();
+  renderBoxList();
+}
+
+let boxCanvasState = null;
+function setupBoxCanvas(page) {
+  const canvas = $("boxCanvas");
+  const wrapper = canvas.parentElement;
+  const recordId = String(page.record_id || "");
+  canvas.dataset.recordId = recordId;
+  boxCanvasState = null;
+  const img = new Image();
+  img.onload = () => {
+    if (String(state.selectedPageRecordId || "") !== recordId || canvas.dataset.recordId !== recordId) return;
+    boxCanvasState = { canvas, ctx: canvas.getContext("2d"), img, wrapper, fitScale: 1, scale: 1 };
+    resizeBoxCanvas({ resetScroll: true });
+  };
+  img.onerror = () => {
+    const ctx = canvas.getContext("2d");
+    boxCanvasState = null;
+    canvas.width = Math.max(320, Math.floor((wrapper?.clientWidth || 520) - 28));
+    canvas.height = 220;
+    canvas.style.width = `${canvas.width}px`;
+    canvas.style.height = `${canvas.height}px`;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#637386";
+    ctx.font = "600 14px Segoe UI";
+    ctx.fillText("No se pudo cargar la imagen de esta pagina.", 18, 42);
+    syncBoxZoomControls();
+  };
+  img.src = boxPageImageSrc(page);
+  canvas.onmousedown = onBoxMouseDown;
+  canvas.onmousemove = onBoxMouseMove;
+  canvas.onmouseup = onBoxMouseUp;
+  canvas.onmouseleave = onBoxMouseUp;
+  canvas.onwheel = onBoxCanvasWheel;
+  syncBoxZoomControls();
+}
+
+function boxPageImageSrc(page) {
+  if (page?.image_url) return page.image_url;
+  return `/api/pdf/page?page=${encodeURIComponent(page?.page_number || 1)}&dpi=300`;
+}
+
+function bindBoxZoomControls() {
+  $("boxZoomOut").onclick = () => setBoxZoom(state.boxZoom / 1.2);
+  $("boxZoomIn").onclick = () => setBoxZoom(state.boxZoom * 1.2);
+  $("boxZoomFit").onclick = () => setBoxZoom(1);
+  $("boxZoomActual").onclick = () => setBoxZoomActual();
+  syncBoxZoomControls();
+}
+
+function clampBoxZoom(value) {
+  const next = Number(value);
+  if (!Number.isFinite(next)) return 1;
+  return Math.max(BOX_ZOOM_MIN, Math.min(BOX_ZOOM_MAX, next));
+}
+
+function boxFitScale(img, wrapper) {
+  const availableWidth = Math.max(320, Math.floor((wrapper?.clientWidth || 900) - 28));
+  const maxW = Math.min(900, availableWidth);
+  return Math.min(1, maxW / Math.max(1, img.naturalWidth));
+}
+
+function boxScaleFor(img, wrapper) {
+  const fitScale = boxFitScale(img, wrapper);
+  return {
+    fitScale,
+    scale: Math.max(0.05, Math.min(BOX_SCALE_MAX, fitScale * clampBoxZoom(state.boxZoom))),
+  };
+}
+
+function resizeBoxCanvas({ preserveCenter = false, resetScroll = false } = {}) {
+  if (!boxCanvasState) {
+    syncBoxZoomControls();
+    return;
+  }
+  const { canvas, img, wrapper } = boxCanvasState;
+  const oldWidth = Math.max(1, canvas.width || 1);
+  const oldHeight = Math.max(1, canvas.height || 1);
+  const centerX = wrapper ? wrapper.scrollLeft + wrapper.clientWidth / 2 : oldWidth / 2;
+  const centerY = wrapper ? wrapper.scrollTop + wrapper.clientHeight / 2 : oldHeight / 2;
+  const ratioX = centerX / oldWidth;
+  const ratioY = centerY / oldHeight;
+  const { fitScale, scale } = boxScaleFor(img, wrapper);
+  boxCanvasState.fitScale = fitScale;
+  boxCanvasState.scale = scale;
+  canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+  canvas.style.width = `${canvas.width}px`;
+  canvas.style.height = `${canvas.height}px`;
+  redrawBoxes();
+  if (wrapper) {
+    if (resetScroll) {
+      wrapper.scrollTop = 0;
+      wrapper.scrollLeft = 0;
+    } else if (preserveCenter) {
+      wrapper.scrollLeft = Math.max(0, ratioX * canvas.width - wrapper.clientWidth / 2);
+      wrapper.scrollTop = Math.max(0, ratioY * canvas.height - wrapper.clientHeight / 2);
+    }
+  }
+  syncBoxZoomControls();
+}
+
+function setBoxZoom(value) {
+  state.boxZoom = clampBoxZoom(value);
+  resizeBoxCanvas({ preserveCenter: true });
+}
+
+function setBoxZoomActual() {
+  const fitScale = boxCanvasState?.fitScale || 1;
+  setBoxZoom(1 / Math.max(0.05, fitScale));
+}
+
+function currentBoxZoomLabel() {
+  if (boxCanvasState?.scale) return `${Math.round(boxCanvasState.scale * 100)}%`;
+  return `${Math.round(clampBoxZoom(state.boxZoom) * 100)}%`;
+}
+
+function syncBoxZoomControls() {
+  const label = $("boxZoomLabel");
+  if (label) label.textContent = currentBoxZoomLabel();
+  const hasCanvas = Boolean(boxCanvasState);
+  ["boxZoomOut", "boxZoomIn", "boxZoomFit", "boxZoomActual"].forEach((id) => {
+    const btn = $(id);
+    if (btn) btn.disabled = !hasCanvas;
+  });
+}
+
+function onBoxCanvasWheel(event) {
+  if (!boxCanvasState || !event.ctrlKey) return;
+  event.preventDefault();
+  setBoxZoom(state.boxZoom * (event.deltaY > 0 ? 1 / 1.12 : 1.12));
+}
+
+function redrawBoxes() {
+  if (!boxCanvasState) return;
+  const { canvas, ctx, img, scale } = boxCanvasState;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  state.boxes.forEach((box, idx) => {
+    const [x1, y1, x2, y2] = box.map((v) => Math.round(v * scale));
+    ctx.lineWidth = idx === state.selectedBox ? 4 : 3;
+    ctx.strokeStyle = idx === state.selectedBox ? "#2563eb" : "#d92d20";
+    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    ctx.fillStyle = idx === state.selectedBox ? "#2563eb" : "#d92d20";
+    ctx.fillRect(x1, y1, 25, 23);
+    ctx.fillStyle = "white";
+    ctx.font = "bold 13px Segoe UI";
+    ctx.fillText(String(idx + 1), x1 + 8, y1 + 16);
+    if (idx === state.selectedBox) drawHandles(ctx, x1, y1, x2, y2);
+  });
+}
+
+function drawHandles(ctx, x1, y1, x2, y2) {
+  ctx.fillStyle = "#ffffff";
+  ctx.strokeStyle = "#2563eb";
+  boxHandlePoints([x1, y1, x2, y2]).forEach(({ x, y }) => {
+    ctx.beginPath();
+    ctx.rect(x - 5, y - 5, 10, 10);
+    ctx.fill();
+    ctx.stroke();
+  });
+}
+
+function boxHandlePoints(box) {
+  const [x1, y1, x2, y2] = box;
+  const cx = x1 + (x2 - x1) / 2;
+  const cy = y1 + (y2 - y1) / 2;
+  return [
+    { name: "nw", x: x1, y: y1 },
+    { name: "n", x: cx, y: y1 },
+    { name: "ne", x: x2, y: y1 },
+    { name: "e", x: x2, y: cy },
+    { name: "se", x: x2, y: y2 },
+    { name: "s", x: cx, y: y2 },
+    { name: "sw", x: x1, y: y2 },
+    { name: "w", x: x1, y: cy },
+  ];
+}
+
+function canvasPoint(event) {
+  const rect = boxCanvasState.canvas.getBoundingClientRect();
+  return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+}
+
+function imagePoint(event) {
+  const p = canvasPoint(event);
+  return { x: p.x / boxCanvasState.scale, y: p.y / boxCanvasState.scale };
+}
+
+function findBoxAt(point) {
+  const scale = boxCanvasState.scale;
+  for (let i = state.boxes.length - 1; i >= 0; i -= 1) {
+    const [x1, y1, x2, y2] = state.boxes[i].map((v) => v * scale);
+    if (point.x >= x1 && point.x <= x2 && point.y >= y1 && point.y <= y2) return i;
+  }
+  return -1;
+}
+
+function findHandleAt(point) {
+  if (state.selectedBox < 0 || state.selectedBox >= state.boxes.length) return null;
+  const scale = boxCanvasState.scale;
+  const box = state.boxes[state.selectedBox].map((value) => value * scale);
+  const hitSize = 9;
+  for (const handle of boxHandlePoints(box)) {
+    if (Math.abs(point.x - handle.x) <= hitSize && Math.abs(point.y - handle.y) <= hitSize) {
+      return { index: state.selectedBox, handle: handle.name };
+    }
+  }
+  return null;
+}
+
+function onBoxMouseDown(event) {
+  if (!boxCanvasState) return;
+  const canvasP = canvasPoint(event);
+  const imageP = imagePoint(event);
+  if (state.boxMode === "add") {
+    state.drag = { type: "new", start: imageP, current: imageP };
+    return;
+  }
+  const handleHit = findHandleAt(canvasP);
+  if (handleHit) {
+    state.drag = {
+      type: "resize",
+      handle: handleHit.handle,
+      start: imageP,
+      original: [...state.boxes[handleHit.index]],
+    };
+    return;
+  }
+  const hit = findBoxAt(canvasP);
+  state.selectedBox = hit;
+  if (hit >= 0) {
+    state.drag = { type: "move", start: imageP, original: [...state.boxes[hit]] };
+  }
+  redrawBoxes();
+  renderBoxList();
+}
+
+function onBoxMouseMove(event) {
+  if (!boxCanvasState) return;
+  const p = imagePoint(event);
+  if (!state.drag) {
+    updateBoxCanvasCursor(canvasPoint(event));
+    return;
+  }
+  if (state.drag.type === "new") {
+    state.drag.current = p;
+    redrawBoxes();
+    const box = clampBoxToImage(normalizeBox([state.drag.start.x, state.drag.start.y, p.x, p.y]));
+    const ctx = boxCanvasState.ctx;
+    const s = boxCanvasState.scale;
+    ctx.strokeStyle = "#2563eb";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(box[0] * s, box[1] * s, (box[2] - box[0]) * s, (box[3] - box[1]) * s);
+  } else if (state.drag.type === "move" && state.selectedBox >= 0) {
+    const dx = p.x - state.drag.start.x;
+    const dy = p.y - state.drag.start.y;
+    const box = state.drag.original;
+    state.boxes[state.selectedBox] = moveBoxWithinImage(box, dx, dy);
+    state.boxDirty = true;
+    redrawBoxes();
+    renderBoxList();
+  } else if (state.drag.type === "resize" && state.selectedBox >= 0) {
+    state.boxes[state.selectedBox] = resizeBoxFromHandle(state.drag.original, state.drag.handle, p);
+    state.boxDirty = true;
+    redrawBoxes();
+    renderBoxList();
+  }
+}
+
+function onBoxMouseUp() {
+  if (!state.drag) return;
+  if (state.drag.type === "new") {
+    const box = clampBoxToImage(normalizeBox([state.drag.start.x, state.drag.start.y, state.drag.current.x, state.drag.current.y]));
+    if (box[2] - box[0] >= 20 && box[3] - box[1] >= 20) {
+      state.boxes.push(box);
+      state.selectedBox = state.boxes.length - 1;
+      state.boxDirty = true;
+    }
+  }
+  state.drag = null;
+  redrawBoxes();
+  renderBoxList();
+}
+
+function updateBoxCanvasCursor(point) {
+  const canvas = boxCanvasState.canvas;
+  const handle = findHandleAt(point);
+  if (handle) {
+    canvas.style.cursor = {
+      n: "ns-resize",
+      s: "ns-resize",
+      e: "ew-resize",
+      w: "ew-resize",
+      nw: "nwse-resize",
+      se: "nwse-resize",
+      ne: "nesw-resize",
+      sw: "nesw-resize",
+    }[handle.handle] || "crosshair";
+    return;
+  }
+  canvas.style.cursor = findBoxAt(point) >= 0 ? "move" : (state.boxMode === "add" ? "crosshair" : "default");
+}
+
+function imageBounds() {
+  if (!boxCanvasState) return { width: 1, height: 1 };
+  return { width: boxCanvasState.img.naturalWidth, height: boxCanvasState.img.naturalHeight };
+}
+
+function clampBoxToImage(box) {
+  const bounds = imageBounds();
+  const [x1, y1, x2, y2] = normalizeBox(box);
+  return [
+    Math.max(0, Math.min(bounds.width, x1)),
+    Math.max(0, Math.min(bounds.height, y1)),
+    Math.max(0, Math.min(bounds.width, x2)),
+    Math.max(0, Math.min(bounds.height, y2)),
+  ];
+}
+
+function moveBoxWithinImage(box, dx, dy) {
+  const bounds = imageBounds();
+  const width = box[2] - box[0];
+  const height = box[3] - box[1];
+  const x1 = Math.max(0, Math.min(bounds.width - width, box[0] + dx));
+  const y1 = Math.max(0, Math.min(bounds.height - height, box[1] + dy));
+  return normalizeBox([x1, y1, x1 + width, y1 + height]);
+}
+
+function resizeBoxFromHandle(box, handle, point) {
+  let [x1, y1, x2, y2] = box;
+  const minSize = 16;
+  if (handle.includes("w")) x1 = Math.min(point.x, x2 - minSize);
+  if (handle.includes("e")) x2 = Math.max(point.x, x1 + minSize);
+  if (handle.includes("n")) y1 = Math.min(point.y, y2 - minSize);
+  if (handle.includes("s")) y2 = Math.max(point.y, y1 + minSize);
+  return clampBoxToImage([x1, y1, x2, y2]);
+}
+
+async function saveCurrentBoxes() {
+  const page = factoryPages().find((row) => row.record_id === state.selectedPageRecordId);
+  if (!page) return;
+  await runAction("Guardando boxes revisados...", async () => {
+    state.snapshot = await api("/api/pages/boxes", {
+      method: "POST",
+      body: {
+        record_id: page.record_id,
+        boxes: state.boxes,
+        layout_mode: $("layoutMode").value,
+        reviewed: true,
+      },
+    });
+    state.boxes = [];
+    state._boxSource = "";
+    state._boxSourceSignature = "";
+    state.boxDirty = false;
+    persistFactoryUiState();
+    render();
+  }, "Boxes guardados.");
+}
+
+function renderCropsStage() {
+  const records = state.snapshot.records || [];
+  syncSelectedRecord();
+  const record = selectedRecord();
+  $("stageHost").innerHTML = `
+    <div class="stage-header">
+      <div>
+        <h2>Crops y staging</h2>
+        <p class="muted">Cada tarjeta representa un problema extraido y trazable en staging.</p>
+      </div>
+      <span class="status-pill status-${records.length ? "listo" : "pendiente"}">${records.length} crop(s)</span>
+    </div>
+    ${renderModelStrip(["ocr", "figure_segmenter"])}
+    <div class="crops-layout">
+      <div class="thumb-grid crop-gallery">
+        ${records.length ? records.map(recordCardHtml).join("") : `<div class="panel muted">Crea staging desde los boxes revisados.</div>`}
+      </div>
+      <div class="panel sticky-preview">
+        ${record ? renderCropPreview(record) : `<p class="muted">Selecciona un crop para ver su trazabilidad.</p>`}
+      </div>
+    </div>
+  `;
+  bindRecordCards();
+  setInspector(record ? cropInspectorData(record, records.length) : {
+    "Problemas en staging": records.length,
+    "Siguiente paso": "Crear staging desde boxes revisados.",
+  });
+}
+
+function recordCardHtml(record) {
+  const source = record.source || {};
+  const box = source.bbox_px || [];
+  return `
+    <div class="crop-card ${record.record_id === state.selectedRecordId ? "active" : ""}" data-record="${record.record_id}">
+      ${record.crop_url ? `<img src="${record.crop_url}" alt="Crop ${escapeHtml(record.record_id)}" />` : ""}
+      <strong>${escapeHtml(record.normalized?.numero || record.crop_name || record.record_id)}</strong>
+      <div class="muted">Pag. ${escapeHtml(source.page_number || "-")} | ${escapeHtml(record.status_label || record.status || "pendiente")}</div>
+      <div class="crop-meta">${box.length >= 4 ? escapeHtml(box.slice(0, 4).join(", ")) : "sin bbox"}</div>
+    </div>
+  `;
+}
+
+function renderCropPreview(record) {
+  const source = record.source || {};
+  const box = source.bbox_px || [];
+  return `
+    <h3>Crop seleccionado</h3>
+    ${record.crop_url ? `<img class="preview-img" src="${record.crop_url}" alt="Crop seleccionado" />` : `<p class="muted">Imagen no encontrada.</p>`}
+    <div class="metadata-grid">
+      <span class="muted">Registro</span><strong>${escapeHtml(record.record_id)}</strong>
+      <span class="muted">Pagina</span><strong>${escapeHtml(source.page_number || "-")}</strong>
+      <span class="muted">Box</span><strong>${box.length >= 4 ? escapeHtml(box.slice(0, 4).join(", ")) : "-"}</strong>
+      <span class="muted">Estado</span><strong>${escapeHtml(record.status_label || record.status || "-")}</strong>
+    </div>
+  `;
+}
+
+function cropInspectorData(record, total) {
+  const source = record.source || {};
+  return {
+    "Problemas en staging": total,
+    "Registro": record.record_id,
+    "Pagina": source.page_number || "-",
+    "Box": (source.bbox_px || []).join(", ") || "-",
+    "Crop": record.crop_path || "-",
+  };
+}
+
+function bindRecordCards() {
+  document.querySelectorAll("[data-record]").forEach((item) => {
+    item.onclick = () => {
+      state.selectedRecordId = item.dataset.record;
+      state.selectedOcrIndex = 0;
+      state.reviewDraft = null;
+      persistFactoryUiState();
+      renderStage();
+    };
+  });
+}
+
+function recordIndex(records = state.snapshot.records || []) {
+  if (!records.length) return 0;
+  const currentId = selectedRecord()?.record_id || state.selectedRecordId;
+  const index = records.findIndex((record) => record.record_id === currentId);
+  return index >= 0 ? index : 0;
+}
+
+function selectRecordAt(index) {
+  const records = state.snapshot.records || [];
+  if (!records.length) return;
+  const nextIndex = Math.max(0, Math.min(records.length - 1, Number(index || 0)));
+  const next = records[nextIndex];
+  if (!next || next.record_id === state.selectedRecordId) return;
+  state.selectedRecordId = next.record_id;
+  state.selectedOcrIndex = 0;
+  state.reviewDraft = null;
+  persistFactoryUiState();
+  renderStage();
+}
+
+function selectRecordByOffset(delta) {
+  const records = state.snapshot.records || [];
+  if (!records.length) return;
+  selectRecordAt(recordIndex(records) + delta);
+}
+
+function bindRecordNavigation() {
+  const prev = $("prevRecord");
+  const next = $("nextRecord");
+  const jump = $("recordJump");
+  if (prev) prev.onclick = () => selectRecordByOffset(-1);
+  if (next) next.onclick = () => selectRecordByOffset(1);
+  if (jump) jump.onchange = () => selectRecordAt(Number(jump.value || 0));
+}
+
+function selectOcrItemAt(index, record = selectedRecord()) {
+  const items = record?.structured_items_web || [];
+  if (!items.length) return;
+  state.selectedOcrIndex = Math.max(0, Math.min(items.length - 1, Number(index || 0)));
+  persistFactoryUiState();
+  renderOcrStage();
+}
+
+function selectOcrItemByOffset(delta, record = selectedRecord()) {
+  selectOcrItemAt(Number(state.selectedOcrIndex || 0) + delta, record);
+}
+
+function bindOcrNavigation(record) {
+  const prev = $("prevOcrItem");
+  const next = $("nextOcrItem");
+  if (prev) prev.onclick = () => selectOcrItemByOffset(-1, record);
+  if (next) next.onclick = () => selectOcrItemByOffset(1, record);
+}
+
+function recordOptionLabel(record, index) {
+  const source = record.source || {};
+  const number = record.normalized?.numero;
+  const base = number ? `Problema ${number}` : (record.crop_name || record.record_id);
+  const page = source.page_number ? `Pag. ${source.page_number}` : "";
+  return compactText(`${index + 1}. ${base}${page ? ` | ${page}` : ""}`, 84);
+}
+
+function renderOcrStage() {
+  syncSelectedRecord();
+  const record = selectedRecord();
+  const records = state.snapshot.records || [];
+  const currentRecordIndex = recordIndex(records);
+  $("stageHost").innerHTML = `
+    <div class="stage-header">
+      <div>
+        <h2>OCR y segmentacion grafica</h2>
+        <p class="muted">Compara la lectura estructurada con el crop antes de cargarla al formulario final.</p>
+      </div>
+    </div>
+    ${renderModelStrip(["ocr", "figure_segmenter"])}
+    ${record ? renderOcrRecord(record) : `<div class="panel muted">Selecciona un crop de staging.</div>`}
+  `;
+  bindRecordCards();
+  bindRecordNavigation();
+  bindOcrNavigation(record);
+  bindFigureSegmentEditor(record);
+  bindRawOcrActions(record);
+  document.querySelectorAll("[data-ocr-index]").forEach((item) => {
+    item.onclick = () => {
+      state.selectedOcrIndex = Number(item.dataset.ocrIndex || 0);
+      persistFactoryUiState();
+      renderOcrStage();
+    };
+  });
+  document.querySelectorAll("[data-use-ocr]").forEach((btn) => {
+    btn.onclick = () => {
+      const payload = selectedOcrPayload(record, btn.dataset.useOcr);
+      state.reviewDraft = normalizedFromOcr(record, payload);
+      state.stage = "review";
+      persistFactoryUiState();
+      render();
+    };
+  });
+  setInspector(record ? {
+    "Imagen": `${records.length ? currentRecordIndex + 1 : 0} de ${records.length}`,
+    "Registro": record.record_id,
+    "Lecturas OCR": (record.structured_items_web || []).length,
+    "Segmentos graficos": (record.figure_segments_web || []).length,
+  } : "");
+}
+
+function renderOcrRecord(record) {
+  const records = state.snapshot.records || [];
+  const currentRecordIndex = recordIndex(records);
+  const totalRecords = records.length;
+  const items = record.structured_items_web || [];
+  const segments = record.figure_segments_web || [];
+  syncFigureSegments(record, segments);
+  const selectedIndex = Math.max(0, Math.min(items.length - 1, Number(state.selectedOcrIndex || 0)));
+  const selectedPayload = items.length ? selectedOcrPayload(record, selectedIndex) : {};
+  return `
+    <div class="record-layout ocr-layout">
+      <div class="problem-column">
+        <div class="record-nav panel" aria-label="Navegacion de problemas">
+          <button id="prevRecord" class="nav-arrow" type="button" title="Imagen anterior" ${currentRecordIndex <= 0 ? "disabled" : ""}>&larr;</button>
+          <div class="record-nav-main">
+            <span class="section-label">Imagen</span>
+            <strong>${totalRecords ? currentRecordIndex + 1 : 0} de ${totalRecords}</strong>
+            <span class="muted">${escapeHtml(recordOptionLabel(record, currentRecordIndex))}</span>
+          </div>
+          <button id="nextRecord" class="nav-arrow" type="button" title="Imagen siguiente" ${currentRecordIndex >= totalRecords - 1 ? "disabled" : ""}>&rarr;</button>
+          <label class="record-jump-label">
+            <span class="muted">Saltar a</span>
+            <select id="recordJump">
+              ${records.map((row, index) => `<option value="${index}" ${index === currentRecordIndex ? "selected" : ""}>${escapeHtml(recordOptionLabel(row, index))}</option>`).join("")}
+            </select>
+          </label>
+        </div>
+        <div class="crop-preview">
+          ${record.crop_url ? `<img class="preview-img" src="${record.crop_url}" alt="Crop seleccionado" />` : `<div class="empty-state">Sin crop disponible.</div>`}
+        </div>
+        <dl class="meta-list record-meta-compact">
+          <div><dt>Registro</dt><dd>${escapeHtml(record.record_id)}</dd></div>
+          <div><dt>Estado</dt><dd>${escapeHtml(record.status_label || record.status || "-")}</dd></div>
+          <div><dt>Entrenamiento</dt><dd>${(record.training_examples || []).length} correccion(es)</dd></div>
+        </dl>
+      </div>
+      <div class="ocr-workbench">
+        <div class="review-columns">
+          <section class="panel">
+            <div class="panel-heading-row">
+              <h3>OCR estructurado</h3>
+              ${items.length ? `
+                <div class="ocr-nav" aria-label="Navegacion de lecturas OCR">
+                  <button id="prevOcrItem" class="mini-arrow" type="button" title="Lectura anterior" ${selectedIndex <= 0 ? "disabled" : ""}>&larr;</button>
+                  <span class="nav-counter">${selectedIndex + 1} de ${items.length}</span>
+                  <button id="nextOcrItem" class="mini-arrow" type="button" title="Lectura siguiente" ${selectedIndex >= items.length - 1 ? "disabled" : ""}>&rarr;</button>
+                </div>
+              ` : ""}
+            </div>
+            <div class="list">
+              ${items.length ? items.map((item, index) => {
+                const payload = item.item || item;
+                return `<button class="ocr-item ${index === selectedIndex ? "active" : ""}" data-ocr-index="${index}" type="button">
+                  <strong>${escapeHtml(payload.n || "Sin numero")} - Clave ${escapeHtml(payload.answer_key || "-")}</strong>
+                  <span>${escapeHtml(compactText(payload.statement || "", 180))}</span>
+                </button>`;
+              }).join("") : `<p class="muted">Sin OCR estructurado todavia. Revisa el OCR crudo o vuelve a ejecutar la etapa.</p>`}
+            </div>
+          </section>
+          <section class="panel">
+            <h3>Lectura seleccionada</h3>
+            ${items.length ? renderStructuredOcrPreview(selectedPayload, selectedIndex) : `<p class="muted">No hay item estructurado para cargar.</p>`}
+            ${items.length ? `<button data-use-ocr="${selectedIndex}" class="primary wide-action">Cargar en formulario final</button>` : ""}
+            ${items.length ? renderTechnicalDetails("JSON estructurado del item", items[selectedIndex]) : ""}
+          </section>
+        </div>
+        <section class="panel">
+          <h3>Segmentos graficos</h3>
+          ${renderFigureSegmentEditor(record)}
+          <div class="thumb-grid compact">
+            ${segments.length ? segments.map((segment, idx) => `
+              <div class="segment-card ${idx === state.selectedFigureSegment ? "active" : ""}" data-figure-segment="${idx}">
+                ${segment.image_url ? `<img src="${segment.image_url}" alt="Segmento grafico ${idx + 1}" />` : ""}
+                <div class="muted">${escapeHtml(segment.image_name || `segmento_${idx + 1}`)}</div>
+              </div>
+            `).join("") : `<p class="muted">Sin segmentos graficos detectados.</p>`}
+          </div>
+        </section>
+        ${renderRawOcrPanel(record)}
+        ${renderTechnicalDetails("Registro staging completo", record)}
+      </div>
+    </div>
+  `;
+}
+
+function syncFigureSegments(record, segments) {
+  const signature = `${record?.record_id || ""}|${JSON.stringify((segments || []).map((seg) => seg.bbox_px || []))}`;
+  if (state._figureSegmentSource === signature && state.figureSegmentDirty) return;
+  if (state._figureSegmentSource !== signature || !state.figureSegmentDirty) {
+    state.figureSegments = (segments || []).map((seg) => normalizeBox((seg.bbox_px || []).slice(0, 4).map((value) => Number(value))));
+    state.figureSegments = state.figureSegments.filter((box) => box.length === 4 && box[2] > box[0] && box[3] > box[1]);
+    state.selectedFigureSegment = state.figureSegments.length ? Math.max(0, Math.min(state.selectedFigureSegment, state.figureSegments.length - 1)) : -1;
+    state.figureSegmentDirty = false;
+    state.figureDrag = null;
+    state._figureSegmentSource = signature;
+    figureCanvasState = null;
+  }
+}
+
+function renderFigureSegmentEditor(record) {
+  return `
+    <div class="figure-segment-editor">
+      <div class="segment-editor-toolbar">
+        <button id="figModeSelect" class="${state.figureSegmentMode === "select" ? "secondary" : ""}" type="button">Mover</button>
+        <button id="figModeAdd" class="${state.figureSegmentMode === "add" ? "secondary" : ""}" type="button">Nuevo box</button>
+        <button id="figDelete" type="button">Eliminar</button>
+        <button id="figSave" class="primary" type="button" ${state.figureSegmentDirty ? "" : "disabled"}>Guardar segmentos</button>
+        <span class="selection-count">${state.figureSegments.length} segmento(s)${state.figureSegmentDirty ? " | sin guardar" : ""}</span>
+      </div>
+      <div class="figure-canvas-wrap">
+        ${record.crop_url ? `<canvas id="figureCanvas"></canvas>` : `<div class="empty-state">Sin crop disponible para editar segmentos.</div>`}
+      </div>
+    </div>
+  `;
+}
+
+let figureCanvasState = null;
+function bindFigureSegmentEditor(record) {
+  const canvas = $("figureCanvas");
+  if (!canvas || !record) return;
+  $("figModeSelect").onclick = () => {
+    state.figureSegmentMode = "select";
+    renderOcrStage();
+  };
+  $("figModeAdd").onclick = () => {
+    state.figureSegmentMode = "add";
+    renderOcrStage();
+  };
+  $("figDelete").onclick = deleteSelectedFigureSegment;
+  $("figSave").onclick = () => saveFigureSegments(record);
+  document.querySelectorAll("[data-figure-segment]").forEach((item) => {
+    item.onclick = () => {
+      state.selectedFigureSegment = Number(item.dataset.figureSegment || 0);
+      redrawFigureSegments();
+      renderOcrStage();
+    };
+  });
+  setupFigureCanvas(record);
+}
+
+function setupFigureCanvas(record) {
+  const canvas = $("figureCanvas");
+  if (!canvas) return;
+  const wrapper = canvas.parentElement;
+  const img = new Image();
+  figureCanvasState = null;
+  img.onload = () => {
+    const availableWidth = Math.max(320, Math.floor((wrapper?.clientWidth || 720) - 20));
+    const scale = Math.min(1.35, availableWidth / Math.max(1, img.naturalWidth));
+    canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    canvas.style.width = `${canvas.width}px`;
+    canvas.style.height = `${canvas.height}px`;
+    figureCanvasState = { canvas, ctx: canvas.getContext("2d"), img, scale };
+    redrawFigureSegments();
+  };
+  img.onerror = () => {
+    const ctx = canvas.getContext("2d");
+    canvas.width = Math.max(320, Math.floor((wrapper?.clientWidth || 520) - 20));
+    canvas.height = 180;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#637386";
+    ctx.font = "600 14px Segoe UI";
+    ctx.fillText("No se pudo cargar el crop para editar segmentos.", 16, 38);
+  };
+  img.src = record.crop_url;
+  canvas.onmousedown = onFigureMouseDown;
+  canvas.onmousemove = onFigureMouseMove;
+  canvas.onmouseup = onFigureMouseUp;
+  canvas.onmouseleave = onFigureMouseUp;
+}
+
+function redrawFigureSegments() {
+  if (!figureCanvasState) return;
+  const { canvas, ctx, img, scale } = figureCanvasState;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  state.figureSegments.forEach((box, idx) => {
+    const [x1, y1, x2, y2] = box.map((value) => Math.round(value * scale));
+    ctx.lineWidth = idx === state.selectedFigureSegment ? 4 : 3;
+    ctx.strokeStyle = idx === state.selectedFigureSegment ? "#2dd4bf" : "#f59e0b";
+    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    ctx.fillStyle = idx === state.selectedFigureSegment ? "#0f766e" : "#b45309";
+    ctx.fillRect(x1, y1, 25, 23);
+    ctx.fillStyle = "white";
+    ctx.font = "bold 13px Segoe UI";
+    ctx.fillText(String(idx + 1), x1 + 8, y1 + 16);
+    if (idx === state.selectedFigureSegment) drawHandles(ctx, x1, y1, x2, y2);
+  });
+}
+
+function figureCanvasPoint(event) {
+  const rect = figureCanvasState.canvas.getBoundingClientRect();
+  return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+}
+
+function figureImagePoint(event) {
+  const p = figureCanvasPoint(event);
+  return { x: p.x / figureCanvasState.scale, y: p.y / figureCanvasState.scale };
+}
+
+function figureBounds() {
+  if (!figureCanvasState) return { width: 1, height: 1 };
+  return { width: figureCanvasState.img.naturalWidth, height: figureCanvasState.img.naturalHeight };
+}
+
+function clampFigureBoxToImage(box) {
+  const bounds = figureBounds();
+  const [x1, y1, x2, y2] = normalizeBox(box);
+  return [
+    Math.max(0, Math.min(bounds.width, x1)),
+    Math.max(0, Math.min(bounds.height, y1)),
+    Math.max(0, Math.min(bounds.width, x2)),
+    Math.max(0, Math.min(bounds.height, y2)),
+  ];
+}
+
+function findFigureSegmentAt(point) {
+  const scale = figureCanvasState.scale;
+  for (let i = state.figureSegments.length - 1; i >= 0; i -= 1) {
+    const [x1, y1, x2, y2] = state.figureSegments[i].map((value) => value * scale);
+    if (point.x >= x1 && point.x <= x2 && point.y >= y1 && point.y <= y2) return i;
+  }
+  return -1;
+}
+
+function findFigureHandleAt(point) {
+  if (state.selectedFigureSegment < 0 || state.selectedFigureSegment >= state.figureSegments.length) return null;
+  const scale = figureCanvasState.scale;
+  const box = state.figureSegments[state.selectedFigureSegment].map((value) => value * scale);
+  for (const handle of boxHandlePoints(box)) {
+    if (Math.abs(point.x - handle.x) <= 9 && Math.abs(point.y - handle.y) <= 9) {
+      return { index: state.selectedFigureSegment, handle: handle.name };
+    }
+  }
+  return null;
+}
+
+function onFigureMouseDown(event) {
+  if (!figureCanvasState) return;
+  const canvasPoint = figureCanvasPoint(event);
+  const imagePoint = figureImagePoint(event);
+  if (state.figureSegmentMode === "add") {
+    state.figureDrag = { type: "new", start: imagePoint, current: imagePoint };
+    return;
+  }
+  const handleHit = findFigureHandleAt(canvasPoint);
+  if (handleHit) {
+    state.figureDrag = {
+      type: "resize",
+      handle: handleHit.handle,
+      start: imagePoint,
+      original: [...state.figureSegments[handleHit.index]],
+    };
+    return;
+  }
+  const hit = findFigureSegmentAt(canvasPoint);
+  state.selectedFigureSegment = hit;
+  if (hit >= 0) {
+    state.figureDrag = { type: "move", start: imagePoint, original: [...state.figureSegments[hit]] };
+  }
+  redrawFigureSegments();
+}
+
+function onFigureMouseMove(event) {
+  if (!figureCanvasState) return;
+  const point = figureImagePoint(event);
+  if (!state.figureDrag) {
+    const canvas = figureCanvasState.canvas;
+    canvas.style.cursor = findFigureHandleAt(figureCanvasPoint(event)) ? "nwse-resize" : (findFigureSegmentAt(figureCanvasPoint(event)) >= 0 ? "move" : (state.figureSegmentMode === "add" ? "crosshair" : "default"));
+    return;
+  }
+  if (state.figureDrag.type === "new") {
+    state.figureDrag.current = point;
+    redrawFigureSegments();
+    const box = clampFigureBoxToImage(normalizeBox([state.figureDrag.start.x, state.figureDrag.start.y, point.x, point.y]));
+    const ctx = figureCanvasState.ctx;
+    const scale = figureCanvasState.scale;
+    ctx.strokeStyle = "#2dd4bf";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(box[0] * scale, box[1] * scale, (box[2] - box[0]) * scale, (box[3] - box[1]) * scale);
+  } else if (state.figureDrag.type === "move" && state.selectedFigureSegment >= 0) {
+    const dx = point.x - state.figureDrag.start.x;
+    const dy = point.y - state.figureDrag.start.y;
+    state.figureSegments[state.selectedFigureSegment] = moveFigureBoxWithinImage(state.figureDrag.original, dx, dy);
+    state.figureSegmentDirty = true;
+    redrawFigureSegments();
+  } else if (state.figureDrag.type === "resize" && state.selectedFigureSegment >= 0) {
+    state.figureSegments[state.selectedFigureSegment] = resizeFigureBoxFromHandle(state.figureDrag.original, state.figureDrag.handle, point);
+    state.figureSegmentDirty = true;
+    redrawFigureSegments();
+  }
+}
+
+function onFigureMouseUp() {
+  if (!state.figureDrag) return;
+  if (state.figureDrag.type === "new") {
+    const box = clampFigureBoxToImage(normalizeBox([state.figureDrag.start.x, state.figureDrag.start.y, state.figureDrag.current.x, state.figureDrag.current.y]));
+    if (box[2] - box[0] >= 12 && box[3] - box[1] >= 12) {
+      state.figureSegments.push(box);
+      state.selectedFigureSegment = state.figureSegments.length - 1;
+      state.figureSegmentDirty = true;
+    }
+  }
+  state.figureDrag = null;
+  redrawFigureSegments();
+  renderOcrStage();
+}
+
+function moveFigureBoxWithinImage(box, dx, dy) {
+  const bounds = figureBounds();
+  const width = box[2] - box[0];
+  const height = box[3] - box[1];
+  const x1 = Math.max(0, Math.min(bounds.width - width, box[0] + dx));
+  const y1 = Math.max(0, Math.min(bounds.height - height, box[1] + dy));
+  return normalizeBox([x1, y1, x1 + width, y1 + height]);
+}
+
+function resizeFigureBoxFromHandle(box, handle, point) {
+  let [x1, y1, x2, y2] = box;
+  const minSize = 12;
+  if (handle.includes("w")) x1 = Math.min(point.x, x2 - minSize);
+  if (handle.includes("e")) x2 = Math.max(point.x, x1 + minSize);
+  if (handle.includes("n")) y1 = Math.min(point.y, y2 - minSize);
+  if (handle.includes("s")) y2 = Math.max(point.y, y1 + minSize);
+  return clampFigureBoxToImage([x1, y1, x2, y2]);
+}
+
+function deleteSelectedFigureSegment() {
+  if (state.selectedFigureSegment < 0 || state.selectedFigureSegment >= state.figureSegments.length) return;
+  state.figureSegments.splice(state.selectedFigureSegment, 1);
+  state.selectedFigureSegment = Math.min(state.selectedFigureSegment, state.figureSegments.length - 1);
+  state.figureSegmentDirty = true;
+  renderOcrStage();
+}
+
+async function saveFigureSegments(record) {
+  if (!record) return;
+  await runAction("Guardando segmentos graficos revisados...", async () => {
+    state.snapshot = await api("/api/ocr/segments/boxes", {
+      method: "POST",
+      body: {
+        record_id: record.record_id,
+        boxes: state.figureSegments,
+      },
+    });
+    state.figureSegmentDirty = false;
+    state._figureSegmentSource = "";
+    persistFactoryUiState();
+    render();
+  }, "Segmentos graficos revisados guardados.");
+}
+
+function renderStructuredOcrPreview(payload, index) {
+  const options = payload.options || {};
+  const optionRows = ["A", "B", "C", "D", "E"].map((key) => `
+    <div class="option-row"><strong>${key}</strong><span>${escapeHtml(options[key] || "-")}</span></div>
+  `).join("");
+  return `
+    <div class="structured-preview">
+      <dl class="meta-list inline">
+        <div><dt>Item</dt><dd>${index + 1}</dd></div>
+        <div><dt>Numero</dt><dd>${escapeHtml(payload.n || "-")}</dd></div>
+        <div><dt>Clave</dt><dd>${escapeHtml(payload.answer_key || "-")}</dd></div>
+        <div><dt>Grafico</dt><dd>${payload.has_figure ? "si" : "no"}</dd></div>
+      </dl>
+      <div class="statement-preview">${formatPreviewText(payload.statement || "")}</div>
+      <div class="options-preview">${optionRows}</div>
+    </div>
+  `;
+}
+
+function renderRawOcrPanel(record) {
+  const raw = String(record?.raw_ocr || "").trim();
+  return `
+    <section class="panel raw-ocr-panel">
+      <div class="panel-heading-row">
+        <div>
+          <h3>OCR crudo</h3>
+          <p class="muted">${raw ? `${raw.length} caracter(es) devueltos por el modelo.` : "Todavia no hay texto crudo guardado para esta imagen."}</p>
+        </div>
+        <button id="copyRawOcr" type="button" ${raw ? "" : "disabled"}>Copiar OCR</button>
+      </div>
+      ${raw ? `<div class="raw-ocr-box">${escapeHtml(raw)}</div>` : `
+        <div class="empty-state raw-empty">
+          Ejecuta OCR sobre la imagen actual. Si el modelo responde pero falla el JSON estructurado, el texto crudo quedara visible aqui.
+        </div>
+      `}
+    </section>
+  `;
+}
+
+function bindRawOcrActions(record) {
+  const btn = $("copyRawOcr");
+  if (!btn) return;
+  btn.onclick = async () => {
+    const raw = String(record?.raw_ocr || "");
+    if (!raw.trim()) return;
+    try {
+      await navigator.clipboard.writeText(raw);
+      setStatus("OCR crudo copiado.");
+    } catch (_) {
+      setStatus("No se pudo copiar automaticamente el OCR crudo.");
+    }
+  };
+}
+
+function renderTechnicalDetails(title, payload, mode = "json") {
+  const body = mode === "text" ? String(payload ?? "") : JSON.stringify(payload || {}, null, 2);
+  return `
+    <details class="technical-details">
+      <summary>${escapeHtml(title)}</summary>
+      <div class="codebox">${escapeHtml(body)}</div>
+    </details>
+  `;
+}
+
+function renderReviewStage() {
+  const record = selectedRecord();
+  const normalized = state.reviewDraft || (record ? record.normalized || {} : {});
+  const alternatives = normalized.alternativas || {};
+  $("stageHost").innerHTML = `
+    <div class="stage-header">
+      <div>
+        <h2>Normalizacion y revision final</h2>
+        <p class="muted">Corrige campos visibles, valida el render LaTeX y guarda la revision como entrenamiento futuro.</p>
+      </div>
+    </div>
+    ${record ? `
+      <div class="record-layout">
+        <div>
+          ${record.crop_url ? `<img class="preview-img" src="${record.crop_url}" alt="Problema" />` : ""}
+          <div class="panel" style="margin-top:12px">
+            <h3>Render LaTeX</h3>
+            <div id="latexPreview" class="latex-preview"></div>
+          </div>
+          <details class="technical-details">
+            <summary>Contexto tecnico del registro</summary>
+            <div class="codebox">${escapeHtml(JSON.stringify({
+              record_id: record.record_id,
+              status: record.status,
+              training_examples_total: (record.training_examples || []).length,
+              normalized_metadata: record.normalized?.metadata_tecnica || {},
+            }, null, 2))}</div>
+          </details>
+        </div>
+        <form id="reviewForm" class="panel form-grid">
+          ${field("numero", "Numero", normalized.numero || "")}
+          ${answerField(normalized.respuesta_correcta || "")}
+          ${field("curso", "Curso", normalized.curso || "")}
+          ${field("tema", "Tema", normalized.tema || "")}
+          ${textareaField("enunciado_latex", "Enunciado LaTeX", normalized.enunciado_latex || "", "wide")}
+          ${field("A", "Alternativa A", alternatives.A || "")}
+          ${field("B", "Alternativa B", alternatives.B || "")}
+          ${field("C", "Alternativa C", alternatives.C || "")}
+          ${field("D", "Alternativa D", alternatives.D || "")}
+          ${field("E", "Alternativa E", alternatives.E || "")}
+          ${field("figure_tag", "Etiqueta grafico", normalized.figure_tag || "")}
+          <label class="check-row"><input id="tiene_grafico" type="checkbox" ${normalized.tiene_grafico ? "checked" : ""} /> Tiene grafico</label>
+          ${textareaField("notas", "Notas", record.review?.notes || "", "wide")}
+          <label class="check-row wide"><input id="mark_ready" type="checkbox" ${record.status === "listo" ? "checked" : ""} /> Revision lista</label>
+          <button type="submit" class="primary wide">Guardar revision en staging</button>
+        </form>
+      </div>
+    ` : `<div class="panel muted">Selecciona un problema.</div>`}
+  `;
+  if (record) {
+    $("reviewForm").onsubmit = saveReviewForm;
+    $("reviewForm").addEventListener("input", updateLatexPreview);
+    $("reviewForm").addEventListener("change", updateLatexPreview);
+    updateLatexPreview();
+  }
+  setInspector(record ? {
+    "Registro": record.record_id,
+    "Correcciones guardadas": (record.training_examples || []).length,
+    "Estado": record.status_label || record.status || "-",
+  } : "");
+}
+
+function field(id, label, value) {
+  return `<label><span class="muted">${label}</span><input id="${id}" value="${escapeAttr(value)}" /></label>`;
+}
+
+function textareaField(id, label, value, klass = "") {
+  return `<label class="${klass}"><span class="muted">${label}</span><textarea id="${id}">${escapeHtml(value)}</textarea></label>`;
+}
+
+function answerField(value) {
+  const normalized = String(value || "").trim().toUpperCase();
+  const known = ["", "A", "B", "C", "D", "E"];
+  return `<label><span class="muted">Respuesta</span><select id="respuesta_correcta">
+    ${known.map((key) => `<option value="${key}" ${normalized === key ? "selected" : ""}>${key || "Sin definir"}</option>`).join("")}
+    ${known.includes(normalized) ? "" : `<option value="${escapeAttr(value)}" selected>${escapeHtml(value)}</option>`}
+  </select></label>`;
+}
+
+function updateLatexPreview() {
+  const preview = $("latexPreview");
+  if (!preview) return;
+  const data = collectReviewForm();
+  const options = ["A", "B", "C", "D", "E"].map((key) => `
+    <div class="option-row"><strong>${key}</strong><span>${formatPreviewText(data.alternativas[key] || "")}</span></div>
+  `).join("");
+  preview.innerHTML = `
+    <article class="preview-problem">
+      <header>
+        <strong>${escapeHtml(data.numero || "Sin numero")}</strong>
+        <span>${escapeHtml([data.curso, data.tema].filter(Boolean).join(" - "))}</span>
+      </header>
+      <div class="statement-preview">${formatPreviewText(data.enunciado_latex || "")}</div>
+      <div class="options-preview">${options}</div>
+      <footer><strong>Clave:</strong> ${escapeHtml(data.respuesta_correcta || "-")} ${data.tiene_grafico ? "<span>- con grafico</span>" : ""}</footer>
+    </article>
+  `;
+  if (window.MathJax && MathJax.typesetPromise) {
+    MathJax.typesetClear([preview]);
+    MathJax.typesetPromise([preview]).catch(() => {});
+  }
+}
+
+async function saveReviewForm(event) {
+  event.preventDefault();
+  const record = selectedRecord();
+  if (!record) return;
+  await runAction("Guardando revision...", async () => {
+    const result = await api("/api/review/save", {
+      method: "POST",
+      body: {
+        record_id: record.record_id,
+        normalized: collectReviewForm(),
+        notes: $("notas").value,
+        mark_ready: $("mark_ready").checked,
+      },
+    });
+    state.snapshot = result.snapshot;
+    state.reviewDraft = null;
+    persistFactoryUiState();
+    render();
+  }, "Revision guardada en staging.");
+}
+
+function collectReviewForm() {
+  const record = selectedRecord();
+  const base = {
+    ...((record && record.normalized) || {}),
+    ...(state.reviewDraft || {}),
+  };
+  const baseAlternatives = base.alternativas && typeof base.alternativas === "object" ? base.alternativas : {};
+  const alternatives = {
+    ...baseAlternatives,
+    A: $("A")?.value.trim() || "",
+    B: $("B")?.value.trim() || "",
+    C: $("C")?.value.trim() || "",
+    D: $("D")?.value.trim() || "",
+    E: $("E")?.value.trim() || "",
+  };
+  return {
+    ...base,
+    schema_version: base.schema_version || "normalized_problem_staging_v1",
+    numero: $("numero")?.value.trim() || "",
+    curso: $("curso")?.value.trim() || "",
+    tema: $("tema")?.value.trim() || "",
+    enunciado_latex: $("enunciado_latex")?.value.trim() || "",
+    alternativas,
+    respuesta_correcta: $("respuesta_correcta")?.value.trim() || "",
+    tiene_grafico: Boolean($("tiene_grafico")?.checked),
+    figure_tag: $("figure_tag")?.value.trim() || "",
+    status: $("mark_ready")?.checked ? "listo" : "requiere_revision",
+  };
+}
+
+function renderCandidateStage() {
+  const record = selectedRecord();
+  $("stageHost").innerHTML = `
+    <div class="stage-header">
+      <div>
+        <h2>Candidato futuro a BD</h2>
+        <p class="muted">Revisa si el registro esta completo. La escritura real en problemas permanece bloqueada.</p>
+      </div>
+    </div>
+    <div id="candidateHost" class="panel">${record ? "Cargando candidato..." : "Selecciona un registro."}</div>
+  `;
+  if (record) {
+    api(`/api/promotion?record_id=${encodeURIComponent(record.record_id)}`).then((candidate) => {
+      $("candidateHost").innerHTML = `
+        <h3>${candidate.ready_for_future_promotion ? "Listo para promocion futura" : "Aun falta revisar"}</h3>
+        <div class="candidate-grid">
+          <div class="candidate-cell"><span>Promocion habilitada</span><strong>${candidate.promotion_enabled ? "Si" : "No"}</strong></div>
+          <div class="candidate-cell"><span>SQL preparado</span><strong>${candidate.sql ? "Si" : "No"}</strong></div>
+          <div class="candidate-cell"><span>Escrituras</span><strong>${(candidate.write_operations || []).length}</strong></div>
+        </div>
+        <h3>Bloqueos pendientes</h3>
+        ${blockingIssuesHtml(candidate.blocking_issues || [])}
+        ${renderTechnicalDetails("Detalle tecnico del candidato", candidate)}
+      `;
+    }).catch((err) => setStatus(err.message));
+  }
+  setInspector(record ? {
+    "Registro": record.record_id,
+    "Destino actual": "staging",
+    "Promocion real": "desactivada",
+  } : "");
+}
+
+function blockingIssuesHtml(issues) {
+  if (!issues.length) {
+    return `<p class="muted">Sin bloqueos reportados por el validador.</p>`;
+  }
+  return `<ul class="issue-list">${issues.map((issue) => `<li>${escapeHtml(String(issue))}</li>`).join("")}</ul>`;
+}
+
+function syncPrimaryAction() {
+  const btn = $("primaryAction");
+  const actions = {
+    pages: ["Detectar con modelo", "Usa el detector entrenado sobre las paginas elegidas.", detectSelectedPages],
+    boxes: ["Crear staging", "Materializa crops solo desde boxes revisados.", materializeStaging],
+    crops: ["OCR imagen actual", "Usa OCR entrenado y segmentador grafico en el crop seleccionado.", runOcr],
+    ocr: ["Normalizar", "Prepara campos editables para revision humana.", normalizeRecords],
+    review: ["Guardar revision", "Persiste correcciones en staging y entrenamiento.", () => $("reviewForm")?.requestSubmit()],
+    candidate: ["Actualizar candidato", "Recalcula bloqueos sin escribir en problemas.", renderCandidateStage],
+  };
+  const [label, hint, handler] = actions[state.stage] || actions.pages;
+  btn.textContent = label;
+  btn.onclick = handler;
+  $("actionHint").textContent = hint;
+}
+
+async function detectSelectedPages() {
+  const pages = selectedRangeText();
+  if (!pages) return setStatus("Selecciona al menos una pagina.");
+  const models = activeModelPayload();
+  await runAction("Detectando boxes con modelo entrenado...", async () => {
+    state.snapshot = await api("/api/pages/detect", {
+      method: "POST",
+      body: {
+        pages,
+        dpi: 300,
+        confidence: 0.25,
+        detector_model: models.pdf_detector,
+      },
+    });
+    state.stage = "boxes";
+    state.selectedPageRecordId = "";
+    state.boxes = [];
+    state._boxSource = "";
+    state._boxSourceSignature = "";
+    state.selectedBox = -1;
+    state.boxDirty = false;
+    state.drag = null;
+    persistFactoryUiState();
+    render();
+    persistFactoryUiState();
+  }, "Boxes detectados. Revisa antes de crear staging.");
+}
+
+async function materializeStaging() {
+  await runAction("Creando crops y staging...", async () => {
+    state.snapshot = await api("/api/staging/materialize", { method: "POST", body: {} });
+    state.stage = "crops";
+    restoreFactoryUiState();
+    state.stage = "crops";
+    persistFactoryUiState();
+    render();
+  }, "Staging creado desde boxes.");
+}
+
+async function runOcr() {
+  const models = activeModelPayload();
+  const record = selectedRecord();
+  await runAction("Ejecutando OCR y segmentacion con modelos entrenados...", async () => {
+    state.snapshot = await api("/api/ocr/run", {
+      method: "POST",
+      body: {
+        provider: "hf",
+        curso: "SIN_CURSO",
+        tema: "SIN_TEMA",
+        record_id: record?.record_id || "",
+        ocr_model: models.ocr,
+        figure_model: models.figure_segmenter,
+        force_figure_model: true,
+      },
+    });
+    state.stage = "ocr";
+    if (record?.record_id) state.selectedRecordId = record.record_id;
+    restoreFactoryUiState();
+    state.stage = "ocr";
+    if (record?.record_id) state.selectedRecordId = record.record_id;
+    persistFactoryUiState();
+    render();
+  }, record ? "OCR y segmentacion guardados para la imagen actual." : "OCR y segmentacion guardados en staging.");
+}
+
+async function normalizeRecords() {
+  await runAction("Normalizando resultados...", async () => {
+    state.snapshot = await api("/api/normalize", { method: "POST", body: {} });
+    state.stage = "review";
+    restoreFactoryUiState();
+    state.stage = "review";
+    persistFactoryUiState();
+    render();
+  }, "Normalizacion lista para revision.");
+}
+
+async function runAction(busy, action, done) {
+  try {
+    setBusy(busy);
+    await action();
+    setStatus(done);
+  } catch (err) {
+    setStatus(`Error: ${err.message}`);
+  } finally {
+    $("busyText").textContent = "";
+  }
+}
+
+function setBusy(text) {
+  $("busyText").textContent = text;
+  $("statusText").textContent = text;
+}
+
+function setStatus(text) {
+  $("statusText").textContent = text;
+  $("busyText").textContent = "";
+}
+
+function setInspector(text) {
+  const host = $("inspector");
+  if (!text) {
+    host.textContent = "Sin detalle.";
+    return;
+  }
+  if (typeof text === "object" && !Array.isArray(text)) {
+    host.innerHTML = Object.entries(text).map(([key, value]) => `
+      <div class="inspector-line">
+        <strong>${escapeHtml(key)}</strong>
+        <span>${escapeHtml(value ?? "-")}</span>
+      </div>
+    `).join("");
+    return;
+  }
+  const rows = String(text).split("\n").filter(Boolean);
+  host.innerHTML = rows.length ? rows.map((row) => {
+    const [label, ...rest] = row.split(":");
+    const hasLabel = rest.length > 0;
+    return `
+      <div class="inspector-line">
+        <strong>${escapeHtml(hasLabel ? label : "Detalle")}</strong>
+        <span>${escapeHtml(hasLabel ? rest.join(":").trim() : row)}</span>
+      </div>
+    `;
+  }).join("") : "Sin detalle.";
+}
+
+function selectedRecord() {
+  return (state.snapshot.records || []).find((record) => record.record_id === state.selectedRecordId) || (state.snapshot.records || [])[0];
+}
+
+function filteredBooks(applyStatus = true) {
+  const query = state.library.query.trim().toLowerCase();
+  return (state.library.books || []).filter((book) => {
+    const haystack = [book.title, book.code, book.author, book.subject, book.pdfName].join(" ").toLowerCase();
+    const matchesQuery = !query || haystack.includes(query);
+    const matchesStatus = !applyStatus || state.library.status === "all" || (book.instances || []).some((item) => normalizeStatus(item.status) === state.library.status);
+    return matchesQuery && matchesStatus;
+  });
+}
+
+function filteredInstances(instances) {
+  if (state.library.status === "all") return instances || [];
+  return (instances || []).filter((item) => normalizeStatus(item.status) === state.library.status);
+}
+
+function selectedLibraryBook() {
+  const book = (state.library.books || []).find((row) => row.id === state.library.selectedBookId) || filteredBooks(false)[0] || null;
+  if (!book) return null;
+  const detail = state.library.details[String(book.id || "")];
+  if (detail?.loaded) {
+    return {
+      ...book,
+      coverUrl: book.coverUrl || detail.book?.cover_url || detail.book?.coverUrl || "",
+      instances: book.instances || detail.instances || [],
+      dashboard: detail.dashboard || book.dashboard || {},
+    };
+  }
+  return book;
+}
+
+function selectedLibraryInstance() {
+  const book = selectedLibraryBook();
+  if (!book) return null;
+  return (book.instances || []).find((item) => item.id === state.library.selectedInstanceId) || filteredInstances(book.instances || [])[0] || null;
+}
+
+function findLibraryInstance(id) {
+  for (const book of state.library.books || []) {
+    const instance = (book.instances || []).find((item) => item.id === id);
+    if (instance) return { ...instance, book };
+  }
+  return null;
+}
+
+function libraryCounts() {
+  const books = state.library.books || [];
+  const instances = books.flatMap((book) => book.instances || []);
+  const counts = statusCounts(instances);
+  return {
+    books: books.length,
+    instances: instances.length,
+    ...counts,
+  };
+}
+
+function statusCounts(items) {
+  return (items || []).reduce((acc, item) => {
+    const status = normalizeStatus(item.status || "pendiente");
+    acc[status] = (acc[status] || 0) + 1;
+    return acc;
+  }, { pendiente: 0, procesando: 0, requiere_revision: 0, listo: 0, error: 0 });
+}
+
+function inferInstanceStatus(instance) {
+  const indicators = instance.indicators || instance.summary || instance.metrics || {};
+  if (Number(indicators.subidos_bd_sin_revisar || indicators.sin_revisar || 0) > 0) return "requiere_revision";
+  if (Number(indicators.subidos_bd_inconsistentes || indicators.inconsistentes || 0) > 0) return "error";
+  if (Number(indicators.faltantes || 0) <= 0 && Number(indicators.total_esperado || 0) > 0) return "listo";
+  if (Number(indicators.escaneados_sesion || indicators.pages_total || indicators.boxes_total || 0) > 0) return "procesando";
+  return "pendiente";
+}
+
+function selectedOcrPayload(record, index) {
+  const item = (record.structured_items_web || [])[Number(index || 0)] || {};
+  return item.item || item;
+}
+
+function normalizedFromOcr(record, payload) {
+  const options = payload.options || {};
+  return {
+    ...(record.normalized || {}),
+    numero: payload.n || "",
+    curso: payload.curso || "",
+    tema: payload.tema || "",
+    enunciado_latex: payload.statement || "",
+    alternativas: {
+      A: options.A || "",
+      B: options.B || "",
+      C: options.C || "",
+      D: options.D || "",
+      E: options.E || "",
+    },
+    respuesta_correcta: payload.answer_key || "",
+    tiene_grafico: Boolean(payload.has_figure || (record.figure_segments_web || []).length),
+    figure_tag: payload.figure_tag || "",
+  };
+}
+
+function compactText(value, maxLength) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (text.length <= maxLength) return text || "-";
+  return `${text.slice(0, Math.max(0, maxLength - 1))}...`;
+}
+
+function formatPreviewText(value) {
+  return escapeHtml(value || "-").replace(/\n/g, "<br>");
+}
+
+function normalizeStageName(value) {
+  const text = String(value || "").toLowerCase();
+  if (text.includes("pagina")) return "pages";
+  if (text.includes("box")) return "boxes";
+  if (text.includes("crop")) return "crops";
+  if (text.includes("ocr")) return "ocr";
+  if (text.includes("normal")) return "review";
+  if (text.includes("staging")) return "candidate";
+  return text;
+}
+
+function normalizeStatus(value) {
+  const status = String(value || "pendiente").trim().toLowerCase().replaceAll(" ", "_");
+  if (["en_progreso", "in_progress", "working"].includes(status)) return "procesando";
+  if (["reviewed", "revisada", "revisado", "ready", "done"].includes(status)) return "listo";
+  if (["needs_review", "por_revisar"].includes(status)) return "requiere_revision";
+  if (["pending", "todo"].includes(status)) return "pendiente";
+  return status;
+}
+
+function displayStatus(status) {
+  return {
+    pendiente: "Pendiente",
+    procesando: "Procesando",
+    en_progreso: "En progreso",
+    listo: "Listo",
+    requiere_revision: "Requiere revision",
+    error: "Error",
+  }[status] || status.replaceAll("_", " ");
+}
+
+function friendlyLibraryError(err) {
+  return `No encontre el contrato de biblioteca todavia (${err.message}). Puedes abrir la Fabrica directa o conectar GET /api/library/books, POST /api/library/books y POST /api/library/books/{book_id}/instances.`;
+}
+
+function stageHint(id) {
+  return {
+    pages: "Selecciona un rango pequeno y verificable.",
+    boxes: "Ajusta cada problema antes de crear crops.",
+    crops: "Confirma que cada crop existe y tiene trazabilidad.",
+    ocr: "Compara lectura estructurada contra imagen.",
+    review: "Corrige campos; no edites JSON como flujo principal.",
+    candidate: "Solo valida preparacion; la BD sigue cerrada.",
+  }[id] || "";
+}
+
+function drawImageOnCanvas(canvas, src) {
+  const img = new Image();
+  img.onload = () => {
+    const maxW = 980;
+    const scale = Math.min(1, maxW / img.naturalWidth);
+    canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+  };
+  img.src = src;
+}
+
+function parseRange(raw, total) {
+  const set = new Set();
+  String(raw || "").split(",").forEach((token) => {
+    const part = token.trim();
+    if (!part) return;
+    if (part.includes("-")) {
+      let [a, b] = part.split("-", 2).map((v) => Number(v.trim()));
+      if (Number.isFinite(a) && Number.isFinite(b)) {
+        if (b < a) [a, b] = [b, a];
+        for (let page = a; page <= b; page += 1) if (page >= 1 && page <= total) set.add(page);
+      }
+    } else {
+      const page = Number(part);
+      if (Number.isFinite(page) && page >= 1 && page <= total) set.add(page);
+    }
+  });
+  return set;
+}
+
+function selectedRangeText() {
+  return [...state.selectedPages].sort((a, b) => a - b).join(",");
+}
+
+let boxCanvasResizeTimer = null;
+window.addEventListener("resize", () => {
+  if (!boxCanvasState) return;
+  window.clearTimeout(boxCanvasResizeTimer);
+  boxCanvasResizeTimer = window.setTimeout(() => resizeBoxCanvas({ preserveCenter: true }), 120);
+});
+
+function cloneBoxes(boxes) {
+  return (boxes || []).map((box) => box.slice(0, 4).map((value) => Number(value)));
+}
+
+function normalizeBox(box) {
+  const x1 = Math.round(Math.min(box[0], box[2]));
+  const y1 = Math.round(Math.min(box[1], box[3]));
+  const x2 = Math.round(Math.max(box[0], box[2]));
+  const y2 = Math.round(Math.max(box[1], box[3]));
+  return [x1, y1, x2, y2];
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value).replaceAll("\n", " ");
+}
+
+async function bootApp() {
+  setBusy("Detectando contexto...");
+  if (window.__PDF_APP_MODE__ === "library") {
+    state.view = "library";
+    renderLibrary();
+    await loadLibrary();
+    return;
+  }
+  try {
+    state.snapshot = await api("/api/bootstrap");
+    state.view = "factory";
+    restoreFactoryUiState();
+    render();
+    setStatus("Fabrica lista.");
+    return;
+  } catch (_) {
+    state.view = "library";
+  }
+  await loadLibrary();
+}
+
+$("libraryBtn").onclick = () => {
+  state.view = "library";
+  renderLibrary();
+  loadLibrary("Biblioteca actualizada.").catch((err) => setStatus(`Error de biblioteca: ${err.message}`));
+};
+$("refreshBtn").onclick = () => refresh("Actualizado.").catch((err) => setStatus(`Error: ${err.message}`));
+if ($("themeToggle")) {
+  $("themeToggle").onclick = () => toggleTheme();
+  syncThemeToggle();
+}
+bootApp().catch((err) => setStatus(`Error inicial: ${err.message}`));

@@ -13,6 +13,7 @@ from modulos.modulo0_transcriptor.latex_normalizer import (
     normalize_option,
     normalize_plain_text_pdflatex,
     normalize_scan_item_text,
+    normalize_scan_json_display_text,
     normalize_statement,
 )
 
@@ -40,9 +41,128 @@ class LatexNormalizerTests(unittest.TestCase):
         self.assertIn(r"\_", out)
         self.assertIn(r"\%", out)
 
+    def test_existing_latex_accent_is_kept_canonical(self) -> None:
+        out = normalize_plain_text_pdflatex(r"ecuaci\'on")
+        self.assertEqual(out, r"ecuaci\'on")
+
+    def test_double_escaped_accent_is_fixed(self) -> None:
+        res = normalize_statement(r"De la siguiente ecuaci\\'on, halle x^1")
+        self.assertIn(r"ecuaci\'on", res.text)
+        self.assertIn(r"$x^1$", res.text)
+        self.assertIn("accent_escape_canonicalized", res.warnings)
+
+    def test_mojibake_accent_is_fixed(self) -> None:
+        res = normalize_statement("De la siguiente ecuaciÃ³n")
+        self.assertIn(r"ecuaci\'on", res.text)
+        self.assertIn("accent_mojibake_fixed", res.warnings)
+
+    def test_braced_latex_accent_is_canonicalized(self) -> None:
+        out = normalize_plain_text_pdflatex(r"ecuaci\'{o}n")
+        self.assertEqual(out, r"ecuaci\'on")
+
+    def test_angle_word_is_restored_in_plain_prose(self) -> None:
+        res = normalize_statement(r"Siendo S y C los valores conocidos para un mismo \angle, calcule")
+        self.assertIn(r"un mismo \'angulo", res.text)
+        self.assertIn("angle_word_restored", res.warnings)
+
+    def test_article_angle_word_is_restored(self) -> None:
+        res = normalize_statement(r"Halle el \angle formado por dos rectas")
+        self.assertIn(r"el \'angulo formado", res.text)
+        self.assertIn("angle_word_restored", res.warnings)
+
+    def test_symbolic_angle_notation_is_preserved(self) -> None:
+        res = normalize_statement(r"Halle \angle ABC")
+        self.assertIn(r"\angle ABC", res.text)
+        self.assertNotIn("angle_word_restored", res.warnings)
+
+    def test_symbolic_m_angle_notation_is_preserved(self) -> None:
+        res = normalize_statement(r"Calcule m\angle AOB")
+        self.assertIn(r"\angle AOB", res.text)
+        self.assertNotIn("angle_word_restored", res.warnings)
+
+    def test_unicode_angle_symbol_stays_symbolic(self) -> None:
+        res = normalize_statement("Halle ∠ABC")
+        self.assertIn(r"\angle ABC", res.text)
+        self.assertNotIn("angle_word_restored", res.warnings)
+
     def test_option_is_wrapped_math(self) -> None:
         out = normalize_option("30\u00b0")
         self.assertEqual(out.text, r"$30^\circ$")
+
+    def test_scan_json_display_text_keeps_angle_word_readable(self) -> None:
+        out = normalize_scan_json_display_text(r"Siendo S y C los valores conocidos para un mismo \angle, calcule la expresi\'on")
+        self.assertIn("un mismo ángulo", out)
+        self.assertIn("expresión", out)
+        self.assertNotIn(r"\'angulo", out)
+
+    def test_scan_json_display_text_unwraps_text_macro_in_prose(self) -> None:
+        out = normalize_scan_json_display_text("De la medida del \\text{\u00e1ngulo} AOB")
+        self.assertIn("De la medida del \u00e1ngulo AOB", out)
+        self.assertNotIn(r"\text{", out)
+
+    def test_scan_json_display_text_unwraps_text_macro_inside_word(self) -> None:
+        out = normalize_scan_json_display_text("la expresi\\text{\u00f3n}")
+        self.assertEqual(out, "la expresi\u00f3n")
+
+    def test_scan_json_display_text_unwraps_text_macro_inside_math(self) -> None:
+        out = normalize_scan_json_display_text(r"$\frac{\pi}{3} \text{rad}$")
+        self.assertEqual(out, r"$\frac{\pi}{3} rad$")
+
+    def test_scan_json_display_text_unwraps_textit_macro(self) -> None:
+        out = normalize_scan_json_display_text(r"Halle R en el siguiente \textit{ángulo}")
+        self.assertEqual(out, "Halle R en el siguiente ángulo")
+
+    def test_scan_json_display_text_unwraps_textbf_macro(self) -> None:
+        out = normalize_scan_json_display_text(r"Determine el \textbf{ángulo} pedido")
+        self.assertEqual(out, "Determine el ángulo pedido")
+
+    def test_scan_json_display_text_strips_left_right_wrappers(self) -> None:
+        out = normalize_scan_json_display_text(r"$\left(4n-\frac{4}{3}\right)^\circ$")
+        self.assertEqual(out, r"$(4n-\frac{4}{3})^\circ$")
+
+    def test_normalize_statement_strips_textit_wrapper_in_prose(self) -> None:
+        res = normalize_statement(r"Halle R en el siguiente \textit{ángulo}")
+        self.assertIn(r"Halle R en el siguiente \'angulo", res.text)
+        self.assertNotIn(r"\textit\{", res.text)
+
+    def test_normalize_statement_strips_textit_wrapper_around_angle_word(self) -> None:
+        res = normalize_statement(
+            r"Si $S^\circ$ y $C^g$ son las medidas de un mismo \textit{ángulo}"
+        )
+        self.assertIn(r"un mismo \'angulo", res.text)
+        self.assertNotIn(r"\textit\{", res.text)
+
+    def test_normalize_statement_wraps_overline_command_in_prose(self) -> None:
+        res = normalize_statement(r"Si \overline{OB} es bisectriz del angulo AOC, calcule x")
+        self.assertIn(r"$\overline{OB}$", res.text)
+        self.assertNotIn(r"\overline\{", res.text)
+
+    def test_normalize_statement_wraps_frac_equation_in_prose(self) -> None:
+        res = normalize_statement(
+            r"De la siguiente ecuacion, halle \frac{x+1}{x-1}=\frac{1}{2}"
+        )
+        self.assertIn(r"$\frac{x+1}{x-1} = \frac{1}{2}$", res.text)
+        self.assertNotIn(r"\frac\{", res.text)
+
+    def test_normalize_statement_preserves_nested_fraction_expression(self) -> None:
+        res = normalize_statement(
+            r"De la siguiente ecuacion, halle x^1 \frac{x+1}{x-1} = \frac{5^8 + \frac{5^8}{3}}{2^8 - \frac{2^8}{3}}"
+        )
+        self.assertIn(r"$x^1$", res.text)
+        self.assertIn(r"\frac{x+1}{x-1}", res.text)
+        self.assertIn(r"\frac{5^8 + \frac{5^8}{3}}{2^8 - \frac{2^8}{3}}", res.text)
+        self.assertNotIn(r"\textasciicircum{}", res.text)
+        self.assertNotIn(r"\frac\{", res.text)
+
+    def test_normalize_statement_wraps_sqrt_expression_in_prose(self) -> None:
+        res = normalize_statement(
+            r"Calcule Q = \sqrt{\frac{C+S}{C-S}} + \sqrt{\frac{4S}{C-S}}"
+        )
+        self.assertIn(r"Q = $", res.text)
+        self.assertIn(r"\sqrt{", res.text)
+        self.assertIn(r"\frac{C+S}{C-S}", res.text)
+        self.assertIn(r"\frac{4S}{C-S}", res.text)
+        self.assertNotIn(r"\sqrt\{", res.text)
 
     def test_unbalanced_dollar_adds_warning(self) -> None:
         out = normalize_statement("x + $2 = 3")

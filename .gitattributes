@@ -1,0 +1,17 @@
+* text=auto eol=lf
+
+# Explicit text files
+*.py text eol=lf
+*.ps1 text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+.env.example text eol=lf
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.bmp binary
+*.ico binary
+

@@ -1,0 +1,24 @@
+﻿{
+    "merged_model_repo_id":  "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-graphaware-merged-v3",
+    "next_steps":  [
+                       ".\\.venv\\Scripts\\python.exe tools\\submit_merge_ocr_reasoning_hf_job.py --base-model Qwen/Qwen2.5-VL-3B-Instruct --adapter-model Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-graphaware-lora-v3 --merged-model Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-graphaware-merged-v3 --flavor a10g-small --timeout 7200",
+                       ".\\.venv\\Scripts\\python.exe tools\\create_ocr_reasoning_endpoint.py --name math-ocr-geometry-graphaware-v3 --repository Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-graphaware-merged-v3 --timeout 180",
+                       ".\\.venv\\Scripts\\python.exe tools\\activate_trained_ocr_model.py --env-file .env.local --model Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-graphaware-merged-v3 --endpoint-url \u003cURL_DEL_ENDPOINT\u003e/v1 --endpoint-name math-ocr-geometry-graphaware-v3"
+                   ],
+    "flavor":  "a10g-small",
+    "hf_job_id":  "6a257bc6368e0b5dc8066099",
+    "purpose":  "OCR geometria graph-aware v3: refuerzo para detectar graficos geometricos y etiquetar [[Imagen=...]]",
+    "epochs":  5,
+    "dataset_repo_id":  "Jhoan12/math-ocr-geometry-reviewed-graphaware-golden-v3",
+    "created_at":  "2026-06-07T09:10:36",
+    "reviewed_records":  100,
+    "dataset_local_path":  "E:/Github/Auditor-IA/.cache/transcriptor_runs/datasets/ocr_geometry_reviewed_training_graphaware_20260607_090923",
+    "base_model":  "Qwen/Qwen2.5-VL-3B-Instruct",
+    "lora_model_repo_id":  "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-graphaware-lora-v3",
+    "merge_submitted_at":  "2026-06-07T09:22:17",
+    "merge_job_id":  "6a257e8bece949d7b3dcb054",
+    "endpoint_name":  "math-ocr-geometry-graphaware-v3",
+    "endpoint_url":  "https://w0lwhr6eaknsho3a.us-east-1.aws.endpoints.huggingface.cloud/v1",
+    "endpoint_status":  "running",
+    "activated_at":  "2026-06-07T09:31:46"
+}

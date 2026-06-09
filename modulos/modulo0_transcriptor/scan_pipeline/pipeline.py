@@ -9,8 +9,10 @@ from typing import Any, Dict, List
 from ..latex_normalizer import normalize_option, normalize_statement
 from .extractor import IMAGE_EXTS, ScanExtractor
 from .key_classifier import KeyClassification, classify_key_image, classify_key_text
+from .ocr_ensemble import renumber_items_continuously, should_continue_numbering_for_items
 from .renderer import render_document, render_item
 from .schema import SCAN_SCHEMA, ScanItem
+from .statement_cleanup import extract_options_from_statement
 from .validator import validate_item_json, validate_rendered_item
 
 
@@ -23,6 +25,63 @@ def _excerpt(text: str, limit: int = 400) -> str:
     if len(raw) <= limit:
         return raw
     return f"{raw[:limit]}..."
+
+
+def _option_compare_key(value: str) -> str:
+    text = str(value or "").strip()
+    if text.startswith("$") and text.endswith("$") and len(text) >= 2:
+        text = text[1:-1].strip()
+    return re.sub(r"\s+", " ", text)
+
+
+def _contains_control_chars(text: str) -> bool:
+    return any(ord(ch) < 32 for ch in str(text or ""))
+
+
+def _is_placeholder_option(value: str) -> bool:
+    text = str(value or "").strip()
+    if text.startswith("$") and text.endswith("$") and len(text) >= 2:
+        text = text[1:-1].strip()
+    compact = re.sub(r"\s+", "", text).lower()
+    return compact in {"", "...", "....", "..", "?", "??", "???", r"\ldots", r"\cdots", r"\dots"}
+
+
+def _preserve_real_options(previous: ScanItem, current: ScanItem) -> None:
+    """Protect structured OCR options from repair passes that return placeholders."""
+    previous_options = dict(previous.options or {})
+    current_options = dict(current.options or {})
+    changed = False
+    for label in ("A", "B", "C", "D", "E"):
+        prev_val = str(previous_options.get(label, "") or "").strip()
+        cur_val = str(current_options.get(label, "") or "").strip()
+        if (not _is_placeholder_option(prev_val)) and _is_placeholder_option(cur_val):
+            current_options[label] = prev_val
+            changed = True
+    if changed:
+        current.options = current_options
+
+
+_LEADING_STATEMENT_NUMBER_RE = re.compile(
+    r"^\s*(?:<\s*(\d+)\s*>\.?\s*|N\.\s*(\d+)\.?\s*|(\d+)\.\s*)(.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _extract_leading_statement_number(text: str) -> tuple[int | None, str]:
+    raw = str(text or "").strip()
+    if not raw:
+        return (None, raw)
+    match = _LEADING_STATEMENT_NUMBER_RE.match(raw)
+    if not match:
+        return (None, raw)
+    number = next((grp for grp in match.groups()[:3] if grp), None)
+    rest = str(match.group(4) or "").strip()
+    if not number:
+        return (None, raw)
+    try:
+        return (max(1, int(number)), rest or raw)
+    except Exception:
+        return (None, raw)
 
 
 @dataclass
@@ -140,11 +199,53 @@ class ScanPipeline:
         item.curso = (curso or item.curso or "SIN_CURSO").strip()
         item.tema = (tema or item.tema or "SIN_TEMA").strip()
         item.n = max(1, int(item.n or default_n))
-        statement_norm = normalize_statement(item.statement)
-        item.statement = statement_norm.text or "[[ocr_sin_texto]]"
+        raw_statement_text = str(item.statement or "")
+        statement_number, stripped_statement = _extract_leading_statement_number(raw_statement_text)
+        statement_source = stripped_statement if statement_number is not None else raw_statement_text
+        statement_norm = normalize_statement(statement_source)
+        statement_text = statement_norm.text or "[[ocr_sin_texto]]"
+        if statement_number is None:
+            statement_number, stripped_statement = _extract_leading_statement_number(statement_text)
+        if statement_number is not None:
+            item.n = max(1, int(statement_number))
+            if stripped_statement:
+                statement_norm = normalize_statement(stripped_statement)
+                statement_text = statement_norm.text or stripped_statement
+            latex_warnings = [f"statement_header_number_used:{statement_number}"]
+        else:
+            latex_warnings = []
+        cleaned_statement, extracted_options, statement_changed = extract_options_from_statement(statement_text)
+        if statement_changed:
+            rechecked_norm = normalize_statement(cleaned_statement)
+            statement_norm = rechecked_norm
+            statement_text = rechecked_norm.text or "[[ocr_sin_texto]]"
+            item.needs_review = True
+        item.statement = statement_text or "[[ocr_sin_texto]]"
         unknown_symbols = list(statement_norm.unknown_symbols)
-        latex_warnings = list(statement_norm.warnings)
-        latex_changed = bool(statement_norm.changed)
+        latex_warnings.extend(list(statement_norm.warnings))
+        latex_changed = bool(statement_norm.changed) or bool(statement_changed)
+
+        if statement_changed:
+            latex_warnings.extend(["statement_options_detected", "statement_options_cleaned"])
+            merged_options = dict(item.options or {})
+            conflict_detected = False
+            filled_missing = False
+            for label in ("A", "B", "C", "D", "E"):
+                existing = str(merged_options.get(label, "") or "").strip()
+                extracted = str(extracted_options.get(label, "") or "").strip()
+                if not extracted:
+                    continue
+                if (not existing) or (existing == "..."):
+                    merged_options[label] = extracted
+                    filled_missing = True
+                    continue
+                if _option_compare_key(existing) != _option_compare_key(extracted):
+                    conflict_detected = True
+            if conflict_detected:
+                latex_warnings.append("statement_options_conflict_with_options")
+            if filled_missing:
+                latex_warnings.append("statement_options_filled_missing")
+            item.options = merged_options
 
         normalized_options: Dict[str, str] = {}
         for label in ("A", "B", "C", "D", "E"):
@@ -157,11 +258,23 @@ class ScanPipeline:
             latex_changed = latex_changed or opt_norm.changed
         item.options = normalized_options
 
+        if _contains_control_chars(item.statement):
+            latex_warnings.append("control_chars_detected_in_statement")
+        if any(_contains_control_chars(val) for val in item.options.values()):
+            latex_warnings.append("control_chars_detected_in_options")
+
         if item.has_figure:
             # Deterministic contract: figure tag is always img-n.
             item.figure_tag = f"img-{item.n}"
+            item.image_binding.marker_name = item.figure_tag
+            item.image_binding.marker_names = [item.figure_tag]
         else:
             item.figure_tag = ""
+            if not item.image_binding.is_confirmed:
+                item.image_binding.marker_name = ""
+                item.image_binding.marker_names = []
+        if item.image_binding.status == "needs_review":
+            item.needs_review = True
 
         meta = {
             "unknown_symbols": sorted(set(x for x in unknown_symbols if x)),
@@ -192,25 +305,43 @@ class ScanPipeline:
                 start_n=start_n,
                 allow_text_fallback=(self.provider == "ocr") or (not self.strict_json),
             )
+        structured_raw = current_raw
+        if (not parsed) and self.provider != "ocr" and self.strict_json:
+            try:
+                parsed, structured_raw = self.extractor.structure_raw_output(
+                    image_path=image_path,
+                    raw_output=current_raw,
+                    curso=curso,
+                    tema=tema,
+                    start_n=start_n,
+                )
+            except Exception:
+                parsed = []
+                structured_raw = current_raw
         if parsed:
-            return (parsed, current_raw, 0, parse_errors)
+            return (parsed, structured_raw, 0, parse_errors)
 
         if self.provider == "ocr" or (not self.strict_json):
             parse_errors.append("parse_sin_items")
             return ([], current_raw, 0, parse_errors)
 
+        current_raw = structured_raw
         parse_errors.append("json_parse_failed_attempt_0")
         retries_used = 0
         while retries_used < self.parse_max_retries:
             retries_used += 1
-            repaired_items, repaired_raw = self.extractor.repair_raw_output(
-                image_path=image_path,
-                raw_output=current_raw,
-                errors=parse_errors,
-                curso=curso,
-                tema=tema,
-                start_n=start_n,
-            )
+            try:
+                repaired_items, repaired_raw = self.extractor.repair_raw_output(
+                    image_path=image_path,
+                    raw_output=current_raw,
+                    errors=parse_errors,
+                    curso=curso,
+                    tema=tema,
+                    start_n=start_n,
+                )
+            except Exception as exc:
+                parse_errors.append(f"json_parse_retry_error_{retries_used}:{exc}")
+                break
             current_raw = repaired_raw
             if repaired_items:
                 return (repaired_items, current_raw, retries_used, parse_errors)
@@ -257,19 +388,28 @@ class ScanPipeline:
         latex_warnings = list(current_meta.get("latex_warnings", []))
         latex_normalized_changed = bool(current_meta.get("latex_normalized_changed", False))
         latex_validation_errors: List[str] = []
+        correction_errors: List[str] = []
         if unknown_symbols:
             latex_validation_errors.append("unknown_symbols_detected")
 
         while (json_errors or render_errors or latex_validation_errors) and retries_used < self.max_retries:
             retries_used += 1
-            corrected = self.extractor.correct_item(
-                image_path=image_path,
-                item=current.to_dict(),
-                errors=[*json_errors, *render_errors, *latex_validation_errors],
-                curso=curso,
-                tema=tema,
-            )
+            try:
+                corrected = self.extractor.correct_item(
+                    image_path=image_path,
+                    item=current.to_dict(),
+                    errors=[*json_errors, *render_errors, *latex_validation_errors],
+                    curso=curso,
+                    tema=tema,
+                )
+            except Exception as exc:
+                correction_errors.append(str(exc or ""))
+                latex_validation_errors = list(latex_validation_errors)
+                latex_validation_errors.append("correction_retry_failed")
+                break
+            previous = current
             current, current_meta = self._normalize_item(corrected, default_n=current.n, curso=curso, tema=tema)
+            _preserve_real_options(previous, current)
             json_errors = validate_item_json(current)
             rendered = render_item(current)
             render_errors = validate_rendered_item(rendered, item=current)
@@ -284,6 +424,9 @@ class ScanPipeline:
             current.needs_review = True
             rendered = render_item(current)
             render_errors = validate_rendered_item(rendered, item=current)
+        if correction_errors:
+            render_errors = list(render_errors)
+            render_errors.extend(f"correction_retry_failed:{msg}" for msg in correction_errors if msg)
 
         return PipelineItemResult(
             item=current,
@@ -307,10 +450,12 @@ class ScanPipeline:
         curso: str,
         tema: str,
         has_figure_hint: bool = False,
+        initial_items: List[Dict[str, Any]] | None = None,
     ) -> PipelineRunResult:
         run = PipelineRunResult()
+        should_allow_key_skip = initial_items is None
         key_cls = classify_key_text(raw_output, path=image_path)
-        if key_cls.is_key_image:
+        if should_allow_key_skip and key_cls.is_key_image:
             run.skipped_images.append(
                 {
                     "source": str(image_path),
@@ -329,25 +474,34 @@ class ScanPipeline:
             )
             return run
 
-        parsed, effective_raw, parse_retries_used, parse_errors = self._parse_with_retry(
-            image_path=image_path,
-            raw_output=raw_output,
-            curso=curso,
-            tema=tema,
-            start_n=start_n,
-            initial_items=None,
-        )
-        parse_failure_fallback = False
-        if not parsed:
-            parse_failure_fallback = True
-            self._record_parse_failure(
-                run=run,
+        if initial_items is None:
+            parsed, effective_raw, parse_retries_used, parse_errors = self._parse_with_retry(
                 image_path=image_path,
-                parse_retries_used=parse_retries_used,
-                parse_errors=parse_errors,
-                raw_output=effective_raw,
+                raw_output=raw_output,
+                curso=curso,
+                tema=tema,
+                start_n=start_n,
+                initial_items=None,
             )
-            parsed = [ScanItem.empty(n=start_n, curso=curso, tema=tema).to_dict()]
+            parse_failure_fallback = False
+            if not parsed:
+                parse_failure_fallback = True
+                self._record_parse_failure(
+                    run=run,
+                    image_path=image_path,
+                    parse_retries_used=parse_retries_used,
+                    parse_errors=parse_errors,
+                    raw_output=effective_raw,
+                )
+                parsed = [ScanItem.empty(n=start_n, curso=curso, tema=tema).to_dict()]
+        else:
+            parsed = [dict(it) for it in initial_items if isinstance(it, dict)]
+            effective_raw = str(raw_output or "")
+            parse_retries_used = 0
+            parse_errors = []
+            parse_failure_fallback = False
+        if should_continue_numbering_for_items(parsed, start_n=start_n):
+            parsed, _mapping = renumber_items_continuously(parsed, start_n=start_n)
 
         next_seq = max(1, int(start_n))
         for idx, raw_item in enumerate(parsed):
@@ -456,6 +610,8 @@ class ScanPipeline:
                     raw_output=effective_raw,
                 )
                 parsed_items = [ScanItem.empty(n=seq_n, curso=curso, tema=tema).to_dict()]
+            if should_continue_numbering_for_items(parsed_items, start_n=seq_n):
+                parsed_items, _mapping = renumber_items_continuously(parsed_items, start_n=seq_n)
 
             local_rows: List[PipelineItemResult] = []
             for raw in parsed_items:

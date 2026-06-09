@@ -1,0 +1,15 @@
+{
+  "dataset_local_path": "E:/Github/Auditor-IA/.cache/transcriptor_runs/datasets/pdf_problem_boxes_yolo_20260601_011902",
+  "dataset_repo_id": "Jhoan12/pdf-problem-boxes-yolo-golden-v2",
+  "dataset_private": true,
+  "model_repo_id": "Jhoan12/pdf-problem-detector-yolov8n-v2",
+  "model_private": true,
+  "flavor": "l4x1",
+  "timeout_seconds": 14400,
+  "epochs": 70,
+  "batch": 12,
+  "imgsz": 1280,
+  "base_model": "yolov8n.pt",
+  "class_name": "problema_matematico_completo",
+  "job_name": "pdf_problem_detector_yolov8n_v2"
+}

@@ -27,7 +27,7 @@ class ProblemaModel:
         self.id: int = kwargs.get('id')
         self.enunciado_latex: str = kwargs.get('enunciado_latex')
         self.archivo_origen: str = kwargs.get('archivo_origen')
-        self.estado_consistencia: str = kwargs.get('estado_consistencia')
+        self.consistencia_matematica: str = kwargs.get('consistencia_matematica')
         self.reglas_sugeridas_ia: List[int] = kwargs.get('reglas_sugeridas_ia', [])
         self.tema: str = kwargs.get('tema')
         self.nivel_dificultad: str = kwargs.get('nivel_dificultad')

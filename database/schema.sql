@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS problemas (
     -- CLASIFICACIÓN Y AUDITORÍA
     tema VARCHAR(150),
     nivel_dificultad VARCHAR(50),
-    estado_consistencia VARCHAR(50) DEFAULT 'Pendiente Revision', 
+    consistencia_matematica VARCHAR(30) NOT NULL DEFAULT 'Sin revisar',
     auditoria_razon TEXT, -- Justificación si está Mal Planteado
 
     -- SOLUCIONES Y CONOCIMIENTO RAG
@@ -64,3 +64,47 @@ CREATE TABLE IF NOT EXISTS problema_reglas (
     regla_id INTEGER REFERENCES reglas_matematicas(id),
     PRIMARY KEY (problema_id, regla_id)
 );
+
+-- =============================================================================
+-- ORIGENES DE PROBLEMAS
+-- =============================================================================
+-- El problema conserva su contenido independiente. Esta capa indica de donde
+-- salio: libro, examen de admision, simulacro, practica, separata, etc.
+CREATE TABLE IF NOT EXISTS origenes (
+    id SERIAL PRIMARY KEY,
+    tipo_origen VARCHAR(50) NOT NULL DEFAULT 'general',
+    codigo VARCHAR(160) NOT NULL UNIQUE,
+    nombre TEXT NOT NULL,
+    institucion TEXT NOT NULL DEFAULT '',
+    anio INT,
+    proceso VARCHAR(50) NOT NULL DEFAULT '',
+    area VARCHAR(50) NOT NULL DEFAULT '',
+    modalidad VARCHAR(120) NOT NULL DEFAULT '',
+    proyecto TEXT NOT NULL DEFAULT '',
+    libro TEXT NOT NULL DEFAULT '',
+    instancia TEXT NOT NULL DEFAULT '',
+    pdf_path TEXT NOT NULL DEFAULT '',
+    session_path TEXT NOT NULL DEFAULT '',
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    estado VARCHAR(40) NOT NULL DEFAULT 'activo',
+    notas TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS problema_origen (
+    id SERIAL PRIMARY KEY,
+    problema_id INT NOT NULL REFERENCES problemas(id) ON DELETE CASCADE,
+    origen_id INT NOT NULL REFERENCES origenes(id) ON DELETE CASCADE,
+    numero_original INT,
+    orden INT,
+    pagina INT,
+    bloque TEXT NOT NULL DEFAULT '',
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (problema_id, origen_id)
+);
+
+CREATE INDEX IF NOT EXISTS ix_origenes_tipo_codigo ON origenes(tipo_origen, codigo);
+CREATE INDEX IF NOT EXISTS ix_problema_origen_origen ON problema_origen(origen_id);
+CREATE INDEX IF NOT EXISTS ix_problema_origen_problema ON problema_origen(problema_id);
