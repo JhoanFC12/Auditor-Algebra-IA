@@ -69,12 +69,13 @@ class _FakeService:
         figure_model="",
         force_figure_model=True,
         record_id="",
+        record_ids=None,
     ):
-        self.calls.append(("run_ocr_and_segmentation", provider, curso, tema, start_n, limit, ocr_model, figure_model, force_figure_model, record_id))
+        self.calls.append(("run_ocr_and_segmentation", provider, curso, tema, start_n, limit, ocr_model, figure_model, force_figure_model, record_id, list(record_ids or [])))
         return self.staging.load_records()
 
-    def normalize_existing_ocr(self):
-        self.calls.append(("normalize_existing_ocr",))
+    def normalize_existing_ocr(self, *, record_id="", record_ids=None):
+        self.calls.append(("normalize_existing_ocr", record_id, list(record_ids or [])))
         return self.staging.load_records()
 
     def update_figure_segments(self, record_id, boxes):
@@ -86,6 +87,17 @@ class _FakeService:
             "segments_total": len(boxes),
             "segments": [{"idx": index + 1, "bbox_px": list(box[:4]), "image_path": ""} for index, box in enumerate(boxes)],
         }
+        self.staging.upsert_record(record)
+        return record
+
+    def update_raw_ocr(self, record_id, raw_ocr):
+        self.calls.append(("update_raw_ocr", record_id, raw_ocr))
+        record = self.staging.get_record(record_id)
+        if record is None:
+            raise KeyError(record_id)
+        record.raw_ocr = str(raw_ocr or "")
+        record.structured_ocr = {}
+        record.normalized = {}
         self.staging.upsert_record(record)
         return record
 
@@ -208,10 +220,19 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                 segment_snapshot = _post_json(base, "api/ocr/segments/boxes", {"record_id": "crop_001", "boxes": [[2, 3, 44, 55]]})
                 _post_json(base, "api/normalize", {})
                 self.assertIn(("materialize_crops_to_staging",), service.calls)
-                self.assertIn(("run_ocr_and_segmentation", "local", "ALG", "EC", 3, 1, "", "", True, "crop_001"), service.calls)
+                self.assertIn(("run_ocr_and_segmentation", "local", "ALG", "EC", 3, 1, "", "", True, "crop_001", []), service.calls)
+                _post_json(base, "api/ocr/run", {"provider": "local", "record_ids": ["crop_001", "crop_001", ""]})
+                self.assertIn(("run_ocr_and_segmentation", "local", "SIN_CURSO", "SIN_TEMA", 1, None, "", "", True, "", ["crop_001"]), service.calls)
+                raw_snapshot = _post_json(base, "api/ocr/raw", {"record_id": "crop_001", "raw_ocr": "texto corregido"})
+                self.assertIn(("update_raw_ocr", "crop_001", "texto corregido"), service.calls)
+                self.assertEqual(raw_snapshot["records"][0]["raw_ocr"], "texto corregido")
                 self.assertIn(("update_figure_segments", "crop_001", [[2, 3, 44, 55]]), service.calls)
                 self.assertEqual(segment_snapshot["records"][0]["figure_segmentation"]["segments_total"], 1)
-                self.assertIn(("normalize_existing_ocr",), service.calls)
+                self.assertIn(("normalize_existing_ocr", "", []), service.calls)
+                _post_json(base, "api/normalize", {"record_id": "crop_001"})
+                self.assertIn(("normalize_existing_ocr", "crop_001", []), service.calls)
+                _post_json(base, "api/normalize", {"record_ids": ["crop_001", "crop_001", ""]})
+                self.assertIn(("normalize_existing_ocr", "", ["crop_001"]), service.calls)
 
                 with urllib.request.urlopen(base + "api/record?record_id=crop_001", timeout=5) as response:
                     detail = json.loads(response.read().decode("utf-8"))

@@ -3,7 +3,7 @@ const STAGES = [
   { id: "boxes", title: "Boxes", action: "Confirmar cajas de problemas" },
   { id: "crops", title: "Staging", action: "Revisar crops trazables" },
   { id: "ocr", title: "OCR", action: "Leer texto y graficos" },
-  { id: "review", title: "Revision", action: "Corregir formulario final" },
+  { id: "review", title: "Normalizacion", action: "Normalizar y corregir texto" },
   { id: "candidate", title: "Candidato", action: "Verificar bloqueo de BD" },
 ];
 
@@ -31,6 +31,7 @@ const state = {
   selectedPages: new Set(),
   selectedPageRecordId: "",
   selectedRecordId: "",
+  ocrQueueIds: new Set(),
   selectedOcrIndex: 0,
   boxes: [],
   boxMode: "select",
@@ -44,6 +45,7 @@ const state = {
   figureSegmentDirty: false,
   figureDrag: null,
   reviewDraft: null,
+  taskProgress: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -105,7 +107,7 @@ async function refresh(message = "") {
   if (state.view === "library") return loadLibrary(message || "Biblioteca actualizada.");
   setBusy("Actualizando...");
   state.snapshot = await loadFactorySnapshot();
-  restoreFactoryUiState();
+  restoreFactoryUiState({ preserveCurrentStage: true });
   render();
   setStatus(message || "Listo para trabajar.");
 }
@@ -127,6 +129,7 @@ function render() {
 
 function renderFactoryShell() {
   $("workspace").classList.remove("library-mode");
+  syncWorkspaceMode();
   const timelineCard = document.querySelector(".timeline-card");
   if (timelineCard && !$("timeline")) {
     timelineCard.innerHTML = `
@@ -203,18 +206,22 @@ function persistFactoryUiState() {
       selectedPages: [...state.selectedPages].sort((a, b) => a - b),
       selectedPageRecordId: state.selectedPageRecordId,
       selectedRecordId: state.selectedRecordId,
+      ocrQueueIds: [...state.ocrQueueIds].sort(),
       selectedOcrIndex: state.selectedOcrIndex,
       savedAt: new Date().toISOString(),
     }));
   } catch (_) {}
 }
 
-function restoreFactoryUiState() {
+function restoreFactoryUiState({ preserveCurrentStage = false } = {}) {
   if (!state.snapshot) return;
   const persisted = loadPersistedFactoryUiState();
   const pageCount = Number(state.snapshot.pdf?.page_count || 0);
   const pages = factoryPages();
   const records = state.snapshot.records || [];
+  const validRecordIds = new Set(records.map((record) => String(record.record_id || "")));
+  const persistedQueueIds = Array.isArray(persisted.ocrQueueIds) ? persisted.ocrQueueIds : [];
+  state.ocrQueueIds = new Set(persistedQueueIds.map((id) => String(id || "")).filter((id) => validRecordIds.has(id)));
   const detectedPages = detectedPageNumbers(pages);
   const persistedPages = sortedPageNumbers(persisted.selectedPages || []).filter((page) => !pageCount || page <= pageCount);
   const selectedPages = persistedPages.length ? persistedPages : detectedPages;
@@ -239,8 +246,15 @@ function restoreFactoryUiState() {
     || records[0];
   state.selectedRecordId = matchingRecord?.record_id || "";
   state.selectedOcrIndex = Math.max(0, Number(persisted.selectedOcrIndex || state.selectedOcrIndex || 0) || 0);
+  const currentStage = normalizeUiStage(state.stage);
+  const persistedStage = normalizeUiStage(persisted.stage);
   const inferredStage = inferStageFromSnapshot();
-  state.stage = mostAdvancedStage(normalizeUiStage(persisted.stage), inferredStage) || inferredStage || "pages";
+  state.stage = resolveRestoredStage({
+    currentStage,
+    persistedStage,
+    inferredStage,
+    preserveCurrentStage,
+  });
   persistFactoryUiState();
 }
 
@@ -283,16 +297,31 @@ function normalizeUiStage(stage) {
   return STAGES.some((row) => row.id === value) ? value : "";
 }
 
-function stageRank(stage) {
-  return STAGES.findIndex((row) => row.id === stage);
+function resolveRestoredStage({ currentStage, persistedStage, inferredStage, preserveCurrentStage }) {
+  const candidates = [
+    preserveCurrentStage ? currentStage : "",
+    persistedStage,
+    inferredStage,
+    "pages",
+  ].filter(Boolean);
+  let next = candidates[0] || "pages";
+  if (shouldPreferOcrOverReview(next)) next = "ocr";
+  return next;
 }
 
-function mostAdvancedStage(a, b) {
-  const rankA = stageRank(a);
-  const rankB = stageRank(b);
-  if (rankA < 0) return rankB >= 0 ? b : "";
-  if (rankB < 0) return a;
-  return rankA >= rankB ? a : b;
+function shouldPreferOcrOverReview(stage) {
+  if (stage !== "review") return false;
+  const summary = state.snapshot?.summary || {};
+  const records = state.snapshot?.records || [];
+  const recordsTotal = Number(summary.records_total || records.length || 0);
+  const normalizedDone = Number(summary.normalized_done || 0);
+  if (!recordsTotal || normalizedDone >= recordsTotal) return false;
+  const ocrDone = Number(summary.ocr_done || 0);
+  const ready = Number(summary.ready || 0);
+  const errors = Number(summary.errors || 0);
+  const hasOcrData = ocrDone > 0 || records.some((record) => hasText(record.raw_ocr) || hasObjectData(record.structured_ocr));
+  if (!hasOcrData) return false;
+  return errors > 0 || ready === 0 || ocrDone < recordsTotal;
 }
 
 function recordPageNumber(record) {
@@ -307,6 +336,85 @@ function hasObjectData(value) {
 
 function hasText(value) {
   return String(value || "").trim().length > 0;
+}
+
+function recordSourceStale(record) {
+  return Boolean(record?.source_stale || record?.source_state === "stale");
+}
+
+function recordDownstreamInvalidated(record) {
+  return Boolean(record?.downstream_invalidated || record?.downstream_state?.status === "invalidated");
+}
+
+function recordCanRunOcr(record) {
+  return Boolean(record && !recordSourceStale(record) && record.crop_url);
+}
+
+function invalidatedRecords(records = state.snapshot?.records || []) {
+  return (records || []).filter((record) => recordSourceStale(record) || recordDownstreamInvalidated(record));
+}
+
+function isTaskRunning(type = "") {
+  const progress = state.taskProgress || {};
+  if (!progress.running) return false;
+  return type ? progress.type === type : true;
+}
+
+function renderTaskProgress(type = "") {
+  const progress = state.taskProgress || {};
+  if (!progress.running || (type && progress.type !== type)) return "";
+  const total = Math.max(1, Number(progress.total || 1));
+  const current = Math.max(0, Math.min(total, Number(progress.current || 0)));
+  const percent = Math.round((current / total) * 100);
+  const failed = Number(progress.failed || 0);
+  const ok = Number(progress.ok || 0);
+  return `
+    <div class="task-progress panel" role="status" aria-live="polite">
+      <div class="task-progress-main">
+        <span class="section-label">${escapeHtml(progress.label || "Proceso")}</span>
+        <strong>${escapeHtml(progress.message || `${current} de ${total}`)}</strong>
+        <span class="muted">${escapeHtml(progress.activeName || progress.activeId || "Preparando siguiente item...")}</span>
+      </div>
+      <div class="task-progress-meter" aria-hidden="true"><span style="width:${percent}%"></span></div>
+      <div class="task-progress-counts">
+        <span>${current}/${total}</span>
+        <span>${ok} listo(s)</span>
+        ${failed ? `<span class="task-progress-error">${failed} con error</span>` : ""}
+      </div>
+    </div>
+  `;
+}
+
+function findRecordById(recordId, records = state.snapshot?.records || []) {
+  const id = String(recordId || "");
+  return (records || []).find((record) => String(record.record_id || "") === id) || null;
+}
+
+function recordLabelById(recordId) {
+  const records = state.snapshot?.records || [];
+  const record = findRecordById(recordId, records);
+  if (!record) return String(recordId || "");
+  const index = records.findIndex((row) => String(row.record_id || "") === String(recordId || ""));
+  return recordOptionLabel(record, Math.max(0, index));
+}
+
+function inferredStartNumberForRecord(record) {
+  const source = record?.source || {};
+  const candidates = [
+    record?.normalized?.numero,
+    source.problem_number,
+    source.n,
+    source.problem_index,
+    source.source_order,
+    source.box_index,
+  ];
+  for (const value of candidates) {
+    const number = Number.parseInt(String(value || "").replace(/[^\d]/g, ""), 10);
+    if (Number.isFinite(number) && number > 0) return number;
+  }
+  const records = state.snapshot?.records || [];
+  const index = record ? records.findIndex((row) => row.record_id === record.record_id) : -1;
+  return index >= 0 ? index + 1 : 1;
 }
 
 async function loadLibrary(message = "") {
@@ -401,6 +509,7 @@ function ensureLibrarySelection() {
 }
 
 function renderLibrary() {
+  $("workspace").classList.remove("ocr-focus-mode");
   $("workspace").classList.add("library-mode");
   $("title").textContent = "Biblioteca";
   $("subtitle").textContent = "Registra libros, divide instancias y abre la Fabrica por tramo de trabajo.";
@@ -837,7 +946,10 @@ async function openFactoryForInstance(instanceId) {
         open: false,
       },
     });
-    if (result.url) window.open(result.url, "_blank", "noopener");
+    if (result.url) {
+      const opened = window.open(result.url, "_blank", "noopener");
+      if (!opened) window.location.href = result.url;
+    }
   }, `Fabrica abierta para ${instance.title}.`);
 }
 
@@ -955,7 +1067,14 @@ function renderStage() {
     candidate: renderCandidateStage,
   };
   (renderers[state.stage] || renderPagesStage)();
+  syncWorkspaceMode();
   syncPrimaryAction();
+}
+
+function syncWorkspaceMode() {
+  const workspace = $("workspace");
+  if (!workspace) return;
+  workspace.classList.toggle("ocr-focus-mode", state.view === "factory" && state.stage === "ocr");
 }
 
 function renderPagesStage() {
@@ -1682,22 +1801,47 @@ async function saveCurrentBoxes() {
     state.boxDirty = false;
     persistFactoryUiState();
     render();
+    const invalidated = invalidatedRecords(state.snapshot.records || []).length;
+    return invalidated
+      ? `Boxes guardados. ${invalidated} registro(s) downstream quedaron pendientes de regenerar.`
+      : "Boxes guardados.";
   }, "Boxes guardados.");
 }
 
 function renderCropsStage() {
   const records = state.snapshot.records || [];
+  syncOcrQueueSelection(records);
   syncSelectedRecord();
   const record = selectedRecord();
+  const queuedCount = queuedOcrRecordIds(records).length;
+  const queueBusy = isTaskRunning("ocr");
+  const invalidatedCount = invalidatedRecords(records).length;
   $("stageHost").innerHTML = `
     <div class="stage-header">
       <div>
         <h2>Crops y staging</h2>
-        <p class="muted">Cada tarjeta representa un problema extraido y trazable en staging.</p>
+        <p class="muted">Elige las imagenes que entraran a la cola de OCR y segmentacion grafica.</p>
       </div>
-      <span class="status-pill status-${records.length ? "listo" : "pendiente"}">${records.length} crop(s)</span>
+      <span class="status-pill status-${queuedCount ? "procesando" : (records.length ? "listo" : "pendiente")}">${queuedCount ? `${queuedCount} en cola` : `${records.length} crop(s)`}</span>
     </div>
     ${renderModelStrip(["ocr", "figure_segmenter"])}
+    ${invalidatedCount ? `
+      <div class="library-notice">
+        ${invalidatedCount} registro(s) dependen de boxes modificados. Vuelve a Crear staging para regenerar crops antes de OCR.
+      </div>
+    ` : ""}
+    <div class="queue-toolbar panel">
+      <div>
+        <h3>Cola OCR + segmentacion</h3>
+        <p class="muted">${queuedCount ? `${queuedCount} imagen(es) seleccionada(s).` : "Selecciona una o varias imagenes para procesarlas con los modelos entrenados."}</p>
+      </div>
+      <div class="queue-actions">
+        <button id="queueAllCrops" type="button" ${records.length && !queueBusy ? "" : "disabled"}>Seleccionar todo</button>
+        <button id="clearOcrQueue" type="button" ${queuedCount && !queueBusy ? "" : "disabled"}>Limpiar cola</button>
+        <button id="runOcrQueue" class="primary" type="button" ${queuedCount && !queueBusy ? "" : "disabled"}>Ejecutar cola</button>
+      </div>
+    </div>
+    ${renderTaskProgress("ocr")}
     <div class="crops-layout">
       <div class="thumb-grid crop-gallery">
         ${records.length ? records.map(recordCardHtml).join("") : `<div class="panel muted">Crea staging desde los boxes revisados.</div>`}
@@ -1708,6 +1852,7 @@ function renderCropsStage() {
     </div>
   `;
   bindRecordCards();
+  bindOcrQueueControls(records);
   setInspector(record ? cropInspectorData(record, records.length) : {
     "Problemas en staging": records.length,
     "Siguiente paso": "Crear staging desde boxes revisados.",
@@ -1717,11 +1862,21 @@ function renderCropsStage() {
 function recordCardHtml(record) {
   const source = record.source || {};
   const box = source.bbox_px || [];
+  const queued = state.ocrQueueIds.has(String(record.record_id || ""));
+  const queueLocked = isTaskRunning("ocr");
+  const stale = recordSourceStale(record);
+  const invalidated = recordDownstreamInvalidated(record);
+  const canQueue = recordCanRunOcr(record);
   return `
-    <div class="crop-card ${record.record_id === state.selectedRecordId ? "active" : ""}" data-record="${record.record_id}">
+    <div class="crop-card ${record.record_id === state.selectedRecordId ? "active" : ""} ${queued ? "queued" : ""} ${stale ? "stale" : ""}" data-record="${record.record_id}">
+      <label class="queue-check" title="Incluir en cola OCR">
+        <input type="checkbox" data-queue-record="${escapeAttr(record.record_id)}" ${queued ? "checked" : ""} ${queueLocked || !canQueue ? "disabled" : ""} />
+        <span>${queued ? "En cola" : (stale ? "Regenerar" : "Cola")}</span>
+      </label>
       ${record.crop_url ? `<img src="${record.crop_url}" alt="Crop ${escapeHtml(record.record_id)}" />` : ""}
       <strong>${escapeHtml(record.normalized?.numero || record.crop_name || record.record_id)}</strong>
       <div class="muted">Pag. ${escapeHtml(source.page_number || "-")} | ${escapeHtml(record.status_label || record.status || "pendiente")}</div>
+      ${stale ? `<div class="status-pill status-pendiente">Regenerar crop</div>` : (invalidated ? `<div class="status-pill status-requiere_revision">OCR pendiente por box</div>` : "")}
       <div class="crop-meta">${box.length >= 4 ? escapeHtml(box.slice(0, 4).join(", ")) : "sin bbox"}</div>
     </div>
   `;
@@ -1732,6 +1887,8 @@ function renderCropPreview(record) {
   const box = source.bbox_px || [];
   return `
     <h3>Crop seleccionado</h3>
+    ${recordSourceStale(record) ? `<div class="library-notice">Este crop viene de un box modificado. Regenera staging antes de correr OCR.</div>` : ""}
+    ${!recordSourceStale(record) && recordDownstreamInvalidated(record) ? `<div class="library-notice">El crop ya fue regenerado; vuelve a ejecutar OCR/segmentacion para actualizar la cadena.</div>` : ""}
     ${record.crop_url ? `<img class="preview-img" src="${record.crop_url}" alt="Crop seleccionado" />` : `<p class="muted">Imagen no encontrada.</p>`}
     <div class="metadata-grid">
       <span class="muted">Registro</span><strong>${escapeHtml(record.record_id)}</strong>
@@ -1750,7 +1907,49 @@ function cropInspectorData(record, total) {
     "Pagina": source.page_number || "-",
     "Box": (source.bbox_px || []).join(", ") || "-",
     "Crop": record.crop_path || "-",
+    "Cadena": recordSourceStale(record) ? "Regenerar crop" : (recordDownstreamInvalidated(record) ? "OCR pendiente por cambio de box" : "Activa"),
   };
+}
+
+function syncOcrQueueSelection(records = state.snapshot.records || []) {
+  const valid = new Set((records || []).filter(recordCanRunOcr).map((record) => String(record.record_id || "")));
+  state.ocrQueueIds = new Set([...state.ocrQueueIds].filter((id) => valid.has(id)));
+}
+
+function queuedOcrRecordIds(records = state.snapshot.records || []) {
+  syncOcrQueueSelection(records);
+  return (records || [])
+    .map((record) => String(record.record_id || ""))
+    .filter((id) => id && state.ocrQueueIds.has(id) && recordCanRunOcr(findRecordById(id, records)));
+}
+
+function bindOcrQueueControls(records = state.snapshot.records || []) {
+  const allBtn = $("queueAllCrops");
+  const clearBtn = $("clearOcrQueue");
+  const runBtn = $("runOcrQueue");
+  if (allBtn) allBtn.onclick = () => {
+    state.ocrQueueIds = new Set((records || []).filter(recordCanRunOcr).map((record) => String(record.record_id || "")).filter(Boolean));
+    persistFactoryUiState();
+    renderCropsStage();
+  };
+  if (clearBtn) clearBtn.onclick = () => {
+    state.ocrQueueIds = new Set();
+    persistFactoryUiState();
+    renderCropsStage();
+  };
+  if (runBtn) runBtn.onclick = () => runOcr(queuedOcrRecordIds(records));
+  document.querySelectorAll("[data-queue-record]").forEach((checkbox) => {
+    checkbox.onclick = (event) => event.stopPropagation();
+    checkbox.onchange = (event) => {
+      event.stopPropagation();
+      const id = String(checkbox.dataset.queueRecord || "");
+      if (!id) return;
+      if (checkbox.checked) state.ocrQueueIds.add(id);
+      else state.ocrQueueIds.delete(id);
+      persistFactoryUiState();
+      renderCropsStage();
+    };
+  });
 }
 
 function bindRecordCards() {
@@ -1840,6 +2039,7 @@ function renderOcrStage() {
       </div>
     </div>
     ${renderModelStrip(["ocr", "figure_segmenter"])}
+    ${renderTaskProgress("ocr")}
     ${record ? renderOcrRecord(record) : `<div class="panel muted">Selecciona un crop de staging.</div>`}
   `;
   bindRecordCards();
@@ -1847,13 +2047,7 @@ function renderOcrStage() {
   bindOcrNavigation(record);
   bindFigureSegmentEditor(record);
   bindRawOcrActions(record);
-  document.querySelectorAll("[data-ocr-index]").forEach((item) => {
-    item.onclick = () => {
-      state.selectedOcrIndex = Number(item.dataset.ocrIndex || 0);
-      persistFactoryUiState();
-      renderOcrStage();
-    };
-  });
+  typesetMath($("ocrLatexPreview"));
   document.querySelectorAll("[data-use-ocr]").forEach((btn) => {
     btn.onclick = () => {
       const payload = selectedOcrPayload(record, btn.dataset.useOcr);
@@ -1866,6 +2060,7 @@ function renderOcrStage() {
   setInspector(record ? {
     "Imagen": `${records.length ? currentRecordIndex + 1 : 0} de ${records.length}`,
     "Registro": record.record_id,
+    "OCR crudo": record.raw_ocr ? `si (${String(record.raw_ocr).length} caracteres)` : "no",
     "Lecturas OCR": (record.structured_items_web || []).length,
     "Segmentos graficos": (record.figure_segments_web || []).length,
   } : "");
@@ -1882,7 +2077,7 @@ function renderOcrRecord(record) {
   const selectedPayload = items.length ? selectedOcrPayload(record, selectedIndex) : {};
   return `
     <div class="record-layout ocr-layout">
-      <div class="problem-column">
+      <div class="ocr-left-column">
         <div class="record-nav panel" aria-label="Navegacion de problemas">
           <button id="prevRecord" class="nav-arrow" type="button" title="Imagen anterior" ${currentRecordIndex <= 0 ? "disabled" : ""}>&larr;</button>
           <div class="record-nav-main">
@@ -1898,47 +2093,42 @@ function renderOcrRecord(record) {
             </select>
           </label>
         </div>
-        <div class="crop-preview">
-          ${record.crop_url ? `<img class="preview-img" src="${record.crop_url}" alt="Crop seleccionado" />` : `<div class="empty-state">Sin crop disponible.</div>`}
-        </div>
+        <section class="panel ocr-latex-panel">
+          <div class="panel-heading-row">
+            <div>
+              <h3>Visor LaTeX</h3>
+              <p class="muted">${items.length ? "Lectura estructurada lista para revisar antes de editar." : "Sin lectura estructurada todavia."}</p>
+            </div>
+            ${items.length ? `
+              <div class="ocr-nav" aria-label="Navegacion de lecturas OCR">
+                <button id="prevOcrItem" class="mini-arrow" type="button" title="Lectura anterior" ${selectedIndex <= 0 ? "disabled" : ""}>&larr;</button>
+                <span class="nav-counter">${selectedIndex + 1} de ${items.length}</span>
+                <button id="nextOcrItem" class="mini-arrow" type="button" title="Lectura siguiente" ${selectedIndex >= items.length - 1 ? "disabled" : ""}>&rarr;</button>
+              </div>
+            ` : ""}
+          </div>
+          ${items.length ? renderOcrLatexViewer(selectedPayload, selectedIndex, items.length) : `
+            <div class="empty-state raw-empty">
+              Ejecuta OCR sobre la imagen actual. Cuando el modelo devuelva una lectura estructurada, aparecera aqui como vista LaTeX.
+            </div>
+          `}
+          ${items.length ? `<button data-use-ocr="${selectedIndex}" class="primary wide-action">Editar lectura</button>` : ""}
+        </section>
+        ${renderRawOcrPanel(record)}
         <dl class="meta-list record-meta-compact">
           <div><dt>Registro</dt><dd>${escapeHtml(record.record_id)}</dd></div>
           <div><dt>Estado</dt><dd>${escapeHtml(record.status_label || record.status || "-")}</dd></div>
           <div><dt>Entrenamiento</dt><dd>${(record.training_examples || []).length} correccion(es)</dd></div>
         </dl>
       </div>
-      <div class="ocr-workbench">
-        <div class="review-columns">
-          <section class="panel">
-            <div class="panel-heading-row">
-              <h3>OCR estructurado</h3>
-              ${items.length ? `
-                <div class="ocr-nav" aria-label="Navegacion de lecturas OCR">
-                  <button id="prevOcrItem" class="mini-arrow" type="button" title="Lectura anterior" ${selectedIndex <= 0 ? "disabled" : ""}>&larr;</button>
-                  <span class="nav-counter">${selectedIndex + 1} de ${items.length}</span>
-                  <button id="nextOcrItem" class="mini-arrow" type="button" title="Lectura siguiente" ${selectedIndex >= items.length - 1 ? "disabled" : ""}>&rarr;</button>
-                </div>
-              ` : ""}
+      <div class="ocr-image-column">
+        <section class="panel ocr-image-panel">
+          <div class="panel-heading-row">
+            <div>
+              <h3>Imagen con boxes</h3>
+              <p class="muted">${segments.length ? `${segments.length} segmento(s) grafico(s) detectado(s).` : "Sin segmentos graficos detectados todavia."}</p>
             </div>
-            <div class="list">
-              ${items.length ? items.map((item, index) => {
-                const payload = item.item || item;
-                return `<button class="ocr-item ${index === selectedIndex ? "active" : ""}" data-ocr-index="${index}" type="button">
-                  <strong>${escapeHtml(payload.n || "Sin numero")} - Clave ${escapeHtml(payload.answer_key || "-")}</strong>
-                  <span>${escapeHtml(compactText(payload.statement || "", 180))}</span>
-                </button>`;
-              }).join("") : `<p class="muted">Sin OCR estructurado todavia. Revisa el OCR crudo o vuelve a ejecutar la etapa.</p>`}
-            </div>
-          </section>
-          <section class="panel">
-            <h3>Lectura seleccionada</h3>
-            ${items.length ? renderStructuredOcrPreview(selectedPayload, selectedIndex) : `<p class="muted">No hay item estructurado para cargar.</p>`}
-            ${items.length ? `<button data-use-ocr="${selectedIndex}" class="primary wide-action">Cargar en formulario final</button>` : ""}
-            ${items.length ? renderTechnicalDetails("JSON estructurado del item", items[selectedIndex]) : ""}
-          </section>
-        </div>
-        <section class="panel">
-          <h3>Segmentos graficos</h3>
+          </div>
           ${renderFigureSegmentEditor(record)}
           <div class="thumb-grid compact">
             ${segments.length ? segments.map((segment, idx) => `
@@ -1949,7 +2139,6 @@ function renderOcrRecord(record) {
             `).join("") : `<p class="muted">Sin segmentos graficos detectados.</p>`}
           </div>
         </section>
-        ${renderRawOcrPanel(record)}
         ${renderTechnicalDetails("Registro staging completo", record)}
       </div>
     </div>
@@ -2226,21 +2415,25 @@ async function saveFigureSegments(record) {
   }, "Segmentos graficos revisados guardados.");
 }
 
-function renderStructuredOcrPreview(payload, index) {
+function renderOcrLatexViewer(payload, index, total) {
   const options = payload.options || {};
   const optionRows = ["A", "B", "C", "D", "E"].map((key) => `
-    <div class="option-row"><strong>${key}</strong><span>${escapeHtml(options[key] || "-")}</span></div>
+    <div class="option-row"><strong>${key}</strong><span>${formatLatexPreviewText(options[key] || "-")}</span></div>
   `).join("");
   return `
-    <div class="structured-preview">
-      <dl class="meta-list inline">
-        <div><dt>Item</dt><dd>${index + 1}</dd></div>
-        <div><dt>Numero</dt><dd>${escapeHtml(payload.n || "-")}</dd></div>
-        <div><dt>Clave</dt><dd>${escapeHtml(payload.answer_key || "-")}</dd></div>
-        <div><dt>Grafico</dt><dd>${payload.has_figure ? "si" : "no"}</dd></div>
-      </dl>
-      <div class="statement-preview">${formatPreviewText(payload.statement || "")}</div>
+    <div id="ocrLatexPreview" class="latex-preview ocr-latex-preview">
+      <article class="preview-problem">
+        <header>
+          <strong>${escapeHtml(payload.n || `Lectura ${index + 1}`)}</strong>
+          <span>${escapeHtml(`Item ${index + 1} de ${total}`)}</span>
+        </header>
+        <div class="statement-preview">${formatPreviewText(payload.statement || "")}</div>
+      </article>
       <div class="options-preview">${optionRows}</div>
+      <footer class="ocr-latex-footer">
+        <span><strong>Clave:</strong> ${formatLatexPreviewText(payload.answer_key || "-")}</span>
+        <span>${payload.has_figure ? "con grafico" : "sin grafico"}</span>
+      </footer>
     </div>
   `;
 }
@@ -2251,25 +2444,25 @@ function renderRawOcrPanel(record) {
     <section class="panel raw-ocr-panel">
       <div class="panel-heading-row">
         <div>
-          <h3>OCR crudo</h3>
-          <p class="muted">${raw ? `${raw.length} caracter(es) devueltos por el modelo.` : "Todavia no hay texto crudo guardado para esta imagen."}</p>
+          <h3>OCR crudo editable</h3>
+          <p class="muted">${raw ? `${raw.length} caracter(es) guardados.` : "Todavia no hay texto crudo guardado para esta imagen."}</p>
         </div>
-        <button id="copyRawOcr" type="button" ${raw ? "" : "disabled"}>Copiar OCR</button>
+        <div class="raw-ocr-actions">
+          <button id="copyRawOcr" type="button" ${raw ? "" : "disabled"}>Copiar OCR</button>
+          <button id="saveRawOcr" class="primary" type="button">Guardar OCR crudo</button>
+        </div>
       </div>
-      ${raw ? `<div class="raw-ocr-box">${escapeHtml(raw)}</div>` : `
-        <div class="empty-state raw-empty">
-          Ejecuta OCR sobre la imagen actual. Si el modelo responde pero falla el JSON estructurado, el texto crudo quedara visible aqui.
-        </div>
-      `}
+      <textarea id="rawOcrEditor" class="raw-ocr-editor" spellcheck="false" placeholder="Pega o corrige aqui el OCR crudo de esta imagen.">${escapeHtml(raw)}</textarea>
     </section>
   `;
 }
 
 function bindRawOcrActions(record) {
-  const btn = $("copyRawOcr");
-  if (!btn) return;
-  btn.onclick = async () => {
-    const raw = String(record?.raw_ocr || "");
+  const copyBtn = $("copyRawOcr");
+  const saveBtn = $("saveRawOcr");
+  const editor = $("rawOcrEditor");
+  if (copyBtn) copyBtn.onclick = async () => {
+    const raw = String(editor?.value || record?.raw_ocr || "");
     if (!raw.trim()) return;
     try {
       await navigator.clipboard.writeText(raw);
@@ -2278,6 +2471,26 @@ function bindRawOcrActions(record) {
       setStatus("No se pudo copiar automaticamente el OCR crudo.");
     }
   };
+  if (saveBtn) saveBtn.onclick = () => saveRawOcr(record);
+}
+
+async function saveRawOcr(record) {
+  if (!record?.record_id) return;
+  const raw = $("rawOcrEditor")?.value || "";
+  await runAction("Guardando OCR crudo revisado...", async () => {
+    state.snapshot = await api("/api/ocr/raw", {
+      method: "POST",
+      body: {
+        record_id: record.record_id,
+        raw_ocr: raw,
+      },
+    });
+    state.stage = "ocr";
+    state.selectedRecordId = record.record_id;
+    state.reviewDraft = null;
+    persistFactoryUiState();
+    render();
+  }, "OCR crudo guardado. El paso 5 normalizara desde este texto.");
 }
 
 function renderTechnicalDetails(title, payload, mode = "json") {
@@ -2293,14 +2506,15 @@ function renderTechnicalDetails(title, payload, mode = "json") {
 function renderReviewStage() {
   const record = selectedRecord();
   const normalized = state.reviewDraft || (record ? record.normalized || {} : {});
-  const alternatives = normalized.alternativas || {};
+  const reviewText = reviewTextFromNormalized(normalized, record);
   $("stageHost").innerHTML = `
     <div class="stage-header">
       <div>
-        <h2>Normalizacion y revision final</h2>
-        <p class="muted">Corrige campos visibles, valida el render LaTeX y guarda la revision como entrenamiento futuro.</p>
+        <h2>Normalizacion</h2>
+        <p class="muted">Edita el texto plano normalizado, valida el render LaTeX y guarda la normalizacion como entrenamiento futuro.</p>
       </div>
     </div>
+    ${renderTaskProgress("normalize")}
     ${record ? `
       <div class="record-layout">
         <div>
@@ -2319,22 +2533,13 @@ function renderReviewStage() {
             }, null, 2))}</div>
           </details>
         </div>
-        <form id="reviewForm" class="panel form-grid">
-          ${field("numero", "Numero", normalized.numero || "")}
-          ${answerField(normalized.respuesta_correcta || "")}
-          ${field("curso", "Curso", normalized.curso || "")}
-          ${field("tema", "Tema", normalized.tema || "")}
-          ${textareaField("enunciado_latex", "Enunciado LaTeX", normalized.enunciado_latex || "", "wide")}
-          ${field("A", "Alternativa A", alternatives.A || "")}
-          ${field("B", "Alternativa B", alternatives.B || "")}
-          ${field("C", "Alternativa C", alternatives.C || "")}
-          ${field("D", "Alternativa D", alternatives.D || "")}
-          ${field("E", "Alternativa E", alternatives.E || "")}
-          ${field("figure_tag", "Etiqueta grafico", normalized.figure_tag || "")}
-          <label class="check-row"><input id="tiene_grafico" type="checkbox" ${normalized.tiene_grafico ? "checked" : ""} /> Tiene grafico</label>
-          ${textareaField("notas", "Notas", record.review?.notes || "", "wide")}
-          <label class="check-row wide"><input id="mark_ready" type="checkbox" ${record.status === "listo" ? "checked" : ""} /> Revision lista</label>
-          <button type="submit" class="primary wide">Guardar revision en staging</button>
+        <form id="reviewForm" class="panel plain-review-form">
+          <div class="panel-heading-row">
+            <h3>Editor texto plano</h3>
+            <span class="nav-counter">LaTeX editable</span>
+          </div>
+          <textarea id="plainReviewText" class="plain-review-text" spellcheck="false">${escapeHtml(reviewText)}</textarea>
+          <button type="submit" class="primary wide-action">Guardar normalizacion en staging</button>
         </form>
       </div>
     ` : `<div class="panel muted">Selecciona un problema.</div>`}
@@ -2356,25 +2561,12 @@ function field(id, label, value) {
   return `<label><span class="muted">${label}</span><input id="${id}" value="${escapeAttr(value)}" /></label>`;
 }
 
-function textareaField(id, label, value, klass = "") {
-  return `<label class="${klass}"><span class="muted">${label}</span><textarea id="${id}">${escapeHtml(value)}</textarea></label>`;
-}
-
-function answerField(value) {
-  const normalized = String(value || "").trim().toUpperCase();
-  const known = ["", "A", "B", "C", "D", "E"];
-  return `<label><span class="muted">Respuesta</span><select id="respuesta_correcta">
-    ${known.map((key) => `<option value="${key}" ${normalized === key ? "selected" : ""}>${key || "Sin definir"}</option>`).join("")}
-    ${known.includes(normalized) ? "" : `<option value="${escapeAttr(value)}" selected>${escapeHtml(value)}</option>`}
-  </select></label>`;
-}
-
 function updateLatexPreview() {
   const preview = $("latexPreview");
   if (!preview) return;
   const data = collectReviewForm();
   const options = ["A", "B", "C", "D", "E"].map((key) => `
-    <div class="option-row"><strong>${key}</strong><span>${formatPreviewText(data.alternativas[key] || "")}</span></div>
+    <div class="option-row"><strong>${key}</strong><span>${formatLatexPreviewText(data.alternativas[key] || "")}</span></div>
   `).join("");
   preview.innerHTML = `
     <article class="preview-problem">
@@ -2384,64 +2576,212 @@ function updateLatexPreview() {
       </header>
       <div class="statement-preview">${formatPreviewText(data.enunciado_latex || "")}</div>
       <div class="options-preview">${options}</div>
-      <footer><strong>Clave:</strong> ${escapeHtml(data.respuesta_correcta || "-")} ${data.tiene_grafico ? "<span>- con grafico</span>" : ""}</footer>
+      <footer><strong>Clave:</strong> ${formatLatexPreviewText(data.respuesta_correcta || "-")} ${data.tiene_grafico ? "<span>- con grafico</span>" : ""}</footer>
     </article>
   `;
-  if (window.MathJax && MathJax.typesetPromise) {
-    MathJax.typesetClear([preview]);
-    MathJax.typesetPromise([preview]).catch(() => {});
-  }
+  typesetMath(preview);
+}
+
+function typesetMath(preview) {
+  if (!preview || !window.MathJax || !MathJax.typesetPromise) return;
+  MathJax.typesetClear([preview]);
+  MathJax.typesetPromise([preview]).catch(() => {});
+}
+
+function formatLatexPreviewText(value) {
+  const raw = normalizeLatexPreviewValueSafe(String(value || "").trim());
+  if (!raw) return "-";
+  if (raw.includes("$")) return formatPreviewText(raw);
+  const mathOnly = /^[0-9A-Za-z\s\\^_{}()[\].,+\-*/=<>:;|°º]+$/.test(raw) && /[\\^_{}=<>°º]/.test(raw);
+  return mathOnly ? `$${escapeHtml(raw)}$` : formatPreviewText(raw);
+}
+
+function normalizeLatexPreviewValue(value) {
+  return decodeLatexTextAccents(value)
+    .replace(/(\d+(?:[.,]\d+)?)\s*(?:\^o|º|°)(?=\s|$|[.,;:)])/gi, "$1^\\circ")
+    .replace(/(\d+(?:[.,]\d+)?)\s*\\degree\b/gi, "$1^\\circ");
+}
+
+function normalizeLatexPreviewValueSafe(value) {
+  const degreePattern = new RegExp("(\\d+(?:[.,]\\d+)?)\\s*(?:\\^o|\\u00ba|\\u00b0)(?=\\s|$|[.,;:)])", "gi");
+  return decodeLatexTextAccents(value)
+    .replace(degreePattern, "$1^\\circ")
+    .replace(/(\d+(?:[.,]\d+)?)\s*\\degree\b/gi, "$1^\\circ");
 }
 
 async function saveReviewForm(event) {
   event.preventDefault();
   const record = selectedRecord();
   if (!record) return;
-  await runAction("Guardando revision...", async () => {
+  const payload = collectReviewPayload();
+  await runAction("Guardando normalizacion...", async () => {
     const result = await api("/api/review/save", {
       method: "POST",
       body: {
         record_id: record.record_id,
-        normalized: collectReviewForm(),
-        notes: $("notas").value,
-        mark_ready: $("mark_ready").checked,
+        normalized: payload.normalized,
+        notes: payload.notes,
+        mark_ready: payload.markReady,
       },
     });
     state.snapshot = result.snapshot;
     state.reviewDraft = null;
     persistFactoryUiState();
     render();
-  }, "Revision guardada en staging.");
+  }, "Normalizacion guardada en staging.");
 }
 
 function collectReviewForm() {
+  return collectReviewPayload().normalized;
+}
+
+function collectReviewPayload() {
   const record = selectedRecord();
   const base = {
     ...((record && record.normalized) || {}),
     ...(state.reviewDraft || {}),
   };
-  const baseAlternatives = base.alternativas && typeof base.alternativas === "object" ? base.alternativas : {};
-  const alternatives = {
-    ...baseAlternatives,
-    A: $("A")?.value.trim() || "",
-    B: $("B")?.value.trim() || "",
-    C: $("C")?.value.trim() || "",
-    D: $("D")?.value.trim() || "",
-    E: $("E")?.value.trim() || "",
-  };
+  const parsed = parsePlainReviewText($("plainReviewText")?.value || "", base, record);
   return {
+    normalized: {
+      ...parsed.normalized,
+      status: parsed.markReady ? "listo" : "requiere_revision",
+    },
+    notes: parsed.notes,
+    markReady: parsed.markReady,
+  };
+}
+
+function reviewTextFromNormalized(normalized, record) {
+  const alternatives = normalized.alternativas || {};
+  const statement = String(normalized.enunciado_latex || "").trim();
+  const number = String(normalized.numero || "").trim();
+  const lines = [];
+  lines.push(`${number ? `${number}. ` : ""}${statement}`.trim());
+  ["A", "B", "C", "D", "E"].forEach((key) => {
+    lines.push(`${key}) ${String(alternatives[key] || "").trim()}`);
+  });
+  lines.push("");
+  lines.push(`Respuesta: ${String(normalized.respuesta_correcta || "").trim()}`);
+  lines.push(`Curso: ${String(normalized.curso || "").trim()}`);
+  lines.push(`Tema: ${String(normalized.tema || "").trim()}`);
+  lines.push(`Grafico: ${normalized.tiene_grafico ? "si" : "no"}`);
+  lines.push(`Etiqueta grafico: ${String(normalized.figure_tag || "").trim()}`);
+  lines.push(`Listo: ${record?.status === "listo" ? "si" : "no"}`);
+  lines.push("Notas:");
+  lines.push(String(record?.review?.notes || "").trim());
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function parsePlainReviewText(text, base, record) {
+  const baseAlternatives = base.alternativas && typeof base.alternativas === "object" ? base.alternativas : {};
+  const normalized = {
     ...base,
     schema_version: base.schema_version || "normalized_problem_staging_v1",
-    numero: $("numero")?.value.trim() || "",
-    curso: $("curso")?.value.trim() || "",
-    tema: $("tema")?.value.trim() || "",
-    enunciado_latex: $("enunciado_latex")?.value.trim() || "",
-    alternativas,
-    respuesta_correcta: $("respuesta_correcta")?.value.trim() || "",
-    tiene_grafico: Boolean($("tiene_grafico")?.checked),
-    figure_tag: $("figure_tag")?.value.trim() || "",
-    status: $("mark_ready")?.checked ? "listo" : "requiere_revision",
+    numero: String(base.numero || ""),
+    curso: String(base.curso || ""),
+    tema: String(base.tema || ""),
+    enunciado_latex: String(base.enunciado_latex || ""),
+    alternativas: {
+      A: String(baseAlternatives.A || ""),
+      B: String(baseAlternatives.B || ""),
+      C: String(baseAlternatives.C || ""),
+      D: String(baseAlternatives.D || ""),
+      E: String(baseAlternatives.E || ""),
+    },
+    respuesta_correcta: String(base.respuesta_correcta || ""),
+    tiene_grafico: Boolean(base.tiene_grafico),
+    figure_tag: String(base.figure_tag || ""),
   };
+  const rawLines = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  const statementLines = [];
+  const noteLines = [];
+  let currentOption = "";
+  let readingNotes = false;
+  let markReady = record?.status === "listo";
+  let explicitStatementLabel = false;
+
+  rawLines.forEach((rawLine) => {
+    const line = rawLine.trim();
+    if (readingNotes) {
+      noteLines.push(rawLine);
+      return;
+    }
+    const notesMatch = line.match(/^notas?\s*:\s*(.*)$/i);
+    if (notesMatch) {
+      readingNotes = true;
+      if (notesMatch[1]) noteLines.push(notesMatch[1]);
+      currentOption = "";
+      return;
+    }
+    if (!line) {
+      currentOption = "";
+      return;
+    }
+    const labelMatch = line.match(/^(numero|n[uú]mero|curso|tema|enunciado|respuesta|clave|grafico|gr[aá]fico|tiene grafico|tiene gr[aá]fico|etiqueta grafico|etiqueta gr[aá]fico|listo|revision lista|revisi[oó]n lista)\s*:\s*(.*)$/i);
+    if (labelMatch) {
+      const plainLabel = normalizePlainLabel(labelMatch[1]);
+      explicitStatementLabel = explicitStatementLabel || plainLabel === "enunciado";
+      if (plainLabel === "enunciado" && labelMatch[2].trim()) statementLines.push(labelMatch[2].trim());
+      applyPlainReviewLabel(normalized, labelMatch[1], labelMatch[2], (ready) => { markReady = ready; });
+      currentOption = "";
+      return;
+    }
+    const optionMatch = line.match(/^([A-E])[\)\.]\s*(.*)$/i);
+    if (optionMatch) {
+      currentOption = optionMatch[1].toUpperCase();
+      normalized.alternativas[currentOption] = optionMatch[2].trim();
+      return;
+    }
+    if (currentOption) {
+      normalized.alternativas[currentOption] = `${normalized.alternativas[currentOption]} ${line}`.trim();
+      return;
+    }
+    const itemMatch = line.match(/^(?:\\item\s*\[\s*\\textbf\{\s*)?(\d+)\s*[\.\)](?:\s*\}\s*\])?\s*(.*)$/i);
+    if (itemMatch) {
+      normalized.numero = itemMatch[1].trim();
+      if (itemMatch[2]) statementLines.push(itemMatch[2].trim());
+      return;
+    }
+    statementLines.push(rawLine.trim());
+  });
+
+  const parsedStatement = statementLines.join("\n").trim();
+  if (parsedStatement || !explicitStatementLabel) normalized.enunciado_latex = parsedStatement;
+  normalized.respuesta_correcta = normalizeAnswerValue(normalized.respuesta_correcta);
+  return {
+    normalized,
+    notes: noteLines.join("\n").trim(),
+    markReady,
+  };
+}
+
+function applyPlainReviewLabel(normalized, label, value, setMarkReady) {
+  const key = normalizePlainLabel(label);
+  const val = String(value || "").trim();
+  if (key === "numero") normalized.numero = val;
+  else if (key === "curso") normalized.curso = val;
+  else if (key === "tema") normalized.tema = val;
+  else if (key === "enunciado") normalized.enunciado_latex = val;
+  else if (key === "respuesta" || key === "clave") normalized.respuesta_correcta = val;
+  else if (key === "grafico" || key === "tiene grafico") normalized.tiene_grafico = truthyText(val);
+  else if (key === "etiqueta grafico") normalized.figure_tag = val;
+  else if (key === "listo" || key === "revision lista") setMarkReady(truthyText(val));
+}
+
+function normalizePlainLabel(label) {
+  return String(label || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+function normalizeAnswerValue(value) {
+  const raw = String(value || "").trim().toUpperCase();
+  const match = raw.match(/[A-E]/);
+  return match ? match[0] : raw;
+}
+
+function truthyText(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  return ["1", "si", "sí", "s", "true", "yes", "y", "listo", "ok"].includes(raw);
 }
 
 function renderCandidateStage() {
@@ -2486,18 +2826,24 @@ function blockingIssuesHtml(issues) {
 
 function syncPrimaryAction() {
   const btn = $("primaryAction");
+  const queuedCount = state.stage === "crops" ? queuedOcrRecordIds().length : 0;
   const actions = {
     pages: ["Detectar con modelo", "Usa el detector entrenado sobre las paginas elegidas.", detectSelectedPages],
     boxes: ["Crear staging", "Materializa crops solo desde boxes revisados.", materializeStaging],
-    crops: ["OCR imagen actual", "Usa OCR entrenado y segmentador grafico en el crop seleccionado.", runOcr],
-    ocr: ["Normalizar", "Prepara campos editables para revision humana.", normalizeRecords],
-    review: ["Guardar revision", "Persiste correcciones en staging y entrenamiento.", () => $("reviewForm")?.requestSubmit()],
+    crops: [
+      queuedCount ? `OCR cola (${queuedCount})` : "OCR imagen actual",
+      queuedCount ? "Procesa las imagenes seleccionadas con OCR y segmentacion grafica." : "Usa OCR entrenado y segmentador grafico en el crop seleccionado.",
+      () => runOcr(),
+    ],
+    ocr: ["Normalizar", "Convierte el OCR crudo revisado en campos editables.", normalizeRecords],
+    review: ["Guardar normalizacion", "Persiste correcciones en staging y entrenamiento.", () => $("reviewForm")?.requestSubmit()],
     candidate: ["Actualizar candidato", "Recalcula bloqueos sin escribir en problemas.", renderCandidateStage],
   };
   const [label, hint, handler] = actions[state.stage] || actions.pages;
   btn.textContent = label;
   btn.onclick = handler;
-  $("actionHint").textContent = hint;
+  btn.disabled = isTaskRunning();
+  $("actionHint").textContent = isTaskRunning() ? "Proceso en curso; se actualiza al terminar cada imagen." : hint;
 }
 
 async function detectSelectedPages() {
@@ -2539,48 +2885,206 @@ async function materializeStaging() {
   }, "Staging creado desde boxes.");
 }
 
-async function runOcr() {
+async function runOcr(recordIds = null) {
   const models = activeModelPayload();
   const record = selectedRecord();
-  await runAction("Ejecutando OCR y segmentacion con modelos entrenados...", async () => {
-    state.snapshot = await api("/api/ocr/run", {
-      method: "POST",
-      body: {
-        provider: "hf",
-        curso: "SIN_CURSO",
-        tema: "SIN_TEMA",
-        record_id: record?.record_id || "",
-        ocr_model: models.ocr,
-        figure_model: models.figure_segmenter,
-        force_figure_model: true,
-      },
+  const records = state.snapshot.records || [];
+  const queuedIds = Array.isArray(recordIds) ? recordIds : queuedOcrRecordIds(records);
+  const fallbackIds = record?.record_id ? [record.record_id] : [];
+  const targetIds = queuedIds.length ? queuedIds : fallbackIds;
+  const pending = [...new Set(targetIds.map((id) => String(id || "").trim()).filter(Boolean))]
+    .filter((id) => recordCanRunOcr(findRecordById(id, records)));
+  if (!pending.length) {
+    const blocked = targetIds.some((id) => {
+      const target = findRecordById(id, records);
+      return target && !recordCanRunOcr(target);
     });
-    state.stage = "ocr";
-    if (record?.record_id) state.selectedRecordId = record.record_id;
-    restoreFactoryUiState();
-    state.stage = "ocr";
-    if (record?.record_id) state.selectedRecordId = record.record_id;
+    return setStatus(blocked
+      ? "Regenera staging para los crops afectados antes de ejecutar OCR."
+      : "Selecciona al menos una imagen de staging.");
+  }
+  const total = pending.length;
+  const failures = [];
+  state.ocrQueueIds = new Set(pending);
+  state.taskProgress = {
+    type: "ocr",
+    running: true,
+    label: "OCR + segmentacion",
+    total,
+    current: 0,
+    ok: 0,
+    failed: 0,
+    message: `Preparando cola 0 de ${total}`,
+    activeId: pending[0] || "",
+    activeName: recordLabelById(pending[0]),
+  };
+  state.stage = "crops";
+  persistFactoryUiState();
+  render();
+  setBusy(`Ejecutando modelos 0 de ${total}...`);
+  try {
+    for (let index = 0; index < pending.length; index += 1) {
+      const id = pending[index];
+      state.taskProgress = {
+        ...state.taskProgress,
+        current: index,
+        message: `Procesando ${index + 1} de ${total}`,
+        activeId: id,
+        activeName: recordLabelById(id),
+      };
+      state.selectedRecordId = id;
+      render();
+      setBusy(`Ejecutando modelos ${index + 1} de ${total}...`);
+      try {
+        state.snapshot = await runOcrForRecord(id, models);
+        state.ocrQueueIds.delete(id);
+        state.taskProgress = {
+          ...state.taskProgress,
+          current: index + 1,
+          ok: Number(state.taskProgress.ok || 0) + 1,
+          message: `Guardado ${index + 1} de ${total}`,
+          activeName: recordLabelById(id),
+        };
+      } catch (err) {
+        failures.push({ id, message: err.message });
+        state.ocrQueueIds.delete(id);
+        state.taskProgress = {
+          ...state.taskProgress,
+          current: index + 1,
+          failed: Number(state.taskProgress.failed || 0) + 1,
+          message: `Error en ${index + 1} de ${total}`,
+        };
+        setStatus(`Error en ${recordLabelById(id)}: ${err.message}`);
+      }
+      state.stage = "ocr";
+      state.selectedRecordId = id;
+      state.selectedOcrIndex = 0;
+      restoreFactoryUiState({ preserveCurrentStage: true });
+      state.stage = "ocr";
+      state.selectedRecordId = id;
+      state.selectedOcrIndex = 0;
+      persistFactoryUiState();
+      render();
+    }
+    const doneText = failures.length
+      ? `Cola terminada con ${failures.length} error(es).`
+      : `OCR y segmentacion guardados para ${total} imagen(es).`;
+    state.taskProgress = null;
     persistFactoryUiState();
     render();
-  }, record ? "OCR y segmentacion guardados para la imagen actual." : "OCR y segmentacion guardados en staging.");
+    setStatus(doneText);
+  } finally {
+    state.taskProgress = null;
+    $("busyText").textContent = "";
+  }
+}
+
+async function runOcrForRecord(recordId, models) {
+  const current = findRecordById(recordId);
+  const startN = inferredStartNumberForRecord(current);
+  return api("/api/ocr/run", {
+    method: "POST",
+    body: {
+      provider: "hf",
+      curso: "SIN_CURSO",
+      tema: "SIN_TEMA",
+      start_n: startN,
+      record_id: recordId,
+      ocr_model: models.ocr,
+      figure_model: models.figure_segmenter,
+      force_figure_model: true,
+    },
+  });
 }
 
 async function normalizeRecords() {
-  await runAction("Normalizando resultados...", async () => {
-    state.snapshot = await api("/api/normalize", { method: "POST", body: {} });
-    state.stage = "review";
-    restoreFactoryUiState();
-    state.stage = "review";
+  const records = normalizableRecords();
+  if (!records.length) return setStatus("No hay OCR crudo o estructurado para normalizar todavia.");
+  const total = records.length;
+  const failures = [];
+  state.stage = "review";
+  state.taskProgress = {
+    type: "normalize",
+    running: true,
+    label: "Normalizacion",
+    total,
+    current: 0,
+    ok: 0,
+    failed: 0,
+    message: `Preparando normalizacion 0 de ${total}`,
+    activeId: records[0]?.record_id || "",
+    activeName: recordLabelById(records[0]?.record_id),
+  };
+  render();
+  setBusy(`Normalizando 0 de ${total}...`);
+  try {
+    for (let index = 0; index < records.length; index += 1) {
+      const record = records[index];
+      const id = record.record_id;
+      state.taskProgress = {
+        ...state.taskProgress,
+        current: index,
+        message: `Normalizando ${index + 1} de ${total}`,
+        activeId: id,
+        activeName: recordLabelById(id),
+      };
+      state.selectedRecordId = id;
+      render();
+      setBusy(`Normalizando ${index + 1} de ${total}...`);
+      try {
+        state.snapshot = await api("/api/normalize", { method: "POST", body: { record_id: id } });
+        state.taskProgress = {
+          ...state.taskProgress,
+          current: index + 1,
+          ok: Number(state.taskProgress.ok || 0) + 1,
+          message: `Normalizado ${index + 1} de ${total}`,
+        };
+      } catch (err) {
+        failures.push({ id, message: err.message });
+        state.taskProgress = {
+          ...state.taskProgress,
+          current: index + 1,
+          failed: Number(state.taskProgress.failed || 0) + 1,
+          message: `Error en ${index + 1} de ${total}`,
+        };
+        setStatus(`Error normalizando ${recordLabelById(id)}: ${err.message}`);
+      }
+      state.stage = "review";
+      state.selectedRecordId = id;
+      state.selectedOcrIndex = 0;
+      restoreFactoryUiState({ preserveCurrentStage: true });
+      state.stage = "review";
+      state.selectedRecordId = id;
+      state.selectedOcrIndex = 0;
+      persistFactoryUiState();
+      render();
+    }
+    state.taskProgress = null;
     persistFactoryUiState();
     render();
-  }, "Normalizacion lista para revision.");
+    setStatus(failures.length ? `Normalizacion terminada con ${failures.length} error(es).` : `Normalizacion lista para ${total} imagen(es).`);
+  } finally {
+    state.taskProgress = null;
+    $("busyText").textContent = "";
+  }
+}
+
+function normalizableRecords() {
+  const records = state.snapshot?.records || [];
+  const current = selectedRecord();
+  const hasNormalizableData = (record) => !recordSourceStale(record)
+    && !recordDownstreamInvalidated(record)
+    && (hasText(record.raw_ocr) || hasObjectData(record.structured_ocr));
+  const currentHasData = current && hasNormalizableData(current);
+  if (currentHasData) return [current];
+  return records.filter(hasNormalizableData);
 }
 
 async function runAction(busy, action, done) {
   try {
     setBusy(busy);
-    await action();
-    setStatus(done);
+    const result = await action();
+    setStatus(typeof result === "string" && result.trim() ? result : done);
   } catch (err) {
     setStatus(`Error: ${err.message}`);
   } finally {
@@ -2735,7 +3239,32 @@ function compactText(value, maxLength) {
 }
 
 function formatPreviewText(value) {
-  return escapeHtml(value || "-").replace(/\n/g, "<br>");
+  return escapeHtml(decodeLatexTextAccents(value) || "-").replace(/\n/g, "<br>");
+}
+
+function decodeLatexTextAccents(value) {
+  const acute = {
+    a: "\u00e1", e: "\u00e9", i: "\u00ed", o: "\u00f3", u: "\u00fa",
+    A: "\u00c1", E: "\u00c9", I: "\u00cd", O: "\u00d3", U: "\u00da",
+  };
+  const grave = {
+    a: "\u00e0", e: "\u00e8", i: "\u00ec", o: "\u00f2", u: "\u00f9",
+    A: "\u00c0", E: "\u00c8", I: "\u00cc", O: "\u00d2", U: "\u00d9",
+  };
+  const diaeresis = {
+    a: "\u00e4", e: "\u00eb", i: "\u00ef", o: "\u00f6", u: "\u00fc",
+    A: "\u00c4", E: "\u00cb", I: "\u00cf", O: "\u00d6", U: "\u00dc",
+  };
+  const circumflex = {
+    a: "\u00e2", e: "\u00ea", i: "\u00ee", o: "\u00f4", u: "\u00fb",
+    A: "\u00c2", E: "\u00ca", I: "\u00ce", O: "\u00d4", U: "\u00db",
+  };
+  return String(value || "")
+    .replace(/\\'\{?([aeiouAEIOU])\}?/g, (_match, ch) => acute[ch] || ch)
+    .replace(/\\`\{?([aeiouAEIOU])\}?/g, (_match, ch) => grave[ch] || ch)
+    .replace(/\\"\{?([aeiouAEIOU])\}?/g, (_match, ch) => diaeresis[ch] || ch)
+    .replace(/\\\^\{?([aeiouAEIOU])\}?/g, (_match, ch) => circumflex[ch] || ch)
+    .replace(/\\~\{?([nN])\}?/g, (_match, ch) => (ch === "N" ? "\u00d1" : "\u00f1"));
 }
 
 function normalizeStageName(value) {
@@ -2778,8 +3307,8 @@ function stageHint(id) {
     pages: "Selecciona un rango pequeno y verificable.",
     boxes: "Ajusta cada problema antes de crear crops.",
     crops: "Confirma que cada crop existe y tiene trazabilidad.",
-    ocr: "Compara lectura estructurada contra imagen.",
-    review: "Corrige campos; no edites JSON como flujo principal.",
+    ocr: "Corrige OCR crudo y segmentos graficos.",
+    review: "Normaliza campos sin editar JSON como flujo principal.",
     candidate: "Solo valida preparacion; la BD sigue cerrada.",
   }[id] || "";
 }

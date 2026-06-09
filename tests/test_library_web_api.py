@@ -14,6 +14,17 @@ from modulos.instance_factory.staging import InstanceStagingStore
 from modulos.instance_factory.web_server import FactoryWebRuntime
 
 
+def _post_json(base: str, path: str, body: dict) -> dict:
+    request = urllib.request.Request(
+        base + path,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
 class _FakeRuntime:
     def __init__(self, context: InstancePipelineContext) -> None:
         self.context = context
@@ -288,6 +299,31 @@ class LibraryWebApiTests(unittest.TestCase):
                 self.assertEqual(payload["books"][0]["codigo"], "ALG01")
             finally:
                 runtime.stop()
+
+    def test_library_runtime_proxies_factory_api_routes_to_open_factory(self) -> None:
+        class ProxyFactory:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def _dispatch_api(self, method, path, query, payload):
+                self.calls.append((method, path, dict(query), dict(payload)))
+                return {"schema_version": "proxied_factory_v1", "path": path, "raw_ocr": payload.get("raw_ocr", "")}
+
+            def stop(self) -> None:
+                return None
+
+        proxy = ProxyFactory()
+        runtime = LibraryWebRuntime(controller=_FakeController())
+        runtime._factory_runtimes.append(proxy)
+        try:
+            base = runtime.start()
+            payload = _post_json(base, "api/ocr/raw", {"record_id": "crop_001", "raw_ocr": "texto"})
+            self.assertEqual(payload["schema_version"], "proxied_factory_v1")
+            self.assertEqual(payload["path"], "/api/ocr/raw")
+            self.assertEqual(proxy.calls[0][0:2], ("POST", "/api/ocr/raw"))
+            self.assertEqual(proxy.calls[0][3]["record_id"], "crop_001")
+        finally:
+            runtime.stop()
 
 
 if __name__ == "__main__":

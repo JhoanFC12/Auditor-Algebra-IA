@@ -342,10 +342,14 @@ class InstancePdfPipelineService:
         if target is None:
             raise KeyError(f"Pagina no encontrada en la instancia: {record_id}")
         clean_boxes = self._coerce_boxes(boxes)
+        previous_boxes = list(target.boxes or [])
+        previous_signature = self._boxes_signature(previous_boxes)
         target.layout_mode = str(layout_mode or target.layout_mode or "auto")
         target.boxes = sort_boxes_reading_order(clean_boxes, target.layout_mode) if reorder else clean_boxes
         target.reviewed = bool(reviewed)
         self.golden.upsert_instance_rows(self.context.instance_name, self._dedupe_page_rows(rows))
+        if previous_signature != self._boxes_signature(target.boxes):
+            self._invalidate_downstream_for_page_boxes_change(target, previous_boxes=previous_boxes)
         for row in self.load_pages():
             if str(row.record_id) == str(record_id):
                 return row
@@ -367,6 +371,129 @@ class InstancePdfPipelineService:
                 continue
             clean.append((left, top, right, bottom))
         return clean
+
+    @classmethod
+    def _boxes_signature(cls, boxes: list[Any] | tuple[Any, ...]) -> str:
+        return json.dumps([list(box) for box in cls._coerce_boxes(list(boxes or []))], separators=(",", ":"))
+
+    @classmethod
+    def _source_dependency_signature(cls, source: dict[str, Any]) -> str:
+        raw_bbox = source.get("bbox_px") or []
+        clean_bbox = cls._coerce_boxes([raw_bbox])
+        bbox = list(clean_bbox[0]) if clean_bbox else list(raw_bbox or [])[:4]
+        try:
+            bbox_key = json.dumps([int(v) for v in bbox[:4]], separators=(",", ":"))
+        except Exception:
+            bbox_key = json.dumps(bbox, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return "|".join(
+            [
+                str(source.get("book_code") or "").strip(),
+                str(source.get("instance_type") or "").strip(),
+                str(source.get("pdf_path") or "").strip(),
+                str(source.get("page_number") or "").strip(),
+                str(source.get("source_record_id") or "").strip(),
+                bbox_key,
+            ]
+        )
+
+    def _invalidate_downstream_for_page_boxes_change(
+        self,
+        page: ProblemPageRecord,
+        *,
+        previous_boxes: list[Any] | tuple[Any, ...],
+    ) -> list[StagingProblemRecord]:
+        changed: list[StagingProblemRecord] = []
+        previous_box_signature = self._boxes_signature(list(previous_boxes or []))
+        current_box_signature = self._boxes_signature(list(page.boxes or []))
+        for record in self.staging.load_records():
+            source = dict(record.source or {})
+            same_source_record = str(source.get("source_record_id") or "") == str(page.record_id or "")
+            same_page = str(source.get("page_number") or "") == str(page.page_number or "")
+            if not (same_source_record or same_page):
+                continue
+            self._invalidate_record_downstream(
+                record,
+                reason="page_boxes_changed",
+                clear_crop=True,
+                previous_source=dict(source),
+                updated_source={
+                    **dict(source),
+                    "page_number": page.page_number,
+                    "source_record_id": page.record_id,
+                    "page_boxes_signature": current_box_signature,
+                },
+                metadata={
+                    "previous_page_boxes_signature": previous_box_signature,
+                    "current_page_boxes_signature": current_box_signature,
+                    "page_record_id": page.record_id,
+                },
+            )
+            changed.append(record)
+        if changed:
+            self.staging.upsert_many(changed)
+        return changed
+
+    def _invalidate_record_downstream(
+        self,
+        record: StagingProblemRecord,
+        *,
+        reason: str,
+        clear_crop: bool,
+        previous_source: dict[str, Any] | None = None,
+        updated_source: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        previous = dict(previous_source or record.source or {})
+        if updated_source is not None:
+            record.source = dict(updated_source)
+        if clear_crop:
+            record.crop_path = ""
+            record.set_step(PipelineStep.CROPS, StageStatus.PENDING, "crop pendiente de regenerar por cambio de box fuente")
+        record.raw_ocr = ""
+        record.structured_ocr = {}
+        record.figure_segmentation = {}
+        record.normalized = {}
+        record.review = {}
+        record.artifacts = {}
+        record.golden_sync = {}
+        record.errors = []
+        record.set_step(PipelineStep.OCR, StageStatus.PENDING, "OCR invalidado por cambio de box fuente")
+        record.set_step(PipelineStep.SEGMENTATION, StageStatus.PENDING, "segmentacion grafica invalidada por cambio de box fuente")
+        record.set_step(PipelineStep.NORMALIZATION, StageStatus.PENDING, "normalizacion invalidada por cambio de box fuente")
+        record.set_step(PipelineStep.REVIEW, StageStatus.PENDING, "revision invalidada por cambio de box fuente")
+        invalidations = list(dict(record.trace or {}).get("downstream_invalidations") or [])
+        invalidations.append(
+            {
+                "updated_at": utc_now_text(),
+                "reason": str(reason or "source_changed"),
+                "previous_source": previous,
+                "updated_source": dict(record.source or {}),
+                **dict(metadata or {}),
+            }
+        )
+        record.trace = {**dict(record.trace or {}), "downstream_invalidations": invalidations[-20:]}
+        record.audit = {
+            **dict(record.audit or {}),
+            "downstream_state": {
+                "status": "invalidated",
+                "reason": str(reason or "source_changed"),
+                "updated_at": utc_now_text(),
+            },
+        }
+        record.sync_status_from_steps()
+
+    def _mark_record_downstream_active(self, record: StagingProblemRecord, *, reason: str) -> None:
+        downstream = dict(dict(record.audit or {}).get("downstream_state") or {})
+        if downstream.get("status") != "invalidated":
+            return
+        record.audit = {
+            **dict(record.audit or {}),
+            "downstream_state": {
+                "status": "active",
+                "reason": str(reason or "source_regenerated"),
+                "updated_at": utc_now_text(),
+            },
+        }
 
     def build_record_stage_rows(self) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -472,11 +599,8 @@ class InstancePdfPipelineService:
             crop_path = Path(target) / crop_rel if crop_rel else Path("")
             existing = self.staging.get_record(crop_id)
             record = existing or StagingProblemRecord(record_id=crop_id, crop_id=crop_id, crop_path=str(crop_path))
-            record.crop_path = str(crop_path)
-            record.status = StageStatus.normalize(record.status)
-            if record.status == StageStatus.ERROR and record.step_status(PipelineStep.CROPS) == StageStatus.ERROR:
-                record.status = StageStatus.PENDING
-            record.source = {
+            previous_source = dict(record.source or {})
+            new_source = {
                 "book_code": self.context.book_code,
                 "instance_type": self.context.instance_type,
                 "pdf_path": crop_payload.get("source_pdf_path") or self.context.pdf_path,
@@ -492,6 +616,24 @@ class InstancePdfPipelineService:
                 "session_json": crop_payload.get("session_json") or "",
                 "problem_crops_live_record": str(record_path),
             }
+            if existing and self._source_dependency_signature(previous_source) != self._source_dependency_signature(new_source):
+                self._invalidate_record_downstream(
+                    record,
+                    reason="crop_source_changed",
+                    clear_crop=False,
+                    previous_source=previous_source,
+                    updated_source=new_source,
+                    metadata={
+                        "crop_id": crop_id,
+                        "previous_bbox_px": previous_source.get("bbox_px") or [],
+                        "current_bbox_px": new_source.get("bbox_px") or [],
+                    },
+                )
+            record.crop_path = str(crop_path)
+            record.status = StageStatus.normalize(record.status)
+            if record.status == StageStatus.ERROR and record.step_status(PipelineStep.CROPS) == StageStatus.ERROR:
+                record.status = StageStatus.PENDING
+            record.source = new_source
             record.set_step(
                 PipelineStep.PAGES,
                 StageStatus.READY,
@@ -551,10 +693,18 @@ class InstancePdfPipelineService:
         figure_model: str = "",
         force_figure_model: bool = True,
         record_id: str = "",
+        record_ids: list[str] | None = None,
     ) -> list[StagingProblemRecord]:
         records = self.staging.load_records()
+        selected_record_ids = [str(item or "").strip() for item in list(record_ids or []) if str(item or "").strip()]
+        if selected_record_ids:
+            by_id = {str(record.record_id or ""): record for record in records}
+            missing = [item for item in selected_record_ids if item not in by_id]
+            if missing:
+                raise KeyError(missing[0])
+            records = [by_id[item] for item in selected_record_ids]
         selected_record_id = str(record_id or "").strip()
-        if selected_record_id:
+        if selected_record_id and not selected_record_ids:
             records = [record for record in records if str(record.record_id or "") == selected_record_id]
             if not records:
                 raise KeyError(selected_record_id)
@@ -593,6 +743,7 @@ class InstancePdfPipelineService:
                 record.set_step(PipelineStep.SEGMENTATION, StageStatus.PENDING, "pendiente hasta recuperar crop")
                 record.set_step(PipelineStep.NORMALIZATION, StageStatus.PENDING, "pendiente hasta recuperar crop")
                 record.sync_status_from_steps()
+                self.staging.upsert_record(record)
                 processed.append(record)
                 continue
             record.status = StageStatus.PROCESSING
@@ -683,6 +834,7 @@ class InstancePdfPipelineService:
                     "normalizado pendiente de revision" if record.normalized else "sin item OCR estructurado; requiere revision",
                 )
                 record.set_step(PipelineStep.REVIEW, StageStatus.NEEDS_REVIEW, "pendiente de revision humana")
+                self._mark_record_downstream_active(record, reason="ocr_segmentation_reran_after_source_change")
                 self._write_raw_artifacts(record)
                 record.sync_status_from_steps()
                 if run.items:
@@ -706,6 +858,7 @@ class InstancePdfPipelineService:
                 **self._model_snapshot(provider=provider, confidence_overrides=confidence_overrides or None),
             }
             record.touch()
+            self.staging.upsert_record(record)
             processed.append(record)
         self.staging.upsert_many(processed)
         return processed
@@ -737,11 +890,31 @@ class InstancePdfPipelineService:
                     "del modelo OCR entrenado o usa temporalmente HF_BASE_URL con esa misma URL."
                 )
 
-    def normalize_existing_ocr(self) -> list[StagingProblemRecord]:
+    def normalize_existing_ocr(
+        self,
+        *,
+        record_id: str = "",
+        record_ids: list[str] | None = None,
+    ) -> list[StagingProblemRecord]:
         records = self.staging.load_records()
+        selected_record_ids = [str(item or "").strip() for item in list(record_ids or []) if str(item or "").strip()]
+        if selected_record_ids:
+            by_id = {str(record.record_id or ""): record for record in records}
+            missing = [item for item in selected_record_ids if item not in by_id]
+            if missing:
+                raise KeyError(missing[0])
+            records = [by_id[item] for item in selected_record_ids]
+        selected_record_id = str(record_id or "").strip()
+        if selected_record_id and not selected_record_ids:
+            records = [record for record in records if str(record.record_id or "") == selected_record_id]
+            if not records:
+                raise KeyError(selected_record_id)
         out: list[StagingProblemRecord] = []
         for record in records:
             record.models = {**record.models, **self._model_snapshot()}
+            if str(record.raw_ocr or "").strip():
+                run = self._structure_raw_ocr_for_normalization(record)
+                record.structured_ocr = run.to_report_dict()
             record.normalized = self._normalize_from_pipeline_record(record, record.structured_ocr)
             if record.normalized:
                 record.set_step(PipelineStep.NORMALIZATION, StageStatus.NEEDS_REVIEW, "normalizado pendiente de revision")
@@ -751,9 +924,42 @@ class InstancePdfPipelineService:
             self._write_raw_artifacts(record)
             record.sync_status_from_steps()
             record.touch()
+            self.staging.upsert_record(record)
             out.append(record)
         self.staging.upsert_many(out)
         return out
+
+    def update_raw_ocr(self, record_id: str, raw_ocr: str) -> StagingProblemRecord:
+        record = self.staging.get_record(record_id)
+        if record is None:
+            raise KeyError(record_id)
+        record.raw_ocr = str(raw_ocr or "")
+        record.structured_ocr = {}
+        record.normalized = {}
+        record.errors = []
+        record.set_step(
+            PipelineStep.OCR,
+            StageStatus.READY if record.raw_ocr.strip() else StageStatus.PENDING,
+            "OCR crudo revisado por humano" if record.raw_ocr.strip() else "OCR crudo vacio; pendiente",
+            source="human_raw_ocr_editor",
+            characters=len(record.raw_ocr),
+        )
+        record.set_step(PipelineStep.NORMALIZATION, StageStatus.PENDING, "pendiente de normalizar OCR crudo revisado")
+        record.set_step(PipelineStep.REVIEW, StageStatus.PENDING, "pendiente de revision final")
+        record.trace = {
+            **dict(record.trace or {}),
+            "last_raw_ocr_review": {
+                "updated_at": utc_now_text(),
+                "source": "human_raw_ocr_editor",
+                "characters": len(record.raw_ocr),
+            },
+        }
+        self._mark_record_downstream_active(record, reason="raw_ocr_reviewed_after_source_change")
+        self._write_raw_artifacts(record)
+        record.sync_status_from_steps()
+        record.touch()
+        self.staging.upsert_record(record)
+        return record
 
     def update_figure_segments(self, record_id: str, boxes: list[Any]) -> StagingProblemRecord:
         from modulos.modulo0_transcriptor.segmentador_v2 import SegmentadorProblemasV2
@@ -824,6 +1030,32 @@ class InstancePdfPipelineService:
         record.touch()
         self.staging.upsert_record(record)
         return record
+
+    def _structure_raw_ocr_for_normalization(self, record: StagingProblemRecord):
+        from modulos.modulo0_transcriptor.scan_pipeline.pipeline import ScanPipeline
+
+        crop_path = Path(record.crop_path)
+        source = dict(record.source or {})
+        try:
+            start_n = max(1, int(record.normalized.get("numero") or source.get("problem_number") or source.get("n") or 1))
+        except Exception:
+            start_n = 1
+        pipeline = ScanPipeline(
+            provider="ocr",
+            debug_dir=str(self.staging.root / "ocr_debug"),
+            strict_json=False,
+            max_retries=0,
+            parse_max_retries=0,
+        )
+        return pipeline.process_raw_output(
+            raw_output=str(record.raw_ocr or ""),
+            image_path=crop_path,
+            start_n=start_n,
+            curso=str(record.normalized.get("curso") or "SIN_CURSO"),
+            tema=str(record.normalized.get("tema") or "SIN_TEMA"),
+            has_figure_hint=bool(record.figure_segmentation.get("segments_total")),
+            initial_items=None,
+        )
 
     def _normalize_from_pipeline_record(self, record: StagingProblemRecord, report: dict[str, Any]) -> dict[str, Any]:
         items = list(report.get("items") or []) if isinstance(report, dict) else []

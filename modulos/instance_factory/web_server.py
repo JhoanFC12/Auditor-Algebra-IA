@@ -172,6 +172,7 @@ class FactoryWebRuntime:
                 self.service.materialize_crops_to_staging()
                 return self._snapshot()
             if method == "POST" and path == "/api/ocr/run":
+                record_ids = self._record_ids_from_payload(payload)
                 self.service.run_ocr_and_segmentation(
                     provider=str(payload.get("provider") or "hf"),
                     curso=str(payload.get("curso") or "SIN_CURSO"),
@@ -182,6 +183,7 @@ class FactoryWebRuntime:
                     figure_model=str(payload.get("figure_model") or ""),
                     force_figure_model=self._bool(payload.get("force_figure_model"), default=True),
                     record_id=str(payload.get("record_id") or ""),
+                    record_ids=record_ids,
                 )
                 return self._snapshot()
             if method == "POST" and path in {"/api/segments/boxes", "/api/ocr/segments/boxes"}:
@@ -190,8 +192,18 @@ class FactoryWebRuntime:
                     raise ValueError("boxes debe ser una lista.")
                 self.service.update_figure_segments(self._required_str(payload, "record_id"), boxes)
                 return self._snapshot()
+            if method == "POST" and path == "/api/ocr/raw":
+                self.service.update_raw_ocr(
+                    self._required_str(payload, "record_id"),
+                    str(payload.get("raw_ocr") or ""),
+                )
+                return self._snapshot()
             if method == "POST" and path == "/api/normalize":
-                self.service.normalize_existing_ocr()
+                record_ids = self._record_ids_from_payload(payload)
+                self.service.normalize_existing_ocr(
+                    record_id=str(payload.get("record_id") or ""),
+                    record_ids=record_ids,
+                )
                 return self._snapshot()
             if method == "POST" and path == "/api/review/save":
                 record_id = self._required_str(payload, "record_id")
@@ -279,9 +291,15 @@ class FactoryWebRuntime:
     def _record_to_web(self, record: StagingProblemRecord) -> dict[str, Any]:
         payload = record.to_dict()
         crop_path = Path(record.crop_path)
+        downstream = dict(dict(record.audit or {}).get("downstream_state") or {})
+        crop_exists = bool(record.crop_path and crop_path.exists())
         payload["crop_name"] = crop_path.name
-        payload["crop_url"] = self._register_file(crop_path) if crop_path.exists() else ""
+        payload["crop_url"] = self._register_file(crop_path) if crop_exists else ""
         payload["status_label"] = StageStatus.normalize(record.status)
+        payload["downstream_state"] = downstream
+        payload["downstream_invalidated"] = downstream.get("status") == "invalidated"
+        payload["source_state"] = "stale" if payload["downstream_invalidated"] and not crop_exists else "active"
+        payload["source_stale"] = payload["source_state"] == "stale"
         figure = dict(record.figure_segmentation or {})
         segments = []
         for segment in list(figure.get("segments") or []):
@@ -445,6 +463,26 @@ class FactoryWebRuntime:
         return int(value)
 
     @staticmethod
+    def _record_ids_from_payload(payload: dict[str, Any]) -> list[str]:
+        raw = payload.get("record_ids")
+        if raw in (None, ""):
+            return []
+        if isinstance(raw, str):
+            values = [part.strip() for part in raw.split(",")]
+        elif isinstance(raw, list):
+            values = raw
+        else:
+            raise ValueError("record_ids debe ser una lista o texto separado por comas.")
+        out: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            item = str(value or "").strip()
+            if item and item not in seen:
+                seen.add(item)
+                out.append(item)
+        return out
+
+    @staticmethod
     def _bool(value: Any, *, default: bool = False) -> bool:
         if value is None:
             return bool(default)
@@ -497,6 +535,7 @@ class FactoryWebRuntime:
             "/api/pages/boxes": {"POST"},
             "/api/staging/materialize": {"POST"},
             "/api/ocr/run": {"POST"},
+            "/api/ocr/raw": {"POST"},
             "/api/ocr/segments/boxes": {"POST"},
             "/api/segments/boxes": {"POST"},
             "/api/normalize": {"POST"},

@@ -56,7 +56,7 @@ from utils.project_layout import remap_legacy_drive_path
 
 from .models import InstancePipelineContext
 from .library_api import LibraryApiError, LibraryWebApi
-from .web_server import FactoryWebRuntime, WebApiError
+from .web_server import FactoryWebRuntime, WebApiError, _FilePayload
 
 
 class LibraryWebRuntime:
@@ -129,6 +129,14 @@ class LibraryWebRuntime:
                 result = self._dispatch_api(method, path, query, payload)
                 self._send_json(handler, result)
                 return
+            if path.startswith("/api/") and self._factory_runtimes:
+                payload = self._read_json(handler) if method == "POST" else {}
+                result = self._dispatch_factory_api(method, path, query, payload)
+                if isinstance(result, _FilePayload):
+                    self._send_file(handler, result.path, result.content_type)
+                else:
+                    self._send_json(handler, result)
+                return
             if method != "GET":
                 self._send_json(handler, {"error": "method_not_allowed"}, status=405)
                 return
@@ -186,6 +194,18 @@ class LibraryWebRuntime:
                 instance_type = self._required_str(payload, "instance_type")
                 return self._open_factory_for_instance(db_name, book_id, instance_type)
             raise FileNotFoundError(f"Ruta API no encontrada: {method} {path}")
+
+    def _dispatch_factory_api(
+        self,
+        method: str,
+        path: str,
+        query: dict[str, list[str]],
+        payload: dict[str, Any],
+    ) -> Any:
+        runtime = self._factory_runtimes[-1] if self._factory_runtimes else None
+        if runtime is None:
+            raise FileNotFoundError(f"Ruta API no encontrada: {method} {path}")
+        return runtime._dispatch_api(method, path, query, payload)
 
     def _snapshot(self, db_name: str = "") -> dict[str, Any]:
         dbs = list(self.controller.listar_bases_datos())

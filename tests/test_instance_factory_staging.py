@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from modulos.instance_factory.model_inventory import build_model_inventory_manifest, resolve_model_defaults
 from modulos.instance_factory.models import InstancePipelineContext, PipelineStep, StageStatus, StagingProblemRecord
@@ -145,6 +146,60 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertEqual(contract["schema_version"], "pdf_factory_golden_contract_v1")
             self.assertEqual(contract["raw_ocr"], "12. Halle x. A) 1 B) 2 C) 3 D) 4 E) 5")
             self.assertIn("Halle x.", contract["corrected_text"])
+
+    def test_normalize_existing_ocr_can_target_single_record(self) -> None:
+        try:
+            from modulos.instance_factory.pipeline import InstancePdfPipelineService
+        except Exception as exc:  # pragma: no cover - optional detector/OCR dependencies.
+            self.skipTest(f"pipeline deps unavailable: {exc}")
+
+        def structured_report(number: int, statement: str) -> dict:
+            return {
+                "items_total": 1,
+                "items": [
+                    {
+                        "item": {
+                            "n": str(number),
+                            "curso": "GEO",
+                            "tema": "ANGULOS",
+                            "statement": statement,
+                            "options": {"A": "10", "B": "20", "C": "30", "D": "40", "E": "50"},
+                            "answer_key": "A",
+                            "has_figure": False,
+                        },
+                        "rendered": statement,
+                    }
+                ],
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            context = InstancePipelineContext(book_code="GEO", instance_type="s02")
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(Path(tmp) / "crop_001.png"),
+                    structured_ocr=structured_report(11, "Halle x"),
+                )
+            )
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_002",
+                    crop_id="crop_002",
+                    crop_path=str(Path(tmp) / "crop_002.png"),
+                    structured_ocr=structured_report(12, "Halle y"),
+                    normalized={"numero": "99", "enunciado_latex": "preservar"},
+                )
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            out = service.normalize_existing_ocr(record_id="crop_001")
+
+            self.assertEqual([record.record_id for record in out], ["crop_001"])
+            self.assertEqual(store.get_record("crop_001").normalized["numero"], "11")
+            self.assertEqual(store.get_record("crop_002").normalized["numero"], "99")
+            self.assertEqual(store.get_record("crop_002").normalized["enunciado_latex"], "preservar")
 
     def test_review_update_can_mark_record_ready_without_inserting_problems(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -310,6 +365,158 @@ class InstanceFactoryStagingTests(unittest.TestCase):
         self.assertEqual(context.book_id, 42)
         self.assertTrue(context.pdf_path.endswith("libro.pdf"))
 
+    def test_page_box_change_invalidates_downstream_staging_records(self) -> None:
+        try:
+            from modulos.instance_factory.pipeline import InstancePdfPipelineService
+        except Exception as exc:  # pragma: no cover - optional detector/OCR dependencies.
+            self.skipTest(f"pipeline deps unavailable: {exc}")
+
+        class FakeGolden:
+            def __init__(self, page_image: Path) -> None:
+                self.rows = [
+                    SimpleNamespace(
+                        record_id="page_001",
+                        page_number=1,
+                        boxes=[(1, 2, 30, 40)],
+                        reviewed=True,
+                        layout_mode="una_columna",
+                        detector_source="pdf_factory:test",
+                        image_path=page_image,
+                    )
+                ]
+
+            def load_instance(self, _name: str):
+                return self.rows
+
+            def upsert_instance_rows(self, _name: str, rows):
+                self.rows = list(rows)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            page = root / "page.png"
+            page.write_bytes(b"png")
+            crop = root / "crop.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s08", pdf_path="E:/Banco/libro.pdf")
+            store = InstanceStagingStore(context, root=root / "staging")
+            record = StagingProblemRecord(
+                record_id="crop_001",
+                crop_id="crop_001",
+                crop_path=str(crop),
+                status=StageStatus.READY,
+                source={
+                    "book_code": "ALG01",
+                    "instance_type": "s08",
+                    "pdf_path": "E:/Banco/libro.pdf",
+                    "page_number": 1,
+                    "source_record_id": "page_001",
+                    "bbox_px": [1, 2, 30, 40],
+                },
+                raw_ocr="OCR viejo",
+                structured_ocr={"items_total": 1},
+                figure_segmentation={"segments_total": 1},
+                normalized={"numero": "1"},
+                review={"notes": "validado"},
+                artifacts={"raw": "old.json"},
+                golden_sync={"status": "contract_prepared"},
+                errors=["error anterior"],
+            )
+            for step in (
+                PipelineStep.PAGES,
+                PipelineStep.BOXES,
+                PipelineStep.CROPS,
+                PipelineStep.OCR,
+                PipelineStep.SEGMENTATION,
+                PipelineStep.NORMALIZATION,
+                PipelineStep.REVIEW,
+            ):
+                record.set_step(step, StageStatus.READY, "listo")
+            store.upsert_record(record)
+            service = InstancePdfPipelineService(context, golden_controller=FakeGolden(page), staging_store=store)
+
+            service.update_page_boxes("page_001", [[5, 6, 45, 55]], layout_mode="una_columna")
+
+            loaded = store.get_record("crop_001")
+            assert loaded is not None
+            self.assertEqual(loaded.crop_path, "")
+            self.assertEqual(loaded.raw_ocr, "")
+            self.assertEqual(loaded.structured_ocr, {})
+            self.assertEqual(loaded.figure_segmentation, {})
+            self.assertEqual(loaded.normalized, {})
+            self.assertEqual(loaded.review, {})
+            self.assertEqual(loaded.artifacts, {})
+            self.assertEqual(loaded.golden_sync, {})
+            self.assertEqual(loaded.errors, [])
+            self.assertEqual(loaded.step_status(PipelineStep.CROPS), StageStatus.PENDING)
+            self.assertEqual(loaded.step_status(PipelineStep.OCR), StageStatus.PENDING)
+            self.assertEqual(loaded.step_status(PipelineStep.SEGMENTATION), StageStatus.PENDING)
+            self.assertEqual(loaded.step_status(PipelineStep.NORMALIZATION), StageStatus.PENDING)
+            self.assertEqual(loaded.step_status(PipelineStep.REVIEW), StageStatus.PENDING)
+            self.assertEqual(loaded.audit["downstream_state"]["status"], "invalidated")
+            self.assertEqual(loaded.audit["downstream_state"]["reason"], "page_boxes_changed")
+            self.assertEqual(loaded.trace["downstream_invalidations"][-1]["reason"], "page_boxes_changed")
+
+    def test_page_box_save_without_coordinate_change_preserves_downstream_records(self) -> None:
+        try:
+            from modulos.instance_factory.pipeline import InstancePdfPipelineService
+        except Exception as exc:  # pragma: no cover - optional detector/OCR dependencies.
+            self.skipTest(f"pipeline deps unavailable: {exc}")
+
+        class FakeGolden:
+            def __init__(self, page_image: Path) -> None:
+                self.rows = [
+                    SimpleNamespace(
+                        record_id="page_001",
+                        page_number=1,
+                        boxes=[(1, 2, 30, 40)],
+                        reviewed=True,
+                        layout_mode="una_columna",
+                        detector_source="pdf_factory:test",
+                        image_path=page_image,
+                    )
+                ]
+
+            def load_instance(self, _name: str):
+                return self.rows
+
+            def upsert_instance_rows(self, _name: str, rows):
+                self.rows = list(rows)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            page = root / "page.png"
+            page.write_bytes(b"png")
+            crop = root / "crop.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s08", pdf_path="E:/Banco/libro.pdf")
+            store = InstanceStagingStore(context, root=root / "staging")
+            record = StagingProblemRecord(
+                record_id="crop_001",
+                crop_id="crop_001",
+                crop_path=str(crop),
+                status=StageStatus.READY,
+                source={"page_number": 1, "source_record_id": "page_001", "bbox_px": [1, 2, 30, 40]},
+                raw_ocr="OCR vigente",
+                structured_ocr={"items_total": 1},
+                figure_segmentation={"segments_total": 1},
+                normalized={"numero": "1"},
+                review={"notes": "validado"},
+            )
+            record.set_step(PipelineStep.CROPS, StageStatus.READY, "crop disponible")
+            record.set_step(PipelineStep.OCR, StageStatus.READY, "OCR listo")
+            store.upsert_record(record)
+            service = InstancePdfPipelineService(context, golden_controller=FakeGolden(page), staging_store=store)
+
+            service.update_page_boxes("page_001", [[1, 2, 30, 40]], layout_mode="una_columna")
+
+            loaded = store.get_record("crop_001")
+            assert loaded is not None
+            self.assertEqual(loaded.crop_path, str(crop))
+            self.assertEqual(loaded.raw_ocr, "OCR vigente")
+            self.assertEqual(loaded.structured_ocr["items_total"], 1)
+            self.assertEqual(loaded.normalized["numero"], "1")
+            self.assertNotIn("downstream_state", loaded.audit)
+
     def test_pipeline_materialization_writes_required_staging_metadata(self) -> None:
         try:
             from modulos.instance_factory.pipeline import InstancePdfPipelineService
@@ -365,6 +572,92 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             manifest = json.loads(store.manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["metadata"]["complete_records"], 1)
             self.assertTrue(manifest["contract_validation"]["valid"])
+
+    def test_materialization_same_crop_id_with_new_bbox_clears_downstream_outputs(self) -> None:
+        try:
+            from modulos.instance_factory.pipeline import InstancePdfPipelineService
+        except Exception as exc:  # pragma: no cover - optional detector/OCR dependencies.
+            self.skipTest(f"pipeline deps unavailable: {exc}")
+
+        class FakeGolden:
+            def __init__(self, root: Path) -> None:
+                self.root = root
+
+            def materialize_problem_crops_for_downstream(self, *_args, **_kwargs):
+                target = self.root / "problem_crops_live"
+                records = target / "records"
+                images = target / "images"
+                records.mkdir(parents=True, exist_ok=True)
+                images.mkdir(parents=True, exist_ok=True)
+                crop_id = "crop_pipeline_001"
+                (images / f"{crop_id}.png").write_bytes(b"new-png")
+                payload = {
+                    "schema_version": "problem_crop_live_v1",
+                    "crop_id": crop_id,
+                    "source_pdf_path": "E:/Banco/libro.pdf",
+                    "source_page_number": 4,
+                    "source_page_image": "page.png",
+                    "bbox_px": [9, 10, 90, 100],
+                    "crop_image_rel": f"images/{crop_id}.png",
+                    "source_record_id": "page_0004",
+                    "layout_mode": "una_columna",
+                }
+                (records / f"{crop_id}.json").write_text(json.dumps(payload), encoding="utf-8")
+                return target, [crop_id]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_crop = root / "old_crop.png"
+            old_crop.write_bytes(b"old-png")
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s05", pdf_path="E:/Banco/libro.pdf")
+            store = InstanceStagingStore(context, root=root / "staging")
+            record = StagingProblemRecord(
+                record_id="crop_pipeline_001",
+                crop_id="crop_pipeline_001",
+                crop_path=str(old_crop),
+                status=StageStatus.READY,
+                source={
+                    "book_code": "ALG01",
+                    "instance_type": "s05",
+                    "pdf_path": "E:/Banco/libro.pdf",
+                    "page_number": 4,
+                    "source_record_id": "page_0004",
+                    "bbox_px": [1, 2, 30, 40],
+                },
+                raw_ocr="OCR viejo",
+                structured_ocr={"items_total": 1},
+                figure_segmentation={"segments_total": 1},
+                normalized={"numero": "4"},
+                review={"notes": "validado"},
+            )
+            for step in (
+                PipelineStep.CROPS,
+                PipelineStep.OCR,
+                PipelineStep.SEGMENTATION,
+                PipelineStep.NORMALIZATION,
+                PipelineStep.REVIEW,
+            ):
+                record.set_step(step, StageStatus.READY, "listo")
+            store.upsert_record(record)
+            service = InstancePdfPipelineService(context, golden_controller=FakeGolden(root), staging_store=store)
+
+            out = service.materialize_crops_to_staging(rows=[])
+
+            self.assertEqual(len(out), 1)
+            loaded = store.get_record("crop_pipeline_001")
+            assert loaded is not None
+            self.assertEqual(loaded.source["bbox_px"], [9, 10, 90, 100])
+            self.assertTrue(Path(loaded.crop_path).exists())
+            self.assertEqual(loaded.raw_ocr, "")
+            self.assertEqual(loaded.structured_ocr, {})
+            self.assertEqual(loaded.figure_segmentation, {})
+            self.assertEqual(loaded.normalized, {})
+            self.assertEqual(loaded.review, {})
+            self.assertEqual(loaded.step_status(PipelineStep.CROPS), StageStatus.READY)
+            self.assertEqual(loaded.step_status(PipelineStep.OCR), StageStatus.PENDING)
+            self.assertEqual(loaded.step_status(PipelineStep.SEGMENTATION), StageStatus.PENDING)
+            self.assertEqual(loaded.audit["downstream_state"]["status"], "invalidated")
+            self.assertEqual(loaded.trace["downstream_invalidations"][-1]["reason"], "crop_source_changed")
 
     def test_pipeline_dashboard_overviews_expose_stage_state(self) -> None:
         try:
