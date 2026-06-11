@@ -18,6 +18,8 @@ from modulos.modulo13_laboratorio_pdf_segmentacion.controlador_laboratorio_pdf i
 from .models import InstancePipelineContext, StageStatus, StagingProblemRecord
 from .pipeline import InstancePdfPipelineService
 from .library_api import LibraryApiError, LibraryWebApi
+from .runtime_env import load_factory_runtime_env
+from .hf_endpoint_manager import HfEndpointManager
 
 
 class WebApiError(Exception):
@@ -40,10 +42,13 @@ class FactoryWebRuntime:
         *,
         service: Any | None = None,
         library_api: LibraryWebApi | None = None,
+        endpoint_manager: HfEndpointManager | None = None,
     ) -> None:
+        load_factory_runtime_env()
         self.context = context
         self.service = service or InstancePdfPipelineService(context)
         self.library_api = library_api or LibraryWebApi()
+        self.endpoint_manager = endpoint_manager or HfEndpointManager()
         self.static_root = Path(__file__).with_name("web")
         self.cache_root = Path(tempfile.mkdtemp(prefix="pdf_factory_web_"))
         self._file_tokens: dict[str, Path] = {}
@@ -111,7 +116,7 @@ class FactoryWebRuntime:
         except PermissionError as exc:
             self._send_error(handler, exc, status=403, code="forbidden")
         except Exception as exc:
-            self._send_error(handler, exc, status=500, code="internal_error", include_traceback=True)
+            self._send_error(handler, exc, status=500, code="internal_error")
 
     def _dispatch_api(
         self,
@@ -144,6 +149,16 @@ class FactoryWebRuntime:
             if method == "GET" and path == "/api/promotion":
                 record_id = self._first(query, "record_id", "")
                 return self.service.staging.build_promotion_candidate(record_id)
+            if method == "GET" and path == "/api/endpoint/ocr/status":
+                return self.endpoint_manager.status()
+            if method == "POST" and path == "/api/endpoint/ocr/resume":
+                return self.endpoint_manager.resume(
+                    wait=self._bool(payload.get("wait"), default=True),
+                    timeout_s=self._bounded_int(payload.get("timeout_s") or 420, "timeout_s", minimum=1, maximum=1800),
+                    poll_s=self._bounded_int(payload.get("poll_s") or 8, "poll_s", minimum=1, maximum=120),
+                )
+            if method == "POST" and path == "/api/endpoint/ocr/scale-to-zero":
+                return self.endpoint_manager.scale_to_zero()
             if method == "POST" and path == "/api/pages/detect":
                 pages = self._required_str(payload, "pages")
                 dpi = self._bounded_int(payload.get("dpi") or 300, "dpi", minimum=72, maximum=600)
@@ -193,10 +208,15 @@ class FactoryWebRuntime:
                 self.service.update_figure_segments(self._required_str(payload, "record_id"), boxes)
                 return self._snapshot()
             if method == "POST" and path == "/api/ocr/raw":
-                self.service.update_raw_ocr(
+                updated = self.service.update_raw_ocr(
                     self._required_str(payload, "record_id"),
                     str(payload.get("raw_ocr") or ""),
                 )
+                if self._bool(payload.get("compact"), default=False):
+                    return {
+                        "schema_version": "pdf_factory_web_record_saved_v1",
+                        "record": self._record_to_web(updated),
+                    }
                 return self._snapshot()
             if method == "POST" and path == "/api/normalize":
                 record_ids = self._record_ids_from_payload(payload)
@@ -213,6 +233,11 @@ class FactoryWebRuntime:
                 notes = str(payload.get("notes") or "")
                 mark_ready = bool(payload.get("mark_ready", False))
                 updated = self.service.staging.update_review(record_id, dict(normalized), notes, mark_ready=mark_ready)
+                if self._bool(payload.get("compact"), default=False):
+                    return {
+                        "schema_version": "pdf_factory_web_record_saved_v1",
+                        "record": self._record_to_web(updated),
+                    }
                 return {
                     "schema_version": "pdf_factory_web_review_saved_v1",
                     "record": self._record_to_web(updated),
@@ -425,9 +450,12 @@ class FactoryWebRuntime:
         code: str,
         include_traceback: bool = False,
     ) -> None:
+        message = str(exc).strip("'") or code
+        if code == "internal_error" and not include_traceback:
+            message = "Error interno de la Fabrica. Revisa el log local para mas detalle."
         payload: dict[str, Any] = {
             "schema_version": "pdf_factory_web_error_v1",
-            "error": str(exc).strip("'") or code,
+            "error": message,
             "code": code,
             "status": int(status),
         }
@@ -531,6 +559,9 @@ class FactoryWebRuntime:
             "/api/pdf/page": {"GET"},
             "/api/record": {"GET"},
             "/api/promotion": {"GET"},
+            "/api/endpoint/ocr/status": {"GET"},
+            "/api/endpoint/ocr/resume": {"POST"},
+            "/api/endpoint/ocr/scale-to-zero": {"POST"},
             "/api/pages/detect": {"POST"},
             "/api/pages/boxes": {"POST"},
             "/api/staging/materialize": {"POST"},

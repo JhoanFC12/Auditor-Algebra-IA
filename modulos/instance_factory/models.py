@@ -279,7 +279,7 @@ class StagingProblemRecord:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "StagingProblemRecord":
-        return cls(
+        record = cls(
             record_id=str(raw.get("record_id") or raw.get("crop_id") or ""),
             crop_id=str(raw.get("crop_id") or raw.get("record_id") or ""),
             crop_path=str(raw.get("crop_path") or ""),
@@ -302,6 +302,8 @@ class StagingProblemRecord:
             created_at=str(raw.get("created_at") or utc_now_text()),
             updated_at=str(raw.get("updated_at") or utc_now_text()),
         )
+        record.clear_recovered_errors()
+        return record
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -378,6 +380,40 @@ class StagingProblemRecord:
         else:
             self.status = StageStatus.PENDING
         self.touch()
+
+    def clear_recovered_errors(self) -> bool:
+        """Archive stale errors when current step state shows a recovered record."""
+        if not self.errors:
+            return False
+        previous_updated_at = self.updated_at
+        self.ensure_pipeline_steps()
+        step_statuses = [self.step_status(step) for step in PipelineStep.ORDER]
+        if StageStatus.ERROR in step_statuses:
+            self.updated_at = previous_updated_at
+            return False
+        recovered_steps = {
+            self.step_status(PipelineStep.OCR),
+            self.step_status(PipelineStep.NORMALIZATION),
+            self.step_status(PipelineStep.REVIEW),
+        }
+        if not (recovered_steps & {StageStatus.READY, StageStatus.NEEDS_REVIEW}):
+            self.updated_at = previous_updated_at
+            return False
+        archived = {
+            "schema_version": "stale_staging_errors_archived_v1",
+            "archived_at": utc_now_text(),
+            "previous_status": str(self.status or ""),
+            "errors": list(self.errors),
+        }
+        history = list((self.audit or {}).get("recovered_errors") or [])
+        self.audit = {
+            **dict(self.audit or {}),
+            "recovered_errors": [*history, archived][-10:],
+        }
+        self.errors = []
+        self.sync_status_from_steps()
+        self.updated_at = previous_updated_at
+        return True
 
     def set_step(self, step: str, status: str, detail: str = "", **metadata: Any) -> None:
         key = PipelineStep.normalize(step)

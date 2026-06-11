@@ -91,7 +91,10 @@ def _control_window(runtime: Any, url: str) -> None:
 
 
 def main() -> int:
-    _bootstrap_path()
+    root = _bootstrap_path()
+    from modulos.instance_factory.runtime_env import load_factory_runtime_env
+
+    load_factory_runtime_env(root)
     default_db_name = _configure_database_profile()
     from modulos.instance_factory.library_web_server import LibraryWebRuntime
 

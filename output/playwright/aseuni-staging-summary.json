@@ -1,0 +1,328 @@
+{
+  "summary": {
+    "title": "Biblioteca | Fabrica PDF",
+    "url": "http://127.0.0.1:53571/",
+    "text": "FABRICA PDF -> STAGING\n\naseuni-semianual-geometria / semana_1_tri_ngulos\n\nASEUNI SEMIANUAL - GEOMETRIA.pdf | Flujo revisable, sin insercion directa en problemas\n\nStaging primero\nRevision humana\nBD bloqueada\nModo oscuro\nBiblioteca\nActualizar\nPROCESO\nDe PDF a staging\n1\nPaginas\n6 pagina(s), 6/6 revisada(s)\nElegir paginas del PDF\nListo\n2\nBoxes\n47 box(es) detectados para revisar\nConfirmar cajas de problemas\nListo\n3\nStaging\nAhora\n47/47 crop(s) disponibles\nRevisar crops trazables\nListo\n4\nOCR\n47/47 con OCR, 47 con segmentacion\nLeer texto y graficos\nRequiere revision\n5\nRevision\n1/47 borrador(es) de revision\nPreparar revision desde OCR\nRequiere revision\n6\nCandidato\n0/47 listos; 0 con error; no inserta directo en problemas\nVerificar bloqueo de BD\nRequiere revision\nCrops y staging\n\nElige las imagenes que entraran a la cola de OCR y segmentacion grafica.\n\n47 crop(s)\nOCR ENTRENADO\nJhoan12/math-ocr-qwen2.5-vl-3b-geometry-rules-merged-v4\nhuggingface | env:HF_MODEL\nSEGMENTACION DE GRAFICOS\nmodels/problem_segmentation_yolov8n_golden_v1/weights/bes...\nlocal | env:YOLO_FIGURE_SEGMENT_MODEL\nCola OCR + segmentacion\n\nSelecciona una o varias imagenes para procesarlas con los modelos entrenados.\n\nSeleccionar todo\nLimpiar cola\nEjecutar cola\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_22fa9f209c.png\nPag. 1 | pendiente\n107, 449, 842, 804\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_8d28fbf6fd.png\nPag. 1 | pendiente\n115, 824, 859, 1287\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_ecbf1b7eed.png\nPag. 1 | pendiente\n116, 1309, 879, 1777\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_4c522d44f9.png\nPag. 1 | pendiente\n116, 1778, 848, 2281\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_fa0107e423.png\nPag. 1 | pendiente\n925, 202, 1608, 325\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_bd0c217c78.png\nPag. 1 | pendiente\n914, 345, 1671, 1004\nCola\n6\nPag. 1 | requiere_revision\n929, 1032, 1716, 1492\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_e37610f68f.png\nPag. 1 | pendiente\n926, 1520, 1718, 2030\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_3cc29eb58d.png\nPag. 2 | pendiente\n117, 200, 864, 645\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_ed3f4e1384.png\nPag. 2 | pendiente\n111, 673, 862, 1370\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_59cabea481.png\nPag. 2 | pendiente\n110, 1394, 850, 1975\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_ae76a99a38.png\nPag. 2 | pendiente\n116, 2002, 795, 2166\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_f7ff32d267.png\nPag. 2 | pendiente\n925, 201, 1710, 633\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_68b02521c3.png\nPag. 2 | pendiente\n922, 635, 1645, 1093\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_378d1edb97.png\nPag. 2 | pendiente\n916, 1113, 1669, 1881\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_91b63fa563.png\nPag. 2 | pendiente\n915, 1901, 1644, 2258\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_fb6f69617d.png\nPag. 3 | pendiente\n118, 212, 833, 434\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_91306723fd.png\nPag. 3 | pendiente\n118, 445, 839, 801\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_f11582cb44.png\nPag. 3 | pendiente\n117, 820, 843, 1168\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_a5b96be775.png\nPag. 3 | pendiente\n118, 1176, 861, 1653\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_ff08647971.png\nPag. 3 | pendiente\n113, 1684, 836, 1986\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_4a80431d0a.png\nPag. 3 | pendiente\n111, 2003, 831, 2171\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_8831ca1efb.png\nPag. 3 | pendiente\n923, 198, 1685, 549\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_f981dc6250.png\nPag. 3 | pendiente\n918, 547, 1708, 1138\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_1cc8193a08.png\nPag. 3 | pendiente\n919, 1133, 1641, 1587\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_2df80759c4.png\nPag. 3 | pendiente\n903, 1593, 1680, 2298\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_856112e45b.png\nPag. 4 | pendiente\n123, 204, 820, 327\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_553c394e75.png\nPag. 4 | pendiente\n117, 345, 826, 910\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_0182c8ffba.png\nPag. 4 | pendiente\n115, 925, 846, 1609\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_2b69690eb9.png\nPag. 4 | pendiente\n114, 1633, 837, 1983\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_8684186185.png\nPag. 4 | pendiente\n110, 1996, 835, 2171\nCola\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_",
+    "scrollHeight": 4676,
+    "activeStep": "3\nStaging\nAhora\n47/47 crop(s) disponibles\nRevisar crops trazables\nListo",
+    "controls": [
+      {
+        "tag": "BUTTON",
+        "text": "Modo oscuro",
+        "cls": "ghost theme-toggle"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Biblioteca",
+        "cls": "ghost"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Actualizar",
+        "cls": "ghost"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Carpeta staging",
+        "cls": "ghost hidden"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "1\nPaginas\n6 pagina(s), 6/6 revisada(s)\nElegir paginas del PDF\nListo",
+        "cls": "timeline-step "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "2\nBoxes\n47 box(es) detectados para revisar\nConfirmar cajas de problemas\nListo",
+        "cls": "timeline-step "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "3\nStaging\nAhora\n47/47 crop(s) disponibles\nRevisar crops trazables\nListo",
+        "cls": "timeline-step active"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "4\nOCR\n47/47 con OCR, 47 con segmentacion\nLeer texto y graficos\nRequiere revision",
+        "cls": "timeline-step "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "5\nRevision\n1/47 borrador(es) de revision\nPreparar revision desde OCR\nRequiere revision",
+        "cls": "timeline-step "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "6\nCandidato\n0/47 listos; 0 con error; no inserta directo en problemas\nVerificar bloqueo de BD\nRequiere revision",
+        "cls": "timeline-step "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Seleccionar todo",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Limpiar cola",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Ejecutar cola",
+        "cls": "primary"
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "on",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "OCR imagen actual",
+        "cls": "primary"
+      }
+    ]
+  },
+  "consoleRows": [
+    {
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 404 (Not Found)",
+      "url": "http://127.0.0.1:53571/"
+    },
+    {
+      "type": "info",
+      "text": "Images loaded lazily and replaced with placeholders. Load events are deferred. See https://go.microsoft.com/fwlink/?linkid=2048113",
+      "url": "http://127.0.0.1:53571/"
+    }
+  ]
+}

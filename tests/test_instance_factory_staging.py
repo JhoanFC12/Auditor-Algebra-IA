@@ -14,7 +14,50 @@ from modulos.instance_factory.page_selection import parse_page_selection
 from modulos.instance_factory.staging import InstanceStagingStore
 
 
+def structured_report(number: int, statement: str) -> dict:
+    return {
+        "items_total": 1,
+        "items": [
+            {
+                "item": {
+                    "n": str(number),
+                    "curso": "GEO",
+                    "tema": "ANGULOS",
+                    "statement": statement,
+                    "options": {"A": "10", "B": "20", "C": "30", "D": "40", "E": "50"},
+                    "answer_key": "A",
+                    "has_figure": False,
+                },
+                "rendered": statement,
+            }
+        ],
+    }
+
+
 class InstanceFactoryStagingTests(unittest.TestCase):
+    def test_staging_record_archives_recovered_historical_errors_on_load(self) -> None:
+        raw = {
+            "record_id": "crop_recovered",
+            "crop_id": "crop_recovered",
+            "crop_path": "E:/tmp/crop.png",
+            "status": "error",
+            "raw_ocr": "1. Halle x",
+            "structured_ocr": structured_report(1, "Halle x"),
+            "normalized": {"numero": "1"},
+            "errors": ["Error code: 403 - error historico"],
+            "steps": {
+                PipelineStep.OCR: {"status": StageStatus.READY, "detail": "OCR estructurado con items"},
+                PipelineStep.NORMALIZATION: {"status": StageStatus.NEEDS_REVIEW, "detail": "normalizado pendiente"},
+                PipelineStep.REVIEW: {"status": StageStatus.NEEDS_REVIEW, "detail": "pendiente"},
+            },
+        }
+
+        record = StagingProblemRecord.from_dict(raw)
+
+        self.assertEqual(record.errors, [])
+        self.assertNotEqual(record.status, StageStatus.ERROR)
+        self.assertEqual(record.audit["recovered_errors"][0]["errors"], ["Error code: 403 - error historico"])
+
     def test_staging_upsert_is_idempotent_and_rewrites_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = InstancePipelineContext(
@@ -154,25 +197,6 @@ class InstanceFactoryStagingTests(unittest.TestCase):
         except Exception as exc:  # pragma: no cover - optional detector/OCR dependencies.
             self.skipTest(f"pipeline deps unavailable: {exc}")
 
-        def structured_report(number: int, statement: str) -> dict:
-            return {
-                "items_total": 1,
-                "items": [
-                    {
-                        "item": {
-                            "n": str(number),
-                            "curso": "GEO",
-                            "tema": "ANGULOS",
-                            "statement": statement,
-                            "options": {"A": "10", "B": "20", "C": "30", "D": "40", "E": "50"},
-                            "answer_key": "A",
-                            "has_figure": False,
-                        },
-                        "rendered": statement,
-                    }
-                ],
-            }
-
         with tempfile.TemporaryDirectory() as tmp:
             context = InstancePipelineContext(book_code="GEO", instance_type="s02")
             store = InstanceStagingStore(context, root=Path(tmp) / "staging")
@@ -181,6 +205,7 @@ class InstanceFactoryStagingTests(unittest.TestCase):
                     record_id="crop_001",
                     crop_id="crop_001",
                     crop_path=str(Path(tmp) / "crop_001.png"),
+                    errors=["Error code: 403 - error viejo"],
                     structured_ocr=structured_report(11, "Halle x"),
                 )
             )
@@ -199,8 +224,46 @@ class InstanceFactoryStagingTests(unittest.TestCase):
 
             self.assertEqual([record.record_id for record in out], ["crop_001"])
             self.assertEqual(store.get_record("crop_001").normalized["numero"], "11")
+            self.assertEqual(store.get_record("crop_001").errors, [])
+            self.assertNotEqual(store.get_record("crop_001").status, StageStatus.ERROR)
             self.assertEqual(store.get_record("crop_002").normalized["numero"], "99")
             self.assertEqual(store.get_record("crop_002").normalized["enunciado_latex"], "preservar")
+
+    def test_update_raw_ocr_regenerates_structured_latex_without_normalizing(self) -> None:
+        try:
+            from modulos.instance_factory.pipeline import InstancePdfPipelineService
+        except Exception as exc:  # pragma: no cover - optional detector/OCR dependencies.
+            self.skipTest(f"pipeline deps unavailable: {exc}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            crop = Path(tmp) / "crop_001.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="GEO", instance_type="s03")
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(crop),
+                    source={"problem_number": 1},
+                    normalized={"numero": "99", "enunciado_latex": "viejo"},
+                )
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            updated = service.update_raw_ocr(
+                "crop_001",
+                "<01.> Determinar x. A) $10^\\circ$ B) $20^\\circ$ C) $30^\\circ$ D) $40^\\circ$ E) $50^\\circ$",
+            )
+
+            self.assertEqual(updated.raw_ocr[:5], "<01.>")
+            self.assertGreater(int(updated.structured_ocr.get("items_total") or 0), 0)
+            self.assertEqual(updated.normalized, {})
+            self.assertEqual(updated.step_status(PipelineStep.OCR), StageStatus.READY)
+            self.assertEqual(updated.step_status(PipelineStep.NORMALIZATION), StageStatus.PENDING)
+            loaded = store.get_record("crop_001")
+            self.assertGreater(int(loaded.structured_ocr.get("items_total") or 0), 0)
+            self.assertEqual(loaded.normalized, {})
 
     def test_trained_ocr_rejects_hf_router_as_dedicated_endpoint(self) -> None:
         try:

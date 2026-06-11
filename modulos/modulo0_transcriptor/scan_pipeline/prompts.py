@@ -31,6 +31,7 @@ SYSTEM_PROMPT_RAW_OCR = (
     "Devuelves SOLO texto plano fiel. "
     "No resumes, no estructuras en JSON y no decides que contenido sirve o no sirve. "
     "No inventas ni completas por inferencia. "
+    "No agregas etiquetas artificiales, marcadores de imagen, claves, respuestas, nombres de variables ni datos que no esten impresos como texto visible. "
     "Conservas el orden de lectura de arriba hacia abajo y, dentro de cada bloque, de izquierda a derecha. "
     "Mantienes numeracion, alternativas, formulas y texto inicial aunque parezca continuidad del problema anterior. "
     "Conservas el texto comun en espanol normal y usas LaTeX solo para expresiones matematicas visibles. "
@@ -41,11 +42,12 @@ SYSTEM_PROMPT_RAW_OCR = (
     "No escribes etiquetas artificiales como 'N.11' ni comentarios sobre el formato. "
     "Nunca agregas prefijos fantasmas a la numeracion visible: si el numero visible es 3, escribes <3.> y nunca <93.> o <103.>. "
     "Si una linea solo continua una formula o enunciado del mismo problema, no inventas un nuevo encabezado. "
-    "Si hay una figura, dibujo, grafico o diagrama matematico visible asociado al problema n, escribes [[Imagen=img-n]] antes de sus alternativas. "
-    "Cuenta como grafico: figura geometrica, triangulo, circunferencia, poligono, recta, angulo, arco, plano, funcion, relacion, conjunto, region sombreada o ilustracion matematica; las tablas no cuentan. "
-    "No hace falta que el texto diga 'en el grafico'; si el dibujo esta visible y pertenece al problema, etiqueta la imagen. "
-    "Si la figura pertenece a una continuacion sin numero propio, escribes [[Imagen=img-continuacion]]. "
-    "Excluyes solo texto interno de diagramas o figuras cuando no forme parte del texto impreso fuera del dibujo."
+    "Formato general cuando hay numero visible: <numero.> enunciado visible, luego alternativas visibles A), B), C), D), E), y solo si esta impresa una respuesta o clave, una linea Clave: <valor visible>. "
+    "Cuando no hay numeracion visible, inicia el bloque con [CONT.] y transcribe el contenido como continuacion; no inventes numero. "
+    "No describas figuras, diagramas ni graficos; no escribas frases como 'hay un triangulo', 'se observa' ni enumeres elementos del dibujo. "
+    "No extraigas letras, medidas, relaciones ni etiquetas internas del dibujo como parte del enunciado u opciones; otro modelo se encarga de detectar graficos. "
+    "Transcribe solo texto externo visible al dibujo. Si el crop contiene solo grafico sin texto externo legible, escribe [CONT.] [sin texto OCR visible]. "
+    "Si una palabra, numero, signo o formula no se lee con seguridad, escribe [ilegible] o conserva el fragmento dudoso sin completarlo."
 )
 
 
@@ -171,6 +173,31 @@ def build_prompt_profile_instructions(
     stage: str = "structured",
 ) -> str:
     profile = infer_prompt_profile(curso=curso, tema=tema, book_code=book_code, instance_type=instance_type)
+    if str(stage or "").strip().lower() in {"ocr", "raw_ocr", "faithful_ocr"}:
+        base = (
+            "PERFIL AUTOMATICO ACTIVADO: OCR LITERAL.\n"
+            "Reglas para esta etapa:\n"
+            "- Transcribe solo texto visible. No normalices a formato final.\n"
+            "- No agregues marcadores artificiales de imagen, figure_tag, claves, respuestas ni comentarios.\n"
+            "- No uses reglas del curso para completar datos ausentes.\n"
+            "- Si una fraccion visible aparece como fraccion vertical o apilada, transcribela con $\\dfrac{numerador}{denominador}$; si aparece lineal, conserva la forma lineal visible.\n"
+            "- No describas figuras ni extraigas letras, medidas o relaciones internas del dibujo; transcribe solo texto externo visible.\n"
+            "- Si algo no se lee con seguridad, marca [ilegible] en vez de inferir.\n"
+        )
+        if profile == "geometria":
+            return (
+                base
+                + "Reglas de geometria SOLO para notacion visible:\n"
+                "- Si el texto visible muestra angulo ABC o el simbolo de angulo con ABC, puedes transcribirlo como $\\sphericalangle ABC$.\n"
+                "- Si el texto visible muestra medida de angulo ABC, puedes transcribirlo como $m\\sphericalangle ABC$.\n"
+                "- Si el texto visible muestra triangulo ABC, puedes transcribirlo como $\\Delta ABC$.\n"
+                "- Si el texto visible muestra segmento AB como objeto, puedes transcribirlo como $\\overline{AB}$; si muestra longitud AB, conserva $AB$.\n"
+                "- Si el texto visible muestra arco AB, puedes transcribirlo como $\\overset{\\frown}{AB}$.\n"
+                "- Si el texto visible muestra grados, usa $^\\circ$.\n"
+                "- Estas reglas no autorizan completar datos: no agregues relaciones, medidas, letras o nombres que no esten impresos como texto visible.\n"
+                "- No describas el dibujo ni uses informacion interna del dibujo para completar o ampliar el enunciado; si solo hay dibujo sin texto externo, usa [CONT.] [sin texto OCR visible].\n"
+            )
+        return base
     if profile == "geometria":
         return (
             "PERFIL AUTOMATICO ACTIVADO: GEOMETRIA.\n"
@@ -228,31 +255,33 @@ def build_faithful_ocr_prompt(
     return (
         "Transcribe TODO el texto visible de la imagen en orden de lectura.\n"
         "Devuelve SOLO texto plano fiel; no JSON, no markdown, no explicaciones y no eco del prompt.\n"
+        "No agregues nada que no este escrito en la imagen como texto visible.\n"
+        "No agregues marcadores artificiales de imagen, figure_tag, 'con grafico', claves, respuestas ni comentarios.\n"
         "No omitas el texto del inicio aunque parezca continuacion del problema anterior.\n"
         "No estructures todavia en items, ni enunciado, ni opciones.\n"
         "No decidas que bloques sobran.\n"
         "Si un problema tiene numero visible, aunque este dentro de un circulo, sello o adorno, escribelo exactamente como '<numero.>' al inicio de una linea nueva.\n"
+        "Formato general por problema: <numero.> enunciado visible; luego alternativas visibles A), B), C), D), E); y solo si esta impresa una respuesta o clave, una linea Clave: <valor visible>.\n"
+        "Si no hay numero de problema visible, inicia el bloque con [CONT.] y transcribe lo visible como continuacion; no inventes numeracion.\n"
         "Si aparece encabezado tipo 'PROBLEMA N° 12', 'PROBLEMA Nº 12' o 'PREGUNTA N° 12', normalizalo como '<12.>' al inicio de linea.\n"
         "Si la imagen contiene varios problemas, cada problema debe empezar en su propia linea con su numero y debes dejar una linea en blanco entre problemas.\n"
         "Escribe cada alternativa en su propia linea y normalizala como A), B), C), D), E), aunque en la imagen aparezca a), b), c), d), e).\n"
         "Si la imagen empieza con alternativas sueltas A), B), C), D) o E), transcribelas primero y completas; son continuidad del problema anterior.\n"
+        "Si una clave o respuesta no esta impresa, no escribas Clave ni respuesta.\n"
         "Si varias alternativas estan en una misma linea, separalas en lineas individuales sin perder sus valores.\n"
         "Conserva el texto comun en espanol normal.\n"
         "Usa LaTeX SOLO para expresiones matematicas visibles: potencias, subindices, radicales, fracciones, parentesis matematicos, letras griegas y simbolos cuando realmente aparezcan.\n"
         "No conviertas todo el enunciado a LaTeX.\n"
         "No uses macros de presentacion como \\text, \\textit, \\textbf, \\left o \\right salvo que sean indispensables para una expresion visible.\n"
-        "Si una fraccion o division se ve lineal en la imagen, puedes conservarla lineal y no forzar \\frac.\n"
+        "Si una fraccion visible aparece como fraccion vertical o apilada, usa \\dfrac{numerador}{denominador}; si se ve lineal, conserva la forma lineal visible y no fuerces fraccion.\n"
         "Conserva formulas, signos, parentesis, exponentes, radicales, llaves y fracciones tal como se ven. No resuelvas, no simplifiques y no corrijas matematicamente.\n"
-        "Si hay un dibujo, grafico o diagrama matematico visible asociado al problema <n.>, escribe exactamente [[Imagen=img-n]] al final de su enunciado y antes de sus alternativas.\n"
-        "Cuenta como grafico: figura geometrica, triangulo, circunferencia, poligono, recta, angulo, arco, plano, funcion, relacion, conjunto, region sombreada o ilustracion matematica. Las tablas no cuentan como grafico.\n"
-        "No hace falta que el enunciado diga 'en el grafico' o 'en la figura'; si el dibujo esta visible y pertenece al problema, debes colocar la etiqueta de imagen.\n"
-        "Si el bloque es una continuacion sin numero propio y contiene una figura, escribe exactamente [[Imagen=img-continuacion]] en su posicion visual.\n"
-        "Si hay una figura visible pero no puedes asociarla con seguridad a un numero, escribe [[Imagen=img-pendiente]] en su posicion visual.\n"
-        "No describas ni reconstruyas la figura y no copies sus letras internas dentro del enunciado.\n"
+        "No describas ni reconstruyas figuras; el modelo de segmentacion de graficos las procesa aparte.\n"
+        "No copies letras, medidas ni relaciones internas de una figura dentro del enunciado; transcribe solo texto externo al dibujo.\n"
+        "Si el crop contiene solo un grafico/diagrama sin texto externo legible, escribe [CONT.] [sin texto OCR visible].\n"
+        "Si una palabra, numero, signo o formula no se lee con seguridad, escribe [ilegible] o conserva el fragmento dudoso sin completarlo.\n"
         "No escribas etiquetas artificiales como 'N.11', 'Problema 11' ni comentarios sobre el formato.\n"
         f"{RAW_OCR_REGRESSION_GUARDS}"
         f"{build_prompt_profile_instructions(curso=curso, tema=tema, book_code=book_code, instance_type=instance_type, stage='ocr')}"
-        "Excluye solo texto interno del dibujo o diagrama que no sea texto impreso externo del problema.\n"
         "Salida final: SOLO la transcripcion fiel completa."
     )
 
@@ -267,19 +296,23 @@ def build_faithful_ocr_prompt_compact(
     return (
         "Transcribe todo el texto visible en orden de lectura.\n"
         "Devuelve solo texto plano fiel.\n"
+        "No agregues nada que no este escrito en la imagen como texto visible.\n"
+        "No agregues marcadores artificiales de imagen, figure_tag, claves, respuestas ni comentarios.\n"
         "Conserva el texto comun en espanol normal y usa LaTeX solo para expresiones matematicas visibles.\n"
         "No conviertas todo el enunciado a LaTeX ni fuerces \\frac, \\left o \\right si no hacen falta.\n"
         "Si aparece un numero de problema visible, escribelo exactamente como '<numero.>' al inicio de una linea.\n"
+        "Formato general: <numero.> enunciado visible; alternativas visibles A)-E); y Clave: <valor visible> solo si la clave esta impresa.\n"
+        "Si no hay numero visible, inicia con [CONT.] y no inventes numeracion.\n"
         "Si hay varios problemas, separalos con una linea en blanco.\n"
         "Escribe cada alternativa en su propia linea como A), B), C), D), E).\n"
         "Si la imagen empieza con alternativas sueltas, transcribelas completas antes de cualquier encabezado nuevo.\n"
         "No inventes encabezados nuevos ni prefijos 93/108 cuando el visible es un numero pequeno.\n"
         "Si una linea solo continua el problema actual, no la conviertas en item nuevo.\n"
-        "Si hay un dibujo, grafico o diagrama matematico asociado al problema <n.>, escribe [[Imagen=img-n]] antes de sus alternativas. Cuenta figuras geometricas, triangulos, circunferencias, poligonos, rectas, angulos, arcos, funciones, relaciones, conjuntos, regiones sombreadas e ilustraciones matematicas; las tablas no cuentan. Si pertenece a una continuacion sin numero propio, escribe [[Imagen=img-continuacion]]. Si no puedes asociarlo, escribe [[Imagen=img-pendiente]].\n"
-        "No describas la figura ni copies sus letras internas dentro del enunciado.\n"
+        "No describas figuras ni copies letras, medidas o relaciones internas del dibujo; transcribe solo texto externo visible.\n"
+        "Si el crop contiene solo grafico sin texto externo legible, escribe [CONT.] [sin texto OCR visible].\n"
+        "Si algo no se lee con seguridad, marca [ilegible] en vez de inferir.\n"
         "No JSON, no markdown, no explicaciones, no eco del prompt.\n"
         "No inventes, no resuelvas, no simplifiques.\n"
-        f"{build_prompt_profile_instructions(curso=curso, tema=tema, book_code=book_code, instance_type=instance_type, stage='ocr')}"
         "Salida final: solo la transcripcion completa."
     )
 

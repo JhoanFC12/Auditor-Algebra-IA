@@ -56,6 +56,7 @@ from utils.project_layout import remap_legacy_drive_path
 
 from .models import InstancePipelineContext
 from .library_api import LibraryApiError, LibraryWebApi
+from .runtime_env import load_factory_runtime_env
 from .web_server import FactoryWebRuntime, WebApiError, _FilePayload
 
 
@@ -63,6 +64,7 @@ class LibraryWebRuntime:
     """Local web app for the book library and per-instance factory entrypoints."""
 
     def __init__(self, *, controller: Any | None = None, default_db_name: str = "") -> None:
+        load_factory_runtime_env()
         if controller is None and BookProgressController is None:
             raise RuntimeError(
                 "No se puede iniciar Biblioteca sin el controlador real: falta instalar psycopg2."
@@ -165,7 +167,7 @@ class LibraryWebRuntime:
         except (ValueError, json.JSONDecodeError) as exc:
             self._send_error(handler, exc, status=400, code="bad_request")
         except Exception as exc:
-            self._send_error(handler, exc, status=500, code="internal_error", include_traceback=True)
+            self._send_error(handler, exc, status=500, code="internal_error")
 
     def _dispatch_api(
         self,
@@ -474,9 +476,12 @@ class LibraryWebRuntime:
         code: str,
         include_traceback: bool = False,
     ) -> None:
+        message = str(exc).strip("'") or code
+        if code == "internal_error" and not include_traceback:
+            message = "Error interno de la Biblioteca. Revisa el log local para mas detalle."
         payload: dict[str, Any] = {
             "schema_version": "library_web_error_v1",
-            "error": str(exc).strip("'") or code,
+            "error": message,
             "code": code,
             "status": int(status),
         }

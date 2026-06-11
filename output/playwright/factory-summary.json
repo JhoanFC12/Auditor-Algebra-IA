@@ -1,0 +1,191 @@
+{
+  "clicked": true,
+  "popupOpened": true,
+  "pagesBefore": 1,
+  "pagesAfter": 2,
+  "summary": {
+    "title": "Biblioteca | Fabrica PDF",
+    "url": "http://127.0.0.1:59276/",
+    "bodyPreview": "FABRICA PDF -> STAGING\n\nacademia-nostradamus-semestral-2022-i / semana_n_01_-_segmentos_y_angulos_-_conjuntos_convexos\n\nACADEMIA NOSTRADAMUS SEMESTRAL 2022 - I.pdf | Flujo revisable, sin insercion directa en problemas\n\nStaging primero\nRevision humana\nBD bloqueada\nModo oscuro\nBiblioteca\nActualizar\nPROCESO\nDe PDF a staging\n1\nPaginas\n4 pagina(s), 4/4 revisada(s)\nElegir paginas del PDF\nListo\n2\nBoxes\nAhora\n32 box(es) detectados para revisar\nConfirmar cajas de problemas\nListo\n3\nStaging\n0/0 crop(s) disponibles\nRevisar crops trazables\nPendiente\n4\nOCR\n0/0 con OCR, 0 con segmentacion\nLeer texto y graficos\nPendiente\n5\nRevision\n0/0 borrador(es) de revision\nPreparar revision desde OCR\nPendiente\n6\nCandidato\nsin registros; 0 con error; no inserta directo en problemas\nVerificar bloqueo de BD\nPendiente\nRevisar boxes de problemas\n\nAjusta cada caja para que contenga un problema matematico completo.\n\nSeleccionar/mover\nNuevo box\nEliminar\nReordenar lectura\nSubir\nBajar\n-\n30%\n+\nAjustar\n100%\nauto\nuna_columna\ndos_columnas\nGuardar pagina revisada\nPaginas detectadas (4)\nPagina 1\n8 box(es) | revisada\nPagina 2\n9 box(es) | revisada\nPagina 3\n8 box(es) | revisada\nPagina 4\n7 box(es) | revisada\nBoxes de la pagina\nBox 1\n126,677 -> 1209,1240\nX\nBox 2\n111,1260 -> 1212,1849\nX\nBox 3\n123,1866 -> 1212,2472\nX\nBox 4\n124,2492 -> 1211,3306\nX\nBox 5\n1278,433 -> 2383,1059\nX\nBox 6\n1261,1078 -> 2382,1579\nX\nBox 7\n1272,1586 -> 2387,2474\nX\nBox 8\n1273,2476 -> 2393,3314\nX\nResumen\nPaginas\n4\nBoxes\n32\nProblemas\n0\nOCR\n0\nSegmentos\n0\nBorradores\n0\nListos\n0\nErrores\n0\nInspector\nPAGINA\n1\nBOXES\n8\nMODO\nSeleccionar y ajustar\nZOOM\n100%\nCAMBIOS SIN GUARDAR\nno\nFabrica lista.\nMaterializa crops solo desde boxes revisados.\nCrear staging",
+    "bodyLength": 1690,
+    "scrollHeight": 1518,
+    "viewport": {
+      "width": 1440,
+      "height": 920
+    },
+    "controls": [
+      {
+        "tag": "BUTTON",
+        "text": "Modo oscuro",
+        "cls": "ghost theme-toggle"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Biblioteca",
+        "cls": "ghost"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Actualizar",
+        "cls": "ghost"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Carpeta staging",
+        "cls": "ghost hidden"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "1\nPaginas\n4 pagina(s), 4/4 revisada(s)\nElegir paginas del PDF\nListo",
+        "cls": "timeline-step "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "2\nBoxes\nAhora\n32 box(es) detectados para revisar\nConfirmar cajas de problemas\nListo",
+        "cls": "timeline-step active"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "3\nStaging\n0/0 crop(s) disponibles\nRevisar crops trazables\nPendiente",
+        "cls": "timeline-step "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "4\nOCR\n0/0 con OCR, 0 con segmentacion\nLeer texto y graficos\nPendiente",
+        "cls": "timeline-step "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "5\nRevision\n0/0 borrador(es) de revision\nPreparar revision desde OCR\nPendiente",
+        "cls": "timeline-step "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "6\nCandidato\nsin registros; 0 con error; no inserta directo en problemas\nVerificar bloqueo de BD\nPend",
+        "cls": "timeline-step "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Seleccionar/mover",
+        "cls": "secondary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Nuevo box",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Eliminar",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Reordenar lectura",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Subir",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Bajar",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "-",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "+",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Ajustar",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "100%",
+        "cls": ""
+      },
+      {
+        "tag": "SELECT",
+        "text": "auto\nuna_columna\ndos_columnas",
+        "cls": "field"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Guardar pagina revisada",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "X",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "X",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "X",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "X",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "X",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "X",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "X",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "X",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Crear staging",
+        "cls": "primary"
+      }
+    ]
+  },
+  "consoleRows": [
+    {
+      "url": "http://127.0.0.1:65143/",
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 404 (Not Found)"
+    },
+    {
+      "url": "http://127.0.0.1:65143/",
+      "type": "info",
+      "text": "Images loaded lazily and replaced with placeholders. Load events are deferred. See https://go.microsoft.com/fwlink/?linkid=2048113"
+    },
+    {
+      "url": "http://127.0.0.1:59276/",
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 404 (Not Found)"
+    }
+  ]
+}

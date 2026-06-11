@@ -1,0 +1,27 @@
+{
+  "title": "Biblioteca | Fabrica PDF",
+  "url": "http://127.0.0.1:53571/",
+  "scrollHeight": 1810,
+  "clientHeight": 920,
+  "bodyText": "FABRICA PDF -> STAGING\n\naseuni-semianual-geometria / semana_1_tri_ngulos\n\nASEUNI SEMIANUAL - GEOMETRIA.pdf | Flujo revisable, sin insercion directa en problemas\n\nStaging primero\nRevision humana\nBD bloqueada\nModo oscuro\nBiblioteca\nActualizar\nPROCESO\nDe PDF a staging\n1\nPaginas\n6 pagina(s), 6/6 revisada(s)\nElegir paginas del PDF\nListo\n2\nBoxes\n47 box(es) detectados para revisar\nConfirmar cajas de problemas\nListo\n3\nStaging\n47/47 crop(s) disponibles\nRevisar crops trazables\nListo\n4\nOCR\nAhora\n47/47 con OCR, 47 con segmentacion\nLeer texto y graficos\nRequiere revision\n5\nRevision\n1/47 borrador(es) de revision\nPreparar revision desde OCR\nRequiere revision\n6\nCandidato\n0/47 listos; 0 con error; no inserta directo en problemas\nVerificar bloqueo de BD\nRequiere revision\nOCR y segmentacion grafica\n\nCompara la lectura estructurada con el crop antes de cargarla al formulario final.\n\nModo lote OCR crudo\nOCR ENTRENADO\nJhoan12/math-ocr-qwen2.5-vl-3b-geometry-rules-merged-v4\nhuggingface | env:HF_MODEL\nSEGMENTACION DE GRAFICOS\nmodels/problem_segmentation_yolov8n_golden_v1/weights/bes...\nlocal | env:YOLO_FIGURE_SEGMENT_MODEL\nENDPOINT OCR\nmath-ocr-geometry-rules-v4\n\nEndpoint OCR localizado.\n\nscaledToZero\nAct",
+  "workspace": {
+    "className": "workspace ocr-focus-mode",
+    "gridTemplateColumns": "210px 1188px"
+  },
+  "inspector": {
+    "x": 0,
+    "y": 0,
+    "width": 0,
+    "height": 0,
+    "display": "none",
+    "gridColumn": "auto",
+    "overflow": "auto"
+  },
+  "stage": {
+    "x": 238,
+    "y": 147.828125,
+    "width": 1188,
+    "height": 1586.59375
+  },
+  "overflowX": false
+}

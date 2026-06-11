@@ -1,0 +1,18 @@
+{
+  "scrollHeight": 920,
+  "clientHeight": 920,
+  "scrollWidth": 1440,
+  "clientWidth": 1440,
+  "activeStep": "1\nPaginas\nAhora\n6 pagina(s), 6/6 revisada(s)\nElegir paginas del PDF\nListo",
+  "workspace": {
+    "className": "workspace",
+    "gridTemplateColumns": "250px 834px 300px"
+  },
+  "stageHost": {
+    "width": 832,
+    "height": 694.171875,
+    "scrollHeight": 1077,
+    "overflow": "auto"
+  },
+  "overflowX": false
+}

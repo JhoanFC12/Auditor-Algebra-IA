@@ -11,6 +11,7 @@ from importlib.util import find_spec
 from typing import Any, Callable
 
 from .models import InstancePipelineContext
+from .runtime_env import load_factory_runtime_env
 from .web_server import FactoryWebRuntime
 
 
@@ -19,6 +20,7 @@ _ACTIVE_PROCESSES: list[subprocess.Popen] = []
 
 
 def open_factory_web_app(parent: Any = None, *, context: InstancePipelineContext) -> str:
+    load_factory_runtime_env()
     runtime = FactoryWebRuntime(context)
     url = runtime.start()
     _ACTIVE_RUNTIMES.append(runtime)
@@ -45,6 +47,7 @@ def open_biblioteca_web_app(
     running as the stable fallback. A future backend only needs to expose one of
     the supported runtime class names with a start() method that returns a URL.
     """
+    load_factory_runtime_env()
     runtime_cls = _resolve_biblioteca_runtime_class()
     if runtime_cls is None:
         return _open_biblioteca_legacy(legacy_launcher)

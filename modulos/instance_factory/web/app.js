@@ -3,7 +3,7 @@ const STAGES = [
   { id: "boxes", title: "Boxes", action: "Confirmar cajas de problemas" },
   { id: "crops", title: "Staging", action: "Revisar crops trazables" },
   { id: "ocr", title: "OCR", action: "Leer texto y graficos" },
-  { id: "review", title: "Normalizacion", action: "Normalizar y corregir texto" },
+  { id: "review", title: "Revision", action: "Preparar revision desde OCR" },
   { id: "candidate", title: "Candidato", action: "Verificar bloqueo de BD" },
 ];
 
@@ -45,6 +45,11 @@ const state = {
   figureSegmentDirty: false,
   figureDrag: null,
   reviewDraft: null,
+  batchMode: "",
+  batchText: "",
+  batchResults: [],
+  ocrEndpoint: null,
+  ocrEndpointLoading: false,
   taskProgress: null,
 };
 
@@ -698,7 +703,7 @@ function bookCoverHtml(book, variant = "") {
   const label = bookCoverLabel(book);
   return `
     <span class="book-cover ${variant ? `book-cover-${variant}` : ""} ${url ? "has-image" : ""}">
-      ${url ? `<img src="${escapeAttr(url)}" alt="" loading="lazy" />` : `<span>${escapeHtml(label)}</span>`}
+      ${url ? `<img src="${escapeAttr(url)}" alt="" loading="lazy" decoding="async" />` : `<span>${escapeHtml(label)}</span>`}
     </span>
   `;
 }
@@ -1031,6 +1036,7 @@ function renderTimeline() {
   timeline.querySelectorAll("[data-stage]").forEach((btn) => {
     btn.addEventListener("click", () => {
       state.stage = btn.dataset.stage;
+      closeBatchMode({ rerender: false });
       persistFactoryUiState();
       renderStage();
       renderTimeline();
@@ -1046,7 +1052,7 @@ function renderMetrics() {
     ["records_total", "Problemas"],
     ["ocr_done", "OCR"],
     ["segments_done", "Segmentos"],
-    ["normalized_done", "Normalizados"],
+    ["normalized_done", "Borradores"],
     ["ready", "Listos"],
     ["errors", "Errores"],
   ];
@@ -1110,7 +1116,144 @@ function compactModelName(value) {
   return compactText(parts.slice(-4).join("/") || raw, 58);
 }
 
+function endpointStatusLabel(status) {
+  const raw = String(status || "consultando").trim();
+  const normalized = raw.toLowerCase();
+  return {
+    running: "running",
+    scaledtozero: "scaledToZero",
+    paused: "paused",
+    pending: "starting",
+    initializing: "starting",
+    updating: "starting",
+    starting: "starting",
+    error: "error",
+    no_configurado: "no configurado",
+    unknown: "desconocido",
+  }[normalized] || raw;
+}
+
+function endpointStatusClass(status) {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (normalized === "running") return "ready";
+  if (normalized === "scaledtozero" || normalized === "paused") return "idle";
+  if (["pending", "initializing", "updating", "starting"].includes(normalized)) return "starting";
+  if (normalized === "error") return "error";
+  return "unknown";
+}
+
+function renderOcrEndpointCard() {
+  const endpoint = state.ocrEndpoint || {};
+  const statusValue = state.ocrEndpointLoading ? "starting" : (endpoint.status || "unknown");
+  const status = endpointStatusLabel(statusValue);
+  const configured = endpoint.configured !== false;
+  const message = state.ocrEndpointLoading
+    ? "Consultando endpoint OCR..."
+    : (endpoint.message || (configured ? "Endpoint OCR dedicado para el modelo entrenado." : "Configura HF_TRAINED_OCR_ENDPOINT_NAME o HF_TRAINED_OCR_BASE_URL."));
+  return `
+    <section id="ocrEndpointCard" class="panel endpoint-card">
+      <div>
+        <span class="section-label">Endpoint OCR</span>
+        <strong>${escapeHtml(endpoint.name || "OCR entrenado")}</strong>
+        <p class="muted">${escapeHtml(message)}</p>
+      </div>
+      <div class="endpoint-actions">
+        <span class="endpoint-pill endpoint-${endpointStatusClass(statusValue)}">${escapeHtml(status)}</span>
+        <button id="refreshOcrEndpoint" type="button">Actualizar estado</button>
+        <button id="resumeOcrEndpoint" type="button" ${configured ? "" : "disabled"}>Encender OCR</button>
+        <button id="scaleOcrEndpoint" type="button" ${configured ? "" : "disabled"}>Apagar OCR</button>
+      </div>
+    </section>
+  `;
+}
+
+function updateOcrEndpointCard() {
+  const host = $("ocrEndpointCard");
+  if (!host) return;
+  host.outerHTML = renderOcrEndpointCard();
+  bindOcrEndpointActions();
+}
+
+function bindOcrEndpointActions() {
+  const refreshBtn = $("refreshOcrEndpoint");
+  if (refreshBtn) refreshBtn.onclick = () => refreshOcrEndpointStatus();
+  const resumeBtn = $("resumeOcrEndpoint");
+  if (resumeBtn) resumeBtn.onclick = () => resumeOcrEndpoint();
+  const scaleBtn = $("scaleOcrEndpoint");
+  if (scaleBtn) scaleBtn.onclick = () => scaleOcrEndpointToZero();
+}
+
+async function refreshOcrEndpointStatus({ silent = false } = {}) {
+  state.ocrEndpointLoading = true;
+  updateOcrEndpointCard();
+  try {
+    state.ocrEndpoint = await api("/api/endpoint/ocr/status");
+    if (!silent) setStatus(state.ocrEndpoint.message || `Endpoint OCR: ${endpointStatusLabel(state.ocrEndpoint.status)}`);
+    return state.ocrEndpoint;
+  } catch (err) {
+    state.ocrEndpoint = { status: "error", configured: true, message: err.message };
+    if (!silent) setStatus(`Error endpoint OCR: ${err.message}`);
+    return state.ocrEndpoint;
+  } finally {
+    state.ocrEndpointLoading = false;
+    updateOcrEndpointCard();
+  }
+}
+
+async function resumeOcrEndpoint({ silent = false } = {}) {
+  state.ocrEndpointLoading = true;
+  updateOcrEndpointCard();
+  if (!silent) setBusy("Despertando endpoint OCR... puede tomar unos minutos.");
+  try {
+    state.ocrEndpoint = await api("/api/endpoint/ocr/resume", {
+      method: "POST",
+      body: { wait: true, timeout_s: 420, poll_s: 8 },
+    });
+    if (!silent) setStatus(state.ocrEndpoint.message || "Endpoint OCR encendido.");
+    return state.ocrEndpoint;
+  } catch (err) {
+    state.ocrEndpoint = { status: "error", configured: true, message: err.message };
+    if (!silent) setStatus(`Error endpoint OCR: ${err.message}`);
+    throw err;
+  } finally {
+    state.ocrEndpointLoading = false;
+    updateOcrEndpointCard();
+  }
+}
+
+async function scaleOcrEndpointToZero({ silent = false } = {}) {
+  state.ocrEndpointLoading = true;
+  updateOcrEndpointCard();
+  try {
+    state.ocrEndpoint = await api("/api/endpoint/ocr/scale-to-zero", { method: "POST", body: {} });
+    if (!silent) setStatus(state.ocrEndpoint.message || "Endpoint OCR apagado para ahorro.");
+    return state.ocrEndpoint;
+  } catch (err) {
+    state.ocrEndpoint = { status: "error", configured: true, message: err.message };
+    if (!silent) setStatus(`Error apagando endpoint OCR: ${err.message}`);
+    throw err;
+  } finally {
+    state.ocrEndpointLoading = false;
+    updateOcrEndpointCard();
+  }
+}
+
+async function prepareOcrEndpointForRun() {
+  const status = await refreshOcrEndpointStatus({ silent: true });
+  if (!status.configured) {
+    throw new Error(status.message || "Endpoint OCR no configurado. Define HF_TRAINED_OCR_ENDPOINT_NAME o HF_TRAINED_OCR_BASE_URL.");
+  }
+  setStatus("Despertando endpoint OCR... puede tomar unos minutos.");
+  return resumeOcrEndpoint({ silent: true });
+}
+
 function renderStage() {
+  if (state.batchMode) {
+    renderBatchEditor();
+    syncWorkspaceMode();
+    syncPrimaryAction();
+    return;
+  }
   const renderers = {
     pages: renderPagesStage,
     boxes: renderBoxesStage,
@@ -1127,7 +1270,8 @@ function renderStage() {
 function syncWorkspaceMode() {
   const workspace = $("workspace");
   if (!workspace) return;
-  workspace.classList.toggle("ocr-focus-mode", state.view === "factory" && state.stage === "ocr");
+  workspace.classList.toggle("ocr-focus-mode", state.view === "factory" && state.stage === "ocr" && !state.batchMode);
+  workspace.classList.toggle("batch-focus-mode", state.view === "factory" && Boolean(state.batchMode));
 }
 
 function renderPagesStage() {
@@ -1920,15 +2064,17 @@ function recordCardHtml(record) {
   const stale = recordSourceStale(record);
   const invalidated = recordDownstreamInvalidated(record);
   const canQueue = recordCanRunOcr(record);
+  const errorComment = recordErrorComment(record);
   return `
-    <div class="crop-card ${record.record_id === state.selectedRecordId ? "active" : ""} ${queued ? "queued" : ""} ${stale ? "stale" : ""}" data-record="${record.record_id}">
+    <div class="crop-card ${record.record_id === state.selectedRecordId ? "active" : ""} ${queued ? "queued" : ""} ${stale ? "stale" : ""} ${errorComment ? "has-error" : ""}" data-record="${record.record_id}">
       <label class="queue-check" title="Incluir en cola OCR">
         <input type="checkbox" data-queue-record="${escapeAttr(record.record_id)}" ${queued ? "checked" : ""} ${queueLocked || !canQueue ? "disabled" : ""} />
         <span>${queued ? "En cola" : (stale ? "Regenerar" : "Cola")}</span>
       </label>
-      ${record.crop_url ? `<img src="${record.crop_url}" alt="Crop ${escapeHtml(record.record_id)}" />` : ""}
+      ${record.crop_url ? `<img src="${record.crop_url}" alt="Crop ${escapeHtml(record.record_id)}" loading="lazy" decoding="async" />` : ""}
       <strong>${escapeHtml(record.normalized?.numero || record.crop_name || record.record_id)}</strong>
       <div class="muted">Pag. ${escapeHtml(source.page_number || "-")} | ${escapeHtml(record.status_label || record.status || "pendiente")}</div>
+      ${errorComment ? `<p class="meta-error-comment"><strong>Error:</strong> ${escapeHtml(errorComment)}</p>` : ""}
       ${stale ? `<div class="status-pill status-pendiente">Regenerar crop</div>` : (invalidated ? `<div class="status-pill status-requiere_revision">OCR pendiente por box</div>` : "")}
       <div class="crop-meta">${box.length >= 4 ? escapeHtml(box.slice(0, 4).join(", ")) : "sin bbox"}</div>
     </div>
@@ -1938,11 +2084,13 @@ function recordCardHtml(record) {
 function renderCropPreview(record) {
   const source = record.source || {};
   const box = source.bbox_px || [];
+  const errorComment = recordErrorComment(record);
   return `
     <h3>Crop seleccionado</h3>
     ${recordSourceStale(record) ? `<div class="library-notice">Este crop viene de un box modificado. Regenera staging antes de correr OCR.</div>` : ""}
     ${!recordSourceStale(record) && recordDownstreamInvalidated(record) ? `<div class="library-notice">El crop ya fue regenerado; vuelve a ejecutar OCR/segmentacion para actualizar la cadena.</div>` : ""}
-    ${record.crop_url ? `<img class="preview-img" src="${record.crop_url}" alt="Crop seleccionado" />` : `<p class="muted">Imagen no encontrada.</p>`}
+    ${errorComment ? `<div class="library-notice error-notice"><strong>Error:</strong> ${escapeHtml(errorComment)}</div>` : ""}
+    ${record.crop_url ? `<img class="preview-img" src="${record.crop_url}" alt="Crop seleccionado" loading="lazy" decoding="async" />` : `<p class="muted">Imagen no encontrada.</p>`}
     <div class="metadata-grid">
       <span class="muted">Registro</span><strong>${escapeHtml(record.record_id)}</strong>
       <span class="muted">Pagina</span><strong>${escapeHtml(source.page_number || "-")}</strong>
@@ -1954,7 +2102,7 @@ function renderCropPreview(record) {
 
 function cropInspectorData(record, total) {
   const source = record.source || {};
-  return {
+  const rows = {
     "Problemas en staging": total,
     "Registro": record.record_id,
     "Pagina": source.page_number || "-",
@@ -1962,6 +2110,9 @@ function cropInspectorData(record, total) {
     "Crop": record.crop_path || "-",
     "Cadena": recordSourceStale(record) ? "Regenerar crop" : (recordDownstreamInvalidated(record) ? "OCR pendiente por cambio de box" : "Activa"),
   };
+  const errorComment = recordErrorComment(record);
+  if (errorComment) rows["Error"] = errorComment;
+  return rows;
 }
 
 function syncOcrQueueSelection(records = state.snapshot.records || []) {
@@ -2090,12 +2241,22 @@ function renderOcrStage() {
         <h2>OCR y segmentacion grafica</h2>
         <p class="muted">Compara la lectura estructurada con el crop antes de cargarla al formulario final.</p>
       </div>
+      <div class="stage-actions">
+        <button id="openRawOcrBatch" type="button">Modo lote OCR crudo</button>
+      </div>
     </div>
     ${renderModelStrip(["ocr", "figure_segmenter"])}
+    ${renderOcrEndpointCard()}
     ${renderTaskProgress("ocr")}
     ${record ? renderOcrRecord(record) : `<div class="panel muted">Selecciona un crop de staging.</div>`}
   `;
   bindRecordCards();
+  const rawBatchBtn = $("openRawOcrBatch");
+  if (rawBatchBtn) rawBatchBtn.onclick = () => openBatchMode("raw_ocr");
+  bindOcrEndpointActions();
+  if (!state.ocrEndpoint && !state.ocrEndpointLoading) {
+    refreshOcrEndpointStatus({ silent: true });
+  }
   bindRecordNavigation();
   bindOcrNavigation(record);
   bindFigureSegmentEditor(record);
@@ -2192,7 +2353,7 @@ function renderOcrRecord(record) {
           <div class="thumb-grid compact">
             ${segments.length ? segments.map((segment, idx) => `
               <div class="segment-card ${idx === state.selectedFigureSegment ? "active" : ""}" data-figure-segment="${idx}">
-                ${segment.image_url ? `<img src="${segment.image_url}" alt="Segmento grafico ${idx + 1}" />` : ""}
+                ${segment.image_url ? `<img src="${segment.image_url}" alt="Segmento grafico ${idx + 1}" loading="lazy" decoding="async" />` : ""}
                 <div class="muted">${escapeHtml(segment.image_name || `segmento_${idx + 1}`)}</div>
               </div>
             `).join("") : `<p class="muted">Sin segmentos graficos detectados.</p>`}
@@ -2548,16 +2709,334 @@ async function saveRawOcr(record) {
     const updated = findRecordById(record.record_id, state.snapshot?.records || []);
     if (updated) {
       updated.raw_ocr = raw;
-      updated.structured_ocr = {};
-      updated.normalized = {};
     }
     state.stage = "ocr";
     state.selectedRecordId = record.record_id;
     state.reviewDraft = null;
     persistFactoryUiState();
     render();
-    return "OCR crudo guardado en pantalla y en staging. El paso 5 normalizara desde este texto.";
-  }, "OCR crudo guardado. El paso 5 normalizara desde este texto.");
+    return "OCR crudo guardado en pantalla y en staging. El paso 5 preparara un borrador revisable desde este texto.";
+  }, "OCR crudo guardado. El paso 5 preparara un borrador revisable desde este texto.");
+}
+
+function batchModeConfig(mode = state.batchMode) {
+  if (mode === "normalization") {
+    return {
+      mode: "normalization",
+      title: "Modo lote revision",
+      description: "Edita borradores de revision desde OCR. Estas correcciones serviran para entrenar el normalizador futuro.",
+      action: "Guardar validos",
+      empty: "No hay registros de staging con OCR para revisar.",
+      saving: "Guardando revision por lote...",
+      done: "Revision por lote terminada.",
+    };
+  }
+  return {
+    mode: "raw_ocr",
+    title: "Modo lote OCR crudo",
+    description: "Edita el OCR crudo de todos los crops. Al guardar, cada bloque regenera su lectura LaTeX.",
+    action: "Guardar validos",
+    empty: "No hay registros de staging para editar OCR crudo.",
+    saving: "Guardando OCR crudo por lote...",
+    done: "OCR crudo por lote terminado.",
+  };
+}
+
+function openBatchMode(mode) {
+  state.batchMode = mode;
+  state.batchText = buildBatchText(mode);
+  state.batchResults = [];
+  state.taskProgress = null;
+  render();
+  setStatus(batchModeConfig(mode).title);
+}
+
+function closeBatchMode({ rerender = true } = {}) {
+  state.batchMode = "";
+  state.batchText = "";
+  state.batchResults = [];
+  state.taskProgress = null;
+  if (rerender) render();
+}
+
+function renderBatchEditor() {
+  const config = batchModeConfig();
+  const records = state.snapshot?.records || [];
+  if (!state.batchText && !state.batchResults.length && records.length) {
+    state.batchText = buildBatchText(config.mode);
+  }
+  $("stageHost").innerHTML = `
+    <div class="stage-header">
+      <div>
+        <h2>${escapeHtml(config.title)}</h2>
+        <p class="muted">${escapeHtml(config.description)}</p>
+      </div>
+      <div class="stage-actions">
+        <button id="closeBatchMode" type="button">Volver</button>
+      </div>
+    </div>
+    ${renderTaskProgress("batch")}
+    <section class="panel batch-editor-panel">
+      <div class="panel-heading-row">
+        <div>
+          <h3>Editor por lote</h3>
+          <p class="muted">${records.length ? `${records.length} imagen(es) en el lote. El guardado usa el orden actual de staging.` : config.empty}</p>
+        </div>
+        <div class="batch-actions">
+          <button id="copyBatchText" type="button" ${records.length ? "" : "disabled"}>Copiar lote</button>
+          <button id="resetBatchText" type="button" ${records.length ? "" : "disabled"}>Regenerar desde staging</button>
+          <button id="saveBatchText" class="primary" type="button" ${records.length ? "" : "disabled"}>${escapeHtml(config.action)}</button>
+        </div>
+      </div>
+      <textarea id="batchEditor" class="batch-editor" spellcheck="false" placeholder="----imagen.png-----&#10;<01.> Texto...">${escapeHtml(state.batchText || "")}</textarea>
+      <div id="batchProgressInline" class="batch-progress-inline muted">${records.length ? `0 de ${records.length}` : "Sin registros."}</div>
+      ${renderBatchResults()}
+    </section>
+  `;
+  bindBatchEditorActions(config.mode);
+  setInspector({
+    "Modo": config.title,
+    "Registros": records.length,
+    "Mapeo": "orden de staging",
+  });
+  syncWorkspaceMode();
+  syncPrimaryAction();
+}
+
+function bindBatchEditorActions(mode) {
+  const editor = $("batchEditor");
+  if (editor) {
+    editor.oninput = () => {
+      state.batchText = editor.value;
+    };
+  }
+  const closeBtn = $("closeBatchMode");
+  if (closeBtn) closeBtn.onclick = () => closeBatchMode();
+  const copyBtn = $("copyBatchText");
+  if (copyBtn) copyBtn.onclick = copyBatchText;
+  const resetBtn = $("resetBatchText");
+  if (resetBtn) resetBtn.onclick = () => {
+    state.batchText = buildBatchText(mode);
+    state.batchResults = [];
+    renderBatchEditor();
+    setStatus("Lote regenerado desde staging.");
+  };
+  const saveBtn = $("saveBatchText");
+  if (saveBtn) saveBtn.onclick = () => saveBatchEditor(mode);
+}
+
+async function copyBatchText() {
+  const text = $("batchEditor")?.value || state.batchText || "";
+  if (!text.trim()) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    setStatus("Lote copiado.");
+  } catch (_) {
+    setStatus("No se pudo copiar automaticamente el lote.");
+  }
+}
+
+function buildBatchText(mode) {
+  const records = state.snapshot?.records || [];
+  return records.map((record, index) => {
+    const body = mode === "normalization"
+      ? reviewTextFromNormalized(normalizedForBatchRecord(record), record)
+      : String(record.raw_ocr || "").trim();
+    return `----${batchRecordTitle(record, index)}-----\n${body}`.trimEnd();
+  }).join("\n\n");
+}
+
+function normalizedForBatchRecord(record) {
+  if (hasObjectData(record?.normalized)) return record.normalized;
+  const firstItem = selectedOcrPayload(record, 0);
+  if (hasObjectData(firstItem)) return normalizedFromOcr(record, firstItem);
+  return {
+    numero: "",
+    curso: "",
+    tema: "",
+    enunciado_latex: "",
+    alternativas: { A: "", B: "", C: "", D: "", E: "" },
+    respuesta_correcta: "",
+    tiene_grafico: Boolean((record?.figure_segments_web || []).length),
+    figure_tag: "",
+  };
+}
+
+function batchRecordTitle(record, index) {
+  const name = String(record?.crop_name || "").trim()
+    || String(record?.crop_path || "").split(/[\\/]/).filter(Boolean).pop()
+    || String(record?.record_id || "").trim()
+    || `imagen_${index + 1}`;
+  return name.replace(/\s+/g, " ").trim();
+}
+
+function parseBatchBlocks(text) {
+  const lines = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  const blocks = [];
+  const preamble = [];
+  let current = null;
+  lines.forEach((line) => {
+    const match = line.match(/^-{4,}\s*(.*?)\s*-{4,}\s*$/);
+    if (match) {
+      if (current) blocks.push({ ...current, body: current.lines.join("\n").trim() });
+      current = { title: match[1].trim(), lines: [] };
+      return;
+    }
+    if (current) current.lines.push(line);
+    else if (line.trim()) preamble.push(line);
+  });
+  if (current) blocks.push({ ...current, body: current.lines.join("\n").trim() });
+  return { blocks, preamble: preamble.join("\n").trim() };
+}
+
+function renderBatchResults() {
+  const results = state.batchResults || [];
+  if (!results.length) {
+    return `<div id="batchResults" class="batch-results muted">Sin resultados todavia.</div>`;
+  }
+  return `
+    <div id="batchResults" class="batch-results">
+      ${results.map((row) => `
+        <div class="batch-result ${escapeAttr(row.status || "info")}">
+          <strong>${escapeHtml(row.title || row.record_id || "-")}</strong>
+          <span>${escapeHtml(row.message || "")}</span>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function updateBatchResultsInline() {
+  const host = $("batchResults");
+  if (!host) return;
+  host.outerHTML = renderBatchResults();
+}
+
+function updateBatchProgressInline({ current, total, ok, failed, skipped, active }) {
+  const host = $("batchProgressInline");
+  if (!host) return;
+  const parts = [`${current} de ${total}`, `${ok} guardado(s)`];
+  if (skipped) parts.push(`${skipped} omitido(s)`);
+  if (failed) parts.push(`${failed} error(es)`);
+  if (active) parts.push(active);
+  host.textContent = parts.join(" | ");
+}
+
+function replaceRecordInSnapshot(updated) {
+  if (!updated?.record_id || !state.snapshot?.records) return;
+  const records = state.snapshot.records || [];
+  const index = records.findIndex((record) => String(record.record_id || "") === String(updated.record_id || ""));
+  if (index >= 0) records[index] = updated;
+}
+
+async function saveBatchEditor(mode = state.batchMode) {
+  const records = state.snapshot?.records || [];
+  if (!records.length) return setStatus("No hay registros de staging para guardar.");
+  const editor = $("batchEditor");
+  state.batchText = editor?.value || state.batchText || "";
+  const parsed = parseBatchBlocks(state.batchText);
+  const total = Math.max(records.length, parsed.blocks.length);
+  const results = [];
+  let ok = 0;
+  let failed = 0;
+  let skipped = 0;
+  const saveBtn = $("saveBatchText");
+  if (saveBtn) saveBtn.disabled = true;
+  setBusy(batchModeConfig(mode).saving);
+  if (parsed.preamble) {
+    failed += 1;
+    results.push({ status: "error", title: "Texto sin separador", message: "Hay texto antes del primer separador; no se guardo." });
+    state.batchResults = results.slice();
+    updateBatchResultsInline();
+  }
+  for (let index = 0; index < total; index += 1) {
+    const record = records[index];
+    const block = parsed.blocks[index];
+    const title = record ? batchRecordTitle(record, index) : (block?.title || `Bloque extra ${index + 1}`);
+    updateBatchProgressInline({ current: index, total, ok, failed, skipped, active: title });
+    if (!record) {
+      failed += 1;
+      results.push({ status: "error", title, message: "Bloque sobrante: no existe un registro de staging en esa posicion." });
+      state.batchResults = results.slice();
+      updateBatchResultsInline();
+      continue;
+    }
+    if (!block) {
+      failed += 1;
+      results.push({ status: "error", title, message: "Falta el bloque para esta imagen." });
+      state.batchResults = results.slice();
+      updateBatchResultsInline();
+      continue;
+    }
+    if (recordSourceStale(record) || recordDownstreamInvalidated(record)) {
+      skipped += 1;
+      results.push({ status: "skipped", title, message: "Regenera staging antes de editar este registro." });
+      state.batchResults = results.slice();
+      updateBatchResultsInline();
+      continue;
+    }
+    if (!String(block.body || "").trim()) {
+      skipped += 1;
+      results.push({ status: "skipped", title, message: "Bloque vacio; no se guardo para evitar borrar el registro." });
+      state.batchResults = results.slice();
+      updateBatchResultsInline();
+      continue;
+    }
+    try {
+      const updated = mode === "normalization"
+        ? await saveBatchNormalizationRecord(record, block.body)
+        : await saveBatchRawOcrRecord(record, block.body);
+      replaceRecordInSnapshot(updated);
+      ok += 1;
+      results.push({ status: "ok", title, message: "Guardado." });
+    } catch (err) {
+      failed += 1;
+      results.push({ status: "error", title, message: err.message || String(err) });
+    }
+    state.batchResults = results.slice();
+    updateBatchResultsInline();
+    updateBatchProgressInline({ current: index + 1, total, ok, failed, skipped, active: title });
+  }
+  try {
+    applyFactorySnapshot(await loadFactorySnapshot());
+  } catch (err) {
+    failed += 1;
+    results.push({ status: "error", title: "Actualizacion final", message: err.message || String(err) });
+  }
+  state.batchResults = results;
+  state.taskProgress = null;
+  renderBatchEditor();
+  setStatus(`Lote terminado: ${ok} guardado(s), ${skipped} omitido(s), ${failed} error(es).`);
+}
+
+async function saveBatchRawOcrRecord(record, raw) {
+  const payload = await api("/api/ocr/raw", {
+    method: "POST",
+    body: {
+      record_id: record.record_id,
+      raw_ocr: raw,
+      compact: true,
+    },
+  });
+  return payload.record;
+}
+
+async function saveBatchNormalizationRecord(record, text) {
+  const parsed = parsePlainReviewText(text, normalizedForBatchRecord(record), record);
+  const payload = await api("/api/review/save", {
+    method: "POST",
+    body: {
+      record_id: record.record_id,
+      normalized: {
+        ...parsed.normalized,
+        status: parsed.markReady ? "listo" : "requiere_revision",
+      },
+      notes: parsed.notes,
+      mark_ready: parsed.markReady,
+      compact: true,
+    },
+  });
+  return payload.record;
 }
 
 function renderTechnicalDetails(title, payload, mode = "json") {
@@ -2574,18 +3053,26 @@ function renderReviewStage() {
   const record = selectedRecord();
   const normalized = state.reviewDraft || (record ? record.normalized || {} : {});
   const reviewText = reviewTextFromNormalized(normalized, record);
+  const errorComment = recordErrorComment(record);
   $("stageHost").innerHTML = `
     <div class="stage-header">
       <div>
-        <h2>Normalizacion</h2>
-        <p class="muted">Edita el texto plano normalizado, valida el render LaTeX y guarda la normalizacion como entrenamiento futuro.</p>
+        <h2>Revision y normalizacion pendiente</h2>
+        <p class="muted">Usa el OCR estructurado como borrador editable. El normalizador IA definitivo queda pendiente de entrenamiento.</p>
+      </div>
+      <div class="stage-actions">
+        <button id="openReviewBatch" type="button">Modo lote revision</button>
       </div>
     </div>
     ${renderTaskProgress("normalize")}
     ${record ? `
+      <div class="library-notice">
+        Esta etapa todavia es experimental: guarda correcciones como datos de entrenamiento, no como salida final automatica.
+      </div>
+      ${errorComment ? `<div class="library-notice error-notice"><strong>Error:</strong> ${escapeHtml(errorComment)}</div>` : ""}
       <div class="record-layout">
         <div>
-          ${record.crop_url ? `<img class="preview-img" src="${record.crop_url}" alt="Problema" />` : ""}
+          ${record.crop_url ? `<img class="preview-img" src="${record.crop_url}" alt="Problema" loading="lazy" decoding="async" />` : ""}
           <div class="panel" style="margin-top:12px">
             <h3>Render LaTeX</h3>
             <div id="latexPreview" class="latex-preview"></div>
@@ -2603,15 +3090,17 @@ function renderReviewStage() {
         <form id="reviewForm" class="panel plain-review-form">
           <div class="panel-heading-row">
             <h3>Editor texto plano</h3>
-            <span class="nav-counter">LaTeX editable</span>
+            <span class="nav-counter">borrador de entrenamiento</span>
           </div>
           <textarea id="plainReviewText" class="plain-review-text" spellcheck="false">${escapeHtml(reviewText)}</textarea>
-          <button type="submit" class="primary wide-action">Guardar normalizacion en staging</button>
+          <button type="submit" class="primary wide-action">Guardar revision en staging</button>
         </form>
       </div>
     ` : `<div class="panel muted">Selecciona un problema.</div>`}
   `;
   if (record) {
+    const reviewBatchBtn = $("openReviewBatch");
+    if (reviewBatchBtn) reviewBatchBtn.onclick = () => openBatchMode("normalization");
     $("reviewForm").onsubmit = saveReviewForm;
     $("reviewForm").addEventListener("input", updateLatexPreview);
     $("reviewForm").addEventListener("change", updateLatexPreview);
@@ -2621,6 +3110,7 @@ function renderReviewStage() {
     "Registro": record.record_id,
     "Correcciones guardadas": (record.training_examples || []).length,
     "Estado": record.status_label || record.status || "-",
+    ...(errorComment ? {"Error": errorComment} : {}),
   } : "");
 }
 
@@ -2681,7 +3171,7 @@ async function saveReviewForm(event) {
   const record = selectedRecord();
   if (!record) return;
   const payload = collectReviewPayload();
-  await runAction("Guardando normalizacion...", async () => {
+  await runAction("Guardando revision...", async () => {
     const result = await api("/api/review/save", {
       method: "POST",
       body: {
@@ -2695,7 +3185,7 @@ async function saveReviewForm(event) {
     state.reviewDraft = null;
     persistFactoryUiState();
     render();
-  }, "Normalizacion guardada en staging.");
+  }, "Revision guardada en staging como entrenamiento futuro.");
 }
 
 function collectReviewForm() {
@@ -2893,6 +3383,14 @@ function blockingIssuesHtml(issues) {
 
 function syncPrimaryAction() {
   const btn = $("primaryAction");
+  if (state.batchMode) {
+    const config = batchModeConfig();
+    btn.textContent = config.action;
+    btn.onclick = () => saveBatchEditor(state.batchMode);
+    btn.disabled = isTaskRunning();
+    $("actionHint").textContent = "Guarda el lote de uno en uno y reporta errores por imagen.";
+    return;
+  }
   const queuedCount = state.stage === "crops" ? queuedOcrRecordIds().length : 0;
   const actions = {
     pages: ["Detectar con modelo", "Usa el detector entrenado sobre las paginas elegidas.", detectSelectedPages],
@@ -2902,8 +3400,8 @@ function syncPrimaryAction() {
       queuedCount ? "Procesa las imagenes seleccionadas con OCR y segmentacion grafica." : "Usa OCR entrenado y segmentador grafico en el crop seleccionado.",
       () => runOcr(),
     ],
-    ocr: ["Normalizar", "Convierte el OCR crudo revisado en campos editables.", normalizeRecords],
-    review: ["Guardar normalizacion", "Persiste correcciones en staging y entrenamiento.", () => $("reviewForm")?.requestSubmit()],
+    ocr: ["Preparar revision", "Crea borradores editables desde el OCR estructurado; no ejecuta normalizador IA final.", normalizeRecords],
+    review: ["Guardar revision", "Persiste correcciones en staging como entrenamiento futuro.", () => $("reviewForm")?.requestSubmit()],
     candidate: ["Actualizar candidato", "Recalcula bloqueos sin escribir en problemas.", renderCandidateStage],
   };
   const [label, hint, handler] = actions[state.stage] || actions.pages;
@@ -2990,6 +3488,11 @@ async function runOcr(recordIds = null) {
   render();
   setBusy(`Ejecutando modelos 0 de ${total}...`);
   try {
+    try {
+      await prepareOcrEndpointForRun();
+    } catch (err) {
+      throw new Error(`No se pudo preparar el endpoint OCR: ${err.message}`);
+    }
     for (let index = 0; index < pending.length; index += 1) {
       const id = pending[index];
       state.taskProgress = {
@@ -3036,10 +3539,17 @@ async function runOcr(recordIds = null) {
     const doneText = failures.length
       ? `Cola terminada con ${failures.length} error(es).`
       : `OCR y segmentacion guardados para ${total} imagen(es).`;
+    let endpointText = "";
+    try {
+      const scaled = await scaleOcrEndpointToZero({ silent: true });
+      endpointText = scaled?.message ? ` ${scaled.message}` : " Endpoint OCR apagado para ahorro.";
+    } catch (err) {
+      endpointText = ` No se pudo apagar el endpoint OCR: ${err.message}`;
+    }
     state.taskProgress = null;
     persistFactoryUiState();
     render();
-    setStatus(doneText);
+    setStatus(`${doneText}${endpointText}`);
   } finally {
     state.taskProgress = null;
     $("busyText").textContent = "";
@@ -3066,24 +3576,24 @@ async function runOcrForRecord(recordId, models) {
 
 async function normalizeRecords() {
   const records = normalizableRecords();
-  if (!records.length) return setStatus("No hay OCR crudo o estructurado para normalizar todavia.");
+  if (!records.length) return setStatus("No hay OCR crudo o estructurado para preparar revision todavia.");
   const total = records.length;
   const failures = [];
   state.stage = "review";
   state.taskProgress = {
     type: "normalize",
     running: true,
-    label: "Normalizacion",
+    label: "Revision",
     total,
     current: 0,
     ok: 0,
     failed: 0,
-    message: `Preparando normalizacion 0 de ${total}`,
+    message: `Preparando revision 0 de ${total}`,
     activeId: records[0]?.record_id || "",
     activeName: recordLabelById(records[0]?.record_id),
   };
   render();
-  setBusy(`Normalizando 0 de ${total}...`);
+  setBusy(`Preparando revision 0 de ${total}...`);
   try {
     for (let index = 0; index < records.length; index += 1) {
       const record = records[index];
@@ -3091,20 +3601,20 @@ async function normalizeRecords() {
       state.taskProgress = {
         ...state.taskProgress,
         current: index,
-        message: `Normalizando ${index + 1} de ${total}`,
+        message: `Preparando revision ${index + 1} de ${total}`,
         activeId: id,
         activeName: recordLabelById(id),
       };
       state.selectedRecordId = id;
       render();
-      setBusy(`Normalizando ${index + 1} de ${total}...`);
+      setBusy(`Preparando revision ${index + 1} de ${total}...`);
       try {
         state.snapshot = await api("/api/normalize", { method: "POST", body: { record_id: id } });
         state.taskProgress = {
           ...state.taskProgress,
           current: index + 1,
           ok: Number(state.taskProgress.ok || 0) + 1,
-          message: `Normalizado ${index + 1} de ${total}`,
+          message: `Revision preparada ${index + 1} de ${total}`,
         };
       } catch (err) {
         failures.push({ id, message: err.message });
@@ -3114,7 +3624,7 @@ async function normalizeRecords() {
           failed: Number(state.taskProgress.failed || 0) + 1,
           message: `Error en ${index + 1} de ${total}`,
         };
-        setStatus(`Error normalizando ${recordLabelById(id)}: ${err.message}`);
+        setStatus(`Error preparando revision ${recordLabelById(id)}: ${err.message}`);
       }
       state.stage = "review";
       state.selectedRecordId = id;
@@ -3129,7 +3639,7 @@ async function normalizeRecords() {
     state.taskProgress = null;
     persistFactoryUiState();
     render();
-    setStatus(failures.length ? `Normalizacion terminada con ${failures.length} error(es).` : `Normalizacion lista para ${total} imagen(es).`);
+    setStatus(failures.length ? `Revision preparada con ${failures.length} error(es).` : `Revision preparada para ${total} imagen(es).`);
   } finally {
     state.taskProgress = null;
     $("busyText").textContent = "";
@@ -3405,7 +3915,7 @@ function stageHint(id) {
     boxes: "Ajusta cada problema antes de crear crops.",
     crops: "Confirma que cada crop existe y tiene trazabilidad.",
     ocr: "Corrige OCR crudo y segmentos graficos.",
-    review: "Normaliza campos sin editar JSON como flujo principal.",
+    review: "Revision humana experimental; el normalizador IA aun queda pendiente.",
     candidate: "Solo valida preparacion; la BD sigue cerrada.",
   }[id] || "";
 }

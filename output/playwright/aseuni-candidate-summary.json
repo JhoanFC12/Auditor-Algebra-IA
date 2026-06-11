@@ -1,0 +1,78 @@
+{
+  "summary": {
+    "title": "Biblioteca | Fabrica PDF",
+    "url": "http://127.0.0.1:53571/",
+    "text": "FABRICA PDF -> STAGING\n\naseuni-semianual-geometria / semana_1_tri_ngulos\n\nASEUNI SEMIANUAL - GEOMETRIA.pdf | Flujo revisable, sin insercion directa en problemas\n\nStaging primero\nRevision humana\nBD bloqueada\nModo oscuro\nBiblioteca\nActualizar\nPROCESO\nDe PDF a staging\n1\nPaginas\n6 pagina(s), 6/6 revisada(s)\nElegir paginas del PDF\nListo\n2\nBoxes\n47 box(es) detectados para revisar\nConfirmar cajas de problemas\nListo\n3\nStaging\n47/47 crop(s) disponibles\nRevisar crops trazables\nListo\n4\nOCR\n47/47 con OCR, 47 con segmentacion\nLeer texto y graficos\nRequiere revision\n5\nRevision\n1/47 borrador(es) de revision\nPreparar revision desde OCR\nRequiere revision\n6\nCandidato\nAhora\n0/47 listos; 0 con error; no inserta directo en problemas\nVerificar bloqueo de BD\nRequiere revision\nCandidato futuro a BD\n\nRevisa si el registro esta completo. La escritura real en problemas permanece bloqueada.\n\nAun falta revisar\nPromocion habilitada\nNo\nSQL preparado\nNo\nEscrituras\n0\nBloqueos pendientes\nmissing:normalized\nnot_ready:human_review\nDetalle tecnico del candidato\nResumen\nPaginas\n6\nBoxes\n47\nProblemas\n47\nOCR\n47\nSegmentos\n47\nBorradores\n1\nListos\n0\nErrores\n0\nInspector\nREGISTRO\naseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_22fa9f209c\nDESTINO ACTUAL\nstaging\nPROMOCION REAL\ndesactivada\nFabrica lista.\nRecalcula bloqueos sin escribir en problemas.\nActualizar candidato",
+    "scrollHeight": 1434,
+    "activeStep": "6\nCandidato\nAhora\n0/47 listos; 0 con error; no inserta directo en problemas\nVerificar bloqueo de BD\nRequiere revision",
+    "controls": [
+      {
+        "tag": "BUTTON",
+        "text": "Modo oscuro",
+        "cls": "ghost theme-toggle"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Biblioteca",
+        "cls": "ghost"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Actualizar",
+        "cls": "ghost"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Carpeta staging",
+        "cls": "ghost hidden"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "1\nPaginas\n6 pagina(s), 6/6 revisada(s)\nElegir paginas del PDF\nListo",
+        "cls": "timeline-step "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "2\nBoxes\n47 box(es) detectados para revisar\nConfirmar cajas de problemas\nListo",
+        "cls": "timeline-step "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "3\nStaging\n47/47 crop(s) disponibles\nRevisar crops trazables\nListo",
+        "cls": "timeline-step "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "4\nOCR\n47/47 con OCR, 47 con segmentacion\nLeer texto y graficos\nRequiere revision",
+        "cls": "timeline-step "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "5\nRevision\n1/47 borrador(es) de revision\nPreparar revision desde OCR\nRequiere revision",
+        "cls": "timeline-step "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "6\nCandidato\nAhora\n0/47 listos; 0 con error; no inserta directo en problemas\nVerificar bloqueo de BD\nRequiere revision",
+        "cls": "timeline-step active"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Actualizar candidato",
+        "cls": "primary"
+      }
+    ]
+  },
+  "consoleRows": [
+    {
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 404 (Not Found)",
+      "url": "http://127.0.0.1:53571/"
+    },
+    {
+      "type": "info",
+      "text": "Images loaded lazily and replaced with placeholders. Load events are deferred. See https://go.microsoft.com/fwlink/?linkid=2048113",
+      "url": "http://127.0.0.1:53571/"
+    }
+  ]
+}

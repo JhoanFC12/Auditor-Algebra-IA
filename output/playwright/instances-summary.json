@@ -1,0 +1,356 @@
+{
+  "summary": {
+    "clicked": true,
+    "title": "Biblioteca | Fabrica PDF",
+    "url": "http://127.0.0.1:65143/",
+    "bodyPreview": "FABRICA PDF -> STAGING\n\nBiblioteca\n\nRegistra libros, divide instancias y abre la Fabrica por tramo de trabajo.\n\nStaging primero\nRevision humana\nBD bloqueada\nModo oscuro\nBiblioteca\nActualizar\nBIBLIOTECA\n78 libro(s)\nBase de datos\nmathcontentstudio_local_mirror\nBuscar\nTodos\n518\nPendientes\n380\nEn progreso\n0\nPor revisar\n102\nRevisadas\n35\nRegistrar libro\nAbrir Fabrica sin biblioteca\nVolver a libros\nInstancias del libro\n\nRevisa el avance por tramo y abre la Fabrica PDF solo para la instancia que quieras trabajar.\n\nCrear instancia\nACADEMIA-NOSTRADAMUS-SEMESTRAL-2022-I\nACADEMIA NOSTRADAMUS SEMESTRAL 2022 - I\n\nAcademia Nostradamus | Geometria\n\n25 instancia(s)\nsemana_n_01_-_segmentos_y_angulos_-_conjuntos_convexos\nPaginas por definir\nPendiente\n0\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_02_-_triangulos\nPaginas por definir\nPendiente\n0\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_03_-_triangulos_ii\nPaginas por definir\nPendiente\n0\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_04_-_congruencia_de_triangulos_i\nPaginas por definir\nPendiente\n0\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_05_-_congruencia_de_triangulos_ii\nPaginas por definir\nPendiente\n0\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_06_-_poligonos\nPaginas por definir\nPendiente\n0\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_07_-_cuadrilateros\nPaginas por definir\nPendiente\n0\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_08_-_circunferencia_i\nPaginas por definir\nPendiente\n0\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_09_-_circunferencia_ii\nPaginas por definir\nPendiente\n0\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_10_-_puntos_notables\nPaginas por definir\nPendiente\n0\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_11_-_proporcionalidad_de_segmentos\nPaginas por definir\nPendiente\n0\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_12_-_semejanza_de_triangulos\nPaginas por definir\nPendiente\n0\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_13_-_relaciones_metricas_i\nPaginas por definir\nPendiente\n0\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_14_-_relaciones_metricas_ii\nPaginas por definir\nPendiente\n0\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_15_-_poligonos_regulares\nPaginas por definir\nPendiente\n0\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_16_-_areas_de_regiones_triangulares\nPaginas por definir\nPendiente\n0\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_17_-_areas_de_regiones_cuadrangulares_y_circulares\nPaginas por definir\nPendiente\n0\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_18_-_rectas_y_planos\nPaginas por definir\nRequiere revision\n30\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_19_-_diedros_y_triedros\nPaginas por definir\nRequiere revision\n30\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_20_-_poliedros_i\nPaginas por definir\nRequiere revision\n30\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_21_-_poliedros_ii\nPaginas por definir\nRequiere revision\n30\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_22_-_piramide\nPaginas por definir\nRequiere revision\n30\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_23_-_cilindro\nPaginas por definir\nRequiere revision\n30\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_24_-_cono\nPaginas por definir\nRequiere revision\n30\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_25_-_esfera_-_pappus\nPaginas por definir\nRequiere revision\n30\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nEstados\nLibros\n78\nInstancias\n518\nPendientes\n380\nRevisadas\n35\nSeleccion\nLIBRO\nACADEMIA NOSTRADAMUS SEMESTRAL 2022 - I\nCODIGO\nacademia-nostradamus-semestral-2022-i\nVISTA\nInstancias\nINSTANCIA\nsemana_n_01_-_segmentos_y_angulos_-_conjuntos_convexos\nESTADO\nPendiente\nBiblioteca lista.\nSelecciona una instancia para abrir su flujo PDF revisable.\nAbrir Fabrica",
+    "bodyLength": 3824,
+    "scrollHeight": 5519,
+    "viewport": {
+      "width": 1440,
+      "height": 920
+    },
+    "buttons": [
+      {
+        "tag": "BUTTON",
+        "text": "Modo oscuro",
+        "cls": "ghost theme-toggle"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Biblioteca",
+        "cls": "ghost"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Actualizar",
+        "cls": "ghost"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Carpeta staging",
+        "cls": "ghost hidden"
+      },
+      {
+        "tag": "SELECT",
+        "text": "mathcontentstudio_local_mirror",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "Titulo, codigo, curso",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Todos\n518",
+        "cls": "filter-chip active"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Pendientes\n380",
+        "cls": "filter-chip "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "En progreso\n0",
+        "cls": "filter-chip "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Por revisar\n102",
+        "cls": "filter-chip "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Revisadas\n35",
+        "cls": "filter-chip "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Registrar libro",
+        "cls": "primary wide-action"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica sin biblioteca",
+        "cls": "ghost wide-action"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Volver a libros",
+        "cls": "ghost compact-action"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Crear instancia",
+        "cls": "secondary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "semana_n_01_-_segmentos_y_angulos_-_conjuntos_convexos\nPaginas por definir\nPendiente",
+        "cls": "instance-select"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "semana_n_02_-_triangulos\nPaginas por definir\nPendiente",
+        "cls": "instance-select"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "semana_n_03_-_triangulos_ii\nPaginas por definir\nPendiente",
+        "cls": "instance-select"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "semana_n_04_-_congruencia_de_triangulos_i\nPaginas por definir\nPendiente",
+        "cls": "instance-select"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "semana_n_05_-_congruencia_de_triangulos_ii\nPaginas por definir\nPendiente",
+        "cls": "instance-select"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "semana_n_06_-_poligonos\nPaginas por definir\nPendiente",
+        "cls": "instance-select"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "semana_n_07_-_cuadrilateros\nPaginas por definir\nPendiente",
+        "cls": "instance-select"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "semana_n_08_-_circunferencia_i\nPaginas por definir\nPendiente",
+        "cls": "instance-select"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "semana_n_09_-_circunferencia_ii\nPaginas por definir\nPendiente",
+        "cls": "instance-select"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "semana_n_10_-_puntos_notables\nPaginas por definir\nPendiente",
+        "cls": "instance-select"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "semana_n_11_-_proporcionalidad_de_segmentos\nPaginas por definir\nPendiente",
+        "cls": "instance-select"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "semana_n_12_-_semejanza_de_triangulos\nPaginas por definir\nPendiente",
+        "cls": "instance-select"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "semana_n_13_-_relaciones_metricas_i\nPaginas por definir\nPendiente",
+        "cls": "instance-select"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "semana_n_14_-_relaciones_metricas_ii\nPaginas por definir\nPendiente",
+        "cls": "instance-select"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "semana_n_15_-_poligonos_regulares\nPaginas por definir\nPendiente",
+        "cls": "instance-select"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "semana_n_16_-_areas_de_regiones_triangulares\nPaginas por definir\nPendiente",
+        "cls": "instance-select"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "semana_n_17_-_areas_de_regiones_cuadrangulares_y_circulares\nPaginas por definir\nPendiente",
+        "cls": "instance-select"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "semana_n_18_-_rectas_y_planos\nPaginas por definir\nRequiere revision",
+        "cls": "instance-select"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "semana_n_19_-_diedros_y_triedros\nPaginas por definir\nRequiere revision",
+        "cls": "instance-select"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "semana_n_20_-_poliedros_i\nPaginas por definir\nRequiere revision",
+        "cls": "instance-select"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "semana_n_21_-_poliedros_ii\nPaginas por definir\nRequiere revision",
+        "cls": "instance-select"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "semana_n_22_-_piramide\nPaginas por definir\nRequiere revision",
+        "cls": "instance-select"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "semana_n_23_-_cilindro\nPaginas por definir\nRequiere revision",
+        "cls": "instance-select"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "semana_n_24_-_cono\nPaginas por definir\nRequiere revision",
+        "cls": "instance-select"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "semana_n_25_-_esfera_-_pappus\nPaginas por definir\nRequiere revision",
+        "cls": "instance-select"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica",
+        "cls": "primary"
+      }
+    ]
+  },
+  "consoleRows": [
+    {
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 404 (Not Found)"
+    },
+    {
+      "type": "info",
+      "text": "Images loaded lazily and replaced with placeholders. Load events are deferred. See https://go.microsoft.com/fwlink/?linkid=2048113"
+    }
+  ]
+}

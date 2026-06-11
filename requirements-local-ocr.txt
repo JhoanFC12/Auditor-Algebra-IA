@@ -1,0 +1,11 @@
+# Optional stack for local OCR LoRA experiments.
+# Install only when you are ready to train locally; these packages are heavy.
+#
+# CUDA example on Windows, adjust the CUDA index URL to your driver/PyTorch target:
+#   python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#   python -m pip install -r requirements-local-ocr.txt
+
+accelerate>=1.2
+peft>=0.14
+sentencepiece>=0.2
+transformers>=4.49,<5

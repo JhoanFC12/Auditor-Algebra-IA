@@ -1419,6 +1419,11 @@ class ScanExtractor:
                     "El modelo OCR entrenado requiere configurar HF_TRAINED_OCR_BASE_URL "
                     "con la URL /v1 OpenAI-compatible del endpoint dedicado."
                 )
+            if "router.huggingface.co" in endpoint.lower():
+                raise RuntimeError(
+                    "HF_TRAINED_OCR_BASE_URL esta apuntando al router de Hugging Face Inference Providers. "
+                    "Para el modelo OCR entrenado usa la URL /v1 del endpoint dedicado."
+                )
             return endpoint.rstrip("/")
         return ((os.getenv("HF_BASE_URL", "") or "").strip() or "https://router.huggingface.co/v1").rstrip("/")
 

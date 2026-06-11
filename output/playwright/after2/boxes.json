@@ -1,0 +1,18 @@
+{
+  "scrollHeight": 920,
+  "clientHeight": 920,
+  "scrollWidth": 1440,
+  "clientWidth": 1440,
+  "activeStep": "2\nBoxes\nAhora\n47 box(es) detectados para revisar\nConfirmar cajas de problemas\nListo",
+  "workspace": {
+    "className": "workspace",
+    "gridTemplateColumns": "250px 834px 300px"
+  },
+  "stageHost": {
+    "width": 832,
+    "height": 694.171875,
+    "scrollHeight": 1084,
+    "overflow": "auto"
+  },
+  "overflowX": false
+}

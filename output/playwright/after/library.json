@@ -1,0 +1,27 @@
+{
+  "title": "Biblioteca | Fabrica PDF",
+  "url": "http://127.0.0.1:65143/",
+  "scrollHeight": 6711,
+  "clientHeight": 920,
+  "bodyText": "FABRICA PDF -> STAGING\n\nBiblioteca\n\nRegistra libros, divide instancias y abre la Fabrica por tramo de trabajo.\n\nStaging primero\nRevision humana\nBD bloqueada\nModo oscuro\nBiblioteca\nActualizar\nBIBLIOTECA\n78 libro(s)\nBase de datos\nmathcontentstudio_local_mirror\nBuscar\nTodos\n518\nPendientes\n380\nEn progreso\n0\nPor revisar\n102\nRevisadas\n35\nRegistrar libro\nAbrir Fabrica sin biblioteca\nBiblioteca de libros\n\nExplora las portadas y metadatos. Selecciona un libro para ver sus instancias en una pagina dedicada.\n\nRegistrar libro\nACADEMIA NOSTRADAMUS SEMESTRAL 2022 - I\nacademia-nostradamus-semestral-2022-i | Academia Nostradamus | Geometria\n17\nPend.\n0\nProg.\n0\nRev.\nVer instancias\nAlgebra-Coleccion Ciencias y Humanidades-Tomo I\nalgebra-coleccion-ciencias-y-humanidades-tomo-i | Editorial Lumbreras | Algebra\n21\nPend.\n0\nProg.\n2\nRev.\nVer instancias\nAlgebra-Coleccion Ciencias y Humanidades-Tomo II\nalgebra-coleccion-ciencias-y-humanidades-tomo-ii | Editorial Lumbreras | Algebra\n18\nPend.\n0\nProg.\n0\nRev.\nVer instancias\nAlgebra I - Preuniversitario\nalgebra-i-preuniversitario | Eduardo Espinoza Ramos | Algebra\n14\nPend.\n0\nProg.\n6\nRev.\nVer instancias\nÁLGEBRA_Esencial\nalgebra-esencial | Yoniln Vilca - Ricardo Mam",
+  "workspace": {
+    "className": "workspace library-mode",
+    "gridTemplateColumns": "260px 844px 280px"
+  },
+  "inspector": {
+    "x": 1146,
+    "y": 147.828125,
+    "width": 280,
+    "height": 726,
+    "display": "grid",
+    "gridColumn": "auto",
+    "overflow": "auto"
+  },
+  "stage": {
+    "x": 288,
+    "y": 147.828125,
+    "width": 844,
+    "height": 6486.875
+  },
+  "overflowX": false
+}

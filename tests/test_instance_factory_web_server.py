@@ -102,6 +102,23 @@ class _FakeService:
         return record
 
 
+class _FakeEndpointManager:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def status(self):
+        self.calls.append(("status",))
+        return {"schema_version": "hf_ocr_endpoint_status_v1", "status": "scaledToZero", "configured": True}
+
+    def resume(self, *, wait=True, timeout_s=420, poll_s=8):
+        self.calls.append(("resume", wait, timeout_s, poll_s))
+        return {"schema_version": "hf_ocr_endpoint_status_v1", "status": "running", "configured": True}
+
+    def scale_to_zero(self):
+        self.calls.append(("scale_to_zero",))
+        return {"schema_version": "hf_ocr_endpoint_status_v1", "status": "scaledToZero", "configured": True}
+
+
 def _post_json(base: str, path: str, body: dict) -> dict:
     request = urllib.request.Request(
         base + path,
@@ -118,6 +135,52 @@ def _read_http_error(exc: urllib.error.HTTPError) -> dict:
 
 
 class InstanceFactoryWebServerTests(unittest.TestCase):
+    def test_web_runtime_hides_internal_tracebacks_from_client(self) -> None:
+        class _BrokenService(_FakeService):
+            def build_instance_summary(self):
+                raise RuntimeError("secret internal path E:/private/token")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(Path(tmp) / "book.pdf"))
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            runtime = FactoryWebRuntime(context, service=_BrokenService(context, store))
+            try:
+                base = runtime.start()
+                with self.assertRaises(urllib.error.HTTPError) as failure:
+                    urllib.request.urlopen(base + "api/bootstrap", timeout=5)
+                payload = _read_http_error(failure.exception)
+                self.assertEqual(failure.exception.code, 500)
+                self.assertEqual(payload["schema_version"], "pdf_factory_web_error_v1")
+                self.assertEqual(payload["code"], "internal_error")
+                self.assertNotIn("traceback", payload)
+                self.assertNotIn("secret internal path", payload["error"])
+            finally:
+                runtime.stop()
+
+    def test_web_runtime_exposes_ocr_endpoint_lifecycle_api(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(Path(tmp) / "book.pdf"))
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            endpoint = _FakeEndpointManager()
+            runtime = FactoryWebRuntime(context, service=_FakeService(context, store), endpoint_manager=endpoint)
+            try:
+                base = runtime.start()
+                with urllib.request.urlopen(base + "api/endpoint/ocr/status", timeout=5) as response:
+                    status = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(status["status"], "scaledToZero")
+
+                resumed = _post_json(base, "api/endpoint/ocr/resume", {"wait": False, "timeout_s": 12, "poll_s": 2})
+                self.assertEqual(resumed["status"], "running")
+                scaled = _post_json(base, "api/endpoint/ocr/scale-to-zero", {})
+                self.assertEqual(scaled["status"], "scaledToZero")
+                self.assertEqual(endpoint.calls, [
+                    ("status",),
+                    ("resume", False, 12, 2),
+                    ("scale_to_zero",),
+                ])
+            finally:
+                runtime.stop()
+
     def test_web_runtime_exposes_snapshot_review_and_disabled_promotion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(Path(tmp) / "book.pdf"))
@@ -226,6 +289,10 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                 raw_snapshot = _post_json(base, "api/ocr/raw", {"record_id": "crop_001", "raw_ocr": "texto corregido"})
                 self.assertIn(("update_raw_ocr", "crop_001", "texto corregido"), service.calls)
                 self.assertEqual(raw_snapshot["records"][0]["raw_ocr"], "texto corregido")
+                raw_compact = _post_json(base, "api/ocr/raw", {"record_id": "crop_001", "raw_ocr": "texto lote", "compact": True})
+                self.assertEqual(raw_compact["schema_version"], "pdf_factory_web_record_saved_v1")
+                self.assertEqual(raw_compact["record"]["record_id"], "crop_001")
+                self.assertEqual(raw_compact["record"]["raw_ocr"], "texto lote")
                 self.assertIn(("update_figure_segments", "crop_001", [[2, 3, 44, 55]]), service.calls)
                 self.assertEqual(segment_snapshot["records"][0]["figure_segmentation"]["segments_total"], 1)
                 self.assertIn(("normalize_existing_ocr", "", []), service.calls)
@@ -233,6 +300,21 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                 self.assertIn(("normalize_existing_ocr", "crop_001", []), service.calls)
                 _post_json(base, "api/normalize", {"record_ids": ["crop_001", "crop_001", ""]})
                 self.assertIn(("normalize_existing_ocr", "", ["crop_001"]), service.calls)
+                review_compact = _post_json(
+                    base,
+                    "api/review/save",
+                    {
+                        "record_id": "crop_001",
+                        "normalized": {"numero": "8", "enunciado_latex": "Lote"},
+                        "notes": "batch",
+                        "mark_ready": True,
+                        "compact": True,
+                    },
+                )
+                self.assertEqual(review_compact["schema_version"], "pdf_factory_web_record_saved_v1")
+                self.assertEqual(review_compact["record"]["record_id"], "crop_001")
+                self.assertEqual(review_compact["record"]["normalized"]["numero"], "8")
+                self.assertEqual(review_compact["record"]["status"], StageStatus.READY)
 
                 with urllib.request.urlopen(base + "api/record?record_id=crop_001", timeout=5) as response:
                     detail = json.loads(response.read().decode("utf-8"))

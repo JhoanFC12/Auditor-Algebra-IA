@@ -1,0 +1,163 @@
+{
+  "summary": {
+    "title": "Biblioteca | Fabrica PDF",
+    "url": "http://127.0.0.1:53571/",
+    "text": "FABRICA PDF -> STAGING\n\naseuni-semianual-geometria / semana_1_tri_ngulos\n\nASEUNI SEMIANUAL - GEOMETRIA.pdf | Flujo revisable, sin insercion directa en problemas\n\nStaging primero\nRevision humana\nBD bloqueada\nModo oscuro\nBiblioteca\nActualizar\nPROCESO\nDe PDF a staging\n1\nPaginas\n6 pagina(s), 6/6 revisada(s)\nElegir paginas del PDF\nListo\n2\nBoxes\n47 box(es) detectados para revisar\nConfirmar cajas de problemas\nListo\n3\nStaging\n47/47 crop(s) disponibles\nRevisar crops trazables\nListo\n4\nOCR\nAhora\n47/47 con OCR, 47 con segmentacion\nLeer texto y graficos\nRequiere revision\n5\nRevision\n1/47 borrador(es) de revision\nPreparar revision desde OCR\nRequiere revision\n6\nCandidato\n0/47 listos; 0 con error; no inserta directo en problemas\nVerificar bloqueo de BD\nRequiere revision\nOCR y segmentacion grafica\n\nCompara la lectura estructurada con el crop antes de cargarla al formulario final.\n\nModo lote OCR crudo\nOCR ENTRENADO\nJhoan12/math-ocr-qwen2.5-vl-3b-geometry-rules-merged-v4\nhuggingface | env:HF_MODEL\nSEGMENTACION DE GRAFICOS\nmodels/problem_segmentation_yolov8n_golden_v1/weights/bes...\nlocal | env:YOLO_FIGURE_SEGMENT_MODEL\nENDPOINT OCR\nmath-ocr-geometry-rules-v4\n\nEndpoint OCR localizado.\n\nscaledToZero\nActualizar estado\nEncender OCR\nApagar OCR\n←\nIMAGEN\n1 de 47\n1. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_22fa9f209c.png | P...\n→\nSaltar a\n1. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_22fa9f209c.png | P...\n2. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_8d28fbf6fd.png | P...\n3. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_ecbf1b7eed.png | P...\n4. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_4c522d44f9.png | P...\n5. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_fa0107e423.png | P...\n6. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_bd0c217c78.png | P...\n7. Problema 6 | Pag. 1\n8. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_e37610f68f.png | P...\n9. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_3cc29eb58d.png | P...\n10. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_ed3f4e1384.png | ...\n11. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_59cabea481.png | ...\n12. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_ae76a99a38.png | ...\n13. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_f7ff32d267.png | ...\n14. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_68b02521c3.png | ...\n15. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_378d1edb97.png | ...\n16. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_91b63fa563.png | ...\n17. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_fb6f69617d.png | ...\n18. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_91306723fd.png | ...\n19. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_f11582cb44.png | ...\n20. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_a5b96be775.png | ...\n21. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_ff08647971.png | ...\n22. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_4a80431d0a.png | ...\n23. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_8831ca1efb.png | ...\n24. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_f981dc6250.png | ...\n25. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_1cc8193a08.png | ...\n26. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_2df80759c4.png | ...\n27. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_856112e45b.png | ...\n28. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_553c394e75.png | ...\n29. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_0182c8ffba.png | ...\n30. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_2b69690eb9.png | ...\n31. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_8684186185.png | ...\n32. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_92a4f40e61.png | ...\n33. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_e6d0aba1db.png | ...\n34. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_79a15c6fec.png | ...\n35. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_e2743d1d30.png | ...\n36. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_3ad3b0f4b8.png | ...\n37. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_38da7b6d6c.png | ...\n38. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_b9432ef976.png | ...\n39. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_4185159846.png | ...\n40. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_36e3607d45.png | ...\n41. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_d76ca36b1b.png | ...\n42. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_f8602d1fed.png | ...\n43. aseuni-semianual-geometria__semana_1_tri_ngulos____A",
+    "scrollHeight": 1810,
+    "activeStep": "4\nOCR\nAhora\n47/47 con OCR, 47 con segmentacion\nLeer texto y graficos\nRequiere revision",
+    "controls": [
+      {
+        "tag": "BUTTON",
+        "text": "Modo oscuro",
+        "cls": "ghost theme-toggle"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Biblioteca",
+        "cls": "ghost"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Actualizar",
+        "cls": "ghost"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Carpeta staging",
+        "cls": "ghost hidden"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "1\nPaginas\n6 pagina(s), 6/6 revisada(s)\nElegir paginas del PDF\nListo",
+        "cls": "timeline-step "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "2\nBoxes\n47 box(es) detectados para revisar\nConfirmar cajas de problemas\nListo",
+        "cls": "timeline-step "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "3\nStaging\n47/47 crop(s) disponibles\nRevisar crops trazables\nListo",
+        "cls": "timeline-step "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "4\nOCR\nAhora\n47/47 con OCR, 47 con segmentacion\nLeer texto y graficos\nRequiere revision",
+        "cls": "timeline-step active"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "5\nRevision\n1/47 borrador(es) de revision\nPreparar revision desde OCR\nRequiere revision",
+        "cls": "timeline-step "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "6\nCandidato\n0/47 listos; 0 con error; no inserta directo en problemas\nVerificar bloqueo de BD\nRequiere revision",
+        "cls": "timeline-step "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Modo lote OCR crudo",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Actualizar estado",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Encender OCR",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Apagar OCR",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "←",
+        "cls": "nav-arrow"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "→",
+        "cls": "nav-arrow"
+      },
+      {
+        "tag": "SELECT",
+        "text": "1. aseuni-semianual-geometria__semana_1_tri_ngulos____ASEUNI_SEM_22fa9f209c.png | P...\n2. aseuni-semianual-geometria__se",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "←",
+        "cls": "mini-arrow"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "→",
+        "cls": "mini-arrow"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Editar lectura",
+        "cls": "primary wide-action"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Copiar OCR",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Guardar OCR crudo",
+        "cls": "primary"
+      },
+      {
+        "tag": "TEXTAREA",
+        "text": "<1.> Determinar el menor ángulo interior de un triángulo, sabiendo que son tres números consecutivos. A) $60^\\circ$ B) $",
+        "cls": "raw-ocr-editor"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Mover",
+        "cls": "secondary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Nuevo box",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Eliminar",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Guardar segmentos",
+        "cls": "primary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Preparar revision",
+        "cls": "primary"
+      }
+    ]
+  },
+  "consoleRows": [
+    {
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 404 (Not Found)",
+      "url": "http://127.0.0.1:53571/"
+    },
+    {
+      "type": "info",
+      "text": "Images loaded lazily and replaced with placeholders. Load events are deferred. See https://go.microsoft.com/fwlink/?linkid=2048113",
+      "url": "http://127.0.0.1:53571/"
+    }
+  ]
+}

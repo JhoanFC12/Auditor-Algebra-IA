@@ -1,0 +1,37 @@
+{
+  "title": "Biblioteca | Fabrica PDF",
+  "url": "http://127.0.0.1:65143/",
+  "scrollHeight": 920,
+  "clientHeight": 920,
+  "scrollWidth": 1440,
+  "clientWidth": 1440,
+  "bodyOverflow": "hidden",
+  "workspace": {
+    "className": "workspace library-mode",
+    "gridTemplateColumns": "260px 844px 280px",
+    "width": 1440,
+    "height": 724.171875,
+    "overflow": "hidden"
+  },
+  "stageHost": {
+    "width": 842,
+    "height": 694.171875,
+    "scrollHeight": 2292,
+    "overflow": "auto"
+  },
+  "inspector": {
+    "x": 1146,
+    "y": 147.828125,
+    "width": 280,
+    "height": 696.171875,
+    "scrollHeight": 696,
+    "display": "grid",
+    "overflow": "auto"
+  },
+  "timeline": {
+    "width": 260,
+    "height": 696.171875,
+    "scrollHeight": 694
+  },
+  "overflowX": false
+}

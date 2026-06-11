@@ -46,6 +46,13 @@ class HfEndpointResolutionTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "HF_TRAINED_OCR_BASE_URL"):
             extractor._resolve_hf_base_url_for_model(TRAINED_OCR_VISION_MODEL)
 
+    def test_trained_ocr_rejects_router_endpoint(self) -> None:
+        os.environ["HF_TRAINED_OCR_BASE_URL"] = "https://router.huggingface.co/v1"
+        extractor = ScanExtractor(provider="hf", model=TRAINED_OCR_VISION_MODEL)
+
+        with self.assertRaisesRegex(RuntimeError, "router de Hugging Face Inference Providers"):
+            extractor._resolve_hf_base_url_for_model(TRAINED_OCR_VISION_MODEL)
+
     def test_other_hf_model_uses_generic_base_url(self) -> None:
         os.environ["HF_BASE_URL"] = "https://router.example/v1/"
         extractor = ScanExtractor(provider="hf", model="other/model")

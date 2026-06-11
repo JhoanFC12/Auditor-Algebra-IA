@@ -1,0 +1,491 @@
+{
+  "summary": {
+    "title": "Biblioteca | Fabrica PDF",
+    "url": "http://127.0.0.1:65143/",
+    "bodyPreview": "FABRICA PDF -> STAGING\n\nBiblioteca\n\nRegistra libros, divide instancias y abre la Fabrica por tramo de trabajo.\n\nStaging primero\nRevision humana\nBD bloqueada\nModo oscuro\nBiblioteca\nActualizar\nBIBLIOTECA\n78 libro(s)\nBase de datos\nmathcontentstudio_local_mirror\nBuscar\nTodos\n518\nPendientes\n380\nEn progreso\n0\nPor revisar\n102\nRevisadas\n35\nRegistrar libro\nAbrir Fabrica sin biblioteca\nBiblioteca de libros\n\nExplora las portadas y metadatos. Selecciona un libro para ver sus instancias en una pagina dedicada.\n\nRegistrar libro\nACADEMIA NOSTRADAMUS SEMESTRAL 2022 - I\nacademia-nostradamus-semestral-2022-i | Academia Nostradamus | Geometria\n17\nPend.\n0\nProg.\n0\nRev.\nVer instancias\nAlgebra-Coleccion Ciencias y Humanidades-Tomo I\nalgebra-coleccion-ciencias-y-humanidades-tomo-i | Editorial Lumbreras | Algebra\n21\nPend.\n0\nProg.\n2\nRev.\nVer instancias\nAlgebra-Coleccion Ciencias y Humanidades-Tomo II\nalgebra-coleccion-ciencias-y-humanidades-tomo-ii | Editorial Lumbreras | Algebra\n18\nPend.\n0\nProg.\n0\nRev.\nVer instancias\nAlgebra I - Preuniversitario\nalgebra-i-preuniversitario | Eduardo Espinoza Ramos | Algebra\n14\nPend.\n0\nProg.\n6\nRev.\nVer instancias\nÁLGEBRA_Esencial\nalgebra-esencial | Yoniln Vilca - Ricardo Mamani | Algebra\n26\nPend.\n0\nProg.\n2\nRev.\nVer instancias\nAlgebra_Matematica_Preuniversitaria\nalgebra-matematica-preuniversitaria | Vladimir Reyes Figueroa | Algebra\n5\nPend.\n0\nProg.\n2\nRev.\nVer instancias\nÁreas de regiones planas\nareas-de-regiones-planas | Julio Orihuela Bastidas | Geometria\n1\nPend.\n0\nProg.\n0\nRev.\nVer instancias\nASEUNI SEMIANUAL - GEOMETRIA\naseuni-semianual-geometria | Academia ASEUNI | Geometria\n15\nPend.\n0\nProg.\n0\nRev.\nVer instancias\nASEUNI SEMIANUAL - GEOMETRIA RESUMENES\naseuni-semianual-geometria-resumenes | Academia ASEUNI | Geometria\n17\nPend.\n0\nProg.\n0\nRev.\nVer instancias\nATHENAS CICLO UNI BASICO - Geometria (semanas unidas)\nathenas-ciclo-uni-basico-geometria-semanas-unidas | Academia Athenas | Geometria\n22\nPend.\n0\nProg.\n0\nRev.\nVer instancias\nCEPRE-SM(Del 2018-II al 2020-I)\ncepre-sm-del-2018-ii-al-2020-i | Manhattan Editores | Algebra\n15\nPend.\n0\nProg.\n1\nRev.\nVer instancias\nCEPUNT 2022 I\ncepunt-2022-i | UNT | Examenes\n3\nPend.\n0\nProg.\n0\nRev.\nVer instancias\nC2\nCEPUNT 2022 II\ncepunt-2022-ii | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer instancias\nC2\nCEPUNT 2023 I\ncepunt-2023-i | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer instancias\nC2\nCEPUNT 2024 I\ncepunt-2024-i | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer instancias\nC2\nCEPUNT 2024 II\ncepunt-2024-ii | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer instancias\nC2\nCEPUNT 2025 I\ncepunt-2025-i | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer instancias\nC2\nCEPUNT 2026 I SUMATIVO I\ncepunt-2026-i-sumativo-i | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer instancias\nC2\nCEPUNT 2026 I SUMATIVO II\ncepunt-2026-i-sumativo-ii | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer instancias\nC2\nCEPUNT 2026 II SUMATIVO I\ncepunt-2026-ii-sumativo-i | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer instancias\nC2\nCEPUNT 2026 II SUMATIVO II\ncepunt-2026-ii-sumativo",
+    "bodyLength": 10102,
+    "scrollHeight": 5377,
+    "viewport": {
+      "width": 1440,
+      "height": 920
+    },
+    "controls": [
+      {
+        "tag": "BUTTON",
+        "text": "Modo oscuro",
+        "cls": "ghost theme-toggle"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Biblioteca",
+        "cls": "ghost"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Actualizar",
+        "cls": "ghost"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Carpeta staging",
+        "cls": "ghost hidden"
+      },
+      {
+        "tag": "SELECT",
+        "text": "mathcontentstudio_local_mirror",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "text": "Titulo, codigo, curso",
+        "cls": ""
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Todos\n518",
+        "cls": "filter-chip active"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Pendientes\n380",
+        "cls": "filter-chip "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "En progreso\n0",
+        "cls": "filter-chip "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Por revisar\n102",
+        "cls": "filter-chip "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Revisadas\n35",
+        "cls": "filter-chip "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Registrar libro",
+        "cls": "primary wide-action"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Abrir Fabrica sin biblioteca",
+        "cls": "ghost wide-action"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Registrar libro",
+        "cls": "secondary"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "ACADEMIA NOSTRADAMUS SEMESTRAL 2022 - I\nacademia-nostradamus-semestral-2022-i | ",
+        "cls": "book-card active"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Algebra-Coleccion Ciencias y Humanidades-Tomo I\nalgebra-coleccion-ciencias-y-hum",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Algebra-Coleccion Ciencias y Humanidades-Tomo II\nalgebra-coleccion-ciencias-y-hu",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Algebra I - Preuniversitario\nalgebra-i-preuniversitario | Eduardo Espinoza Ramos",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "ÁLGEBRA_Esencial\nalgebra-esencial | Yoniln Vilca - Ricardo Mamani | Algebra\n26\nP",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Algebra_Matematica_Preuniversitaria\nalgebra-matematica-preuniversitaria | Vladim",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Áreas de regiones planas\nareas-de-regiones-planas | Julio Orihuela Bastidas | Ge",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "ASEUNI SEMIANUAL - GEOMETRIA\naseuni-semianual-geometria | Academia ASEUNI | Geom",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "ASEUNI SEMIANUAL - GEOMETRIA RESUMENES\naseuni-semianual-geometria-resumenes | Ac",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "ATHENAS CICLO UNI BASICO - Geometria (semanas unidas)\nathenas-ciclo-uni-basico-g",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "CEPRE-SM(Del 2018-II al 2020-I)\ncepre-sm-del-2018-ii-al-2020-i | Manhattan Edito",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "CEPUNT 2022 I\ncepunt-2022-i | UNT | Examenes\n3\nPend.\n0\nProg.\n0\nRev.\nVer instanci",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "C2\nCEPUNT 2022 II\ncepunt-2022-ii | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer ins",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "C2\nCEPUNT 2023 I\ncepunt-2023-i | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer insta",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "C2\nCEPUNT 2024 I\ncepunt-2024-i | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer insta",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "C2\nCEPUNT 2024 II\ncepunt-2024-ii | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer ins",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "C2\nCEPUNT 2025 I\ncepunt-2025-i | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer insta",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "C2\nCEPUNT 2026 I SUMATIVO I\ncepunt-2026-i-sumativo-i | UNT | Examenes\n0\nPend.\n0\n",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "C2\nCEPUNT 2026 I SUMATIVO II\ncepunt-2026-i-sumativo-ii | UNT | Examenes\n0\nPend.\n",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "C2\nCEPUNT 2026 II SUMATIVO I\ncepunt-2026-ii-sumativo-i | UNT | Examenes\n0\nPend.\n",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "C2\nCEPUNT 2026 II SUMATIVO II\ncepunt-2026-ii-sumativo-ii | UNT | Examenes\n0\nPend",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Circunferencia\ncircunferencia | Julio Orihuela Bastidas | Geometria\n1\nPend.\n0\nPr",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Compendio Academico de Matematica - Algebra\ncompendio-academico-de-matematica-al",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Compendio Trilce\ncompendio-trilce | Dpto. Pedagogico TRILCE | Algebra\n14\nPend.\n0",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Congruencia de triangulos\ncongruencia-de-triangulos | Julio Orihuela Bastidas | ",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Cuadriláteros\ncuadrilateros | Julio Orihuela Bastidas | Geometria\n1\nPend.\n0\nProg",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "CV-Material_Didactico-1(Ciclo_Semestral)\ncv-material-didactico-1-ciclo-semestral",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Editorial_uniciencias_Algebra\neditorial-uniciencias-algebra | Mikhaild Flores P.",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "E2\nEXTRAORD 2022 I\nextraord-2022-i | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer i",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "E2\nEXTRAORD 2022 II\nextraord-2022-ii | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "E2\nEXTRAORD 2023 I\nextraord-2023-i | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer i",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "E2\nEXTRAORD 2023 II\nextraord-2023-ii | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "E2\nEXTRAORD 2025 I\nextraord-2025-i | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer i",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "E2\nEXTRAORD 2025 II\nextraord-2025-ii | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "E2\nEXTRAORD 2026 I\nextraord-2026-i | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer i",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "E2\nEXTRAORD 2026 II\nextraord-2026-ii | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Geometria-Eureka\ngeometria-eureka | Geometria\n15\nPend.\n0\nProg.\n0\nRev.\nVer instan",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "GEOMETRIA_ANUAL_ADUNI_2015\ngeometria-anual-aduni-2015 | Aduni | Geometria\n16\nPen",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "GEOMETRIA_ANUAL_ADUNI_2016\ngeometria-anual-aduni-2016 | Aduni | Geometria\n28\nPen",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Geometría_Ingenio\ngeometria-ingenio | Anibal Ricardo Trucios E. | Geometria\n2\nPe",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "O2\nORDIN 2019 II\nordin-2019-ii | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer insta",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "O2\nORDIN 2020 I\nordin-2020-i | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer instanc",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "O2\nORDIN 2022 I\nordin-2022-i | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer instanc",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "O2\nORDIN 2022 II\nordin-2022-ii | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer insta",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "O2\nORDIN 2023 I\nordin-2023-i | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer instanc",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "O2\nORDIN 2023 II\nordin-2023-ii | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer insta",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "O2\nORDIN 2024 I\nordin-2024-i | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer instanc",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "O2\nORDIN 2024 II\nordin-2024-ii | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer insta",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "O2\nORDIN 2025 II\nordin-2025-ii | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer insta",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "O2\nORDIN 2026 I\nordin-2026-i | UNT | Examenes\n0\nPend.\n0\nProg.\n0\nRev.\nVer instanc",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Pre-UNI-ALGEBRA\npre-uni-algebra | Luis Manrique | Algebra\n6\nPend.\n0\nProg.\n0\nRev.",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Problemas Exámenes de Admisión Geometría (1965-2020)\nproblemas-examenes-admision",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Problemas_Selectos_I\nproblemas-selectos-i | Celso Gaspar Tapara | Algebra\n5\nPend",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Proporcionalidad\nproporcionalidad | Julio Orihuela Bastidas | Geometria\n2\nPend.\n",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Puntos Notables\npuntos-notables | Julio Orihuela Bastidas | Geometria\n2\nPend.\n0\n",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Relaciones Métricas\nrelaciones-metricas | Julio Orihuela Bastidas | Geometria\n2\n",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "SG\nS1-Geometría_analítica-La_recta\ns1-geometria-analitica-la-recta | Editorial R",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "S2-Circunferencia_Parábola\ns2-circunferencia-parabola | Editorial RODO | Geometr",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "SE\nS3-Elipse_Hipérbola\ns3-elipse-hiperbola | Editorial RODO | Geometria Analitic",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "ST\nS4-Traslación_y_rotación_de_ejes-Coordenadas_polares\ns4-traslacion-y-rotacion",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Tipo Admision UNI\ntipo-admision-uni | Cuzcano | Geometria\n6\nPend.\n0\nProg.\n0\nRev.",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Triangulos\ntriangulos | Julio Orihuela Bastidas | Geometria\n1\nPend.\n0\nProg.\n1\nRe",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "UNFV_CEPREVI_ALGEBRA\nunfv-ceprevi-algebra | CEPREVI | ALGEBRA\n13\nPend.\n0\nProg.\n0",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Vesalius - Algebra - Temas\nvesalius-algebra-temas | Vesalius | Algebra\n11\nPend.\n",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Cesar_Vallejo-Anual_2015-Pt1\ncesar-vallejo-anual-2015-pt1 | Academia Cesar Valle",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "S1-Ángulo_trigonométrico-Sistemas_de_medición_angular\ns1-angulo-trigonometrico-s",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "S10-Funciones_trigonométricas\ns10-funciones-trigonometricas | Walter Mori Valver",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "S11-Funciones_trigonométricas_inversas\ns11-funciones-trigonometricas-inversas | ",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "S12-Ecuaciones_trigonométricas-Inecuaciones_trigonométricas\ns12-ecuaciones-trigo",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "S13-Resolución_de_triángulos_oblicuángulos_y_cuadriláteros\ns13-resolucion-de-tri",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "S2-Longitud_de_arco-Sector_circular-Poleas_y_engranajes\ns2-longitud-de-arco-sect",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "S3-Razones_Trigonometricas_ángulos_agudos-Ángulos_verticales_y_horizontales\ns3-r",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "S4-Reducción_al_primer_cuadrante\ns4-reduccion-al-primer-cuadrante | Walter Mori ",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "S5-Circunferencia_trigonométrica\ns5-circunferencia-trigonometrica | Walter Mori ",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "S6-Identidades_trigonométricas\ns6-identidades-trigonometricas | Walter Mori Valv",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "S7-Arco_compuesto\ns7-arco-compuesto | Walter Mori Valverde | Trigonometria\n0\nPen",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "S8-Arcos_múltiples\ns8-arcos-multiples | Walter Mori Valverde | Trigonometria\n0\nP",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "S9-Transformaciones_trigonométricas\ns9-transformaciones-trigonometricas | Walter",
+        "cls": "book-card "
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Ver instancias",
+        "cls": "primary"
+      }
+    ],
+    "horizontalOverflowCandidates": []
+  },
+  "consoleRows": [
+    {
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 404 (Not Found)"
+    },
+    {
+      "type": "info",
+      "text": "Images loaded lazily and replaced with placeholders. Load events are deferred. See https://go.microsoft.com/fwlink/?linkid=2048113"
+    }
+  ]
+}

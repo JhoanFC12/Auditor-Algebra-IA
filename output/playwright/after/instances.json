@@ -1,0 +1,27 @@
+{
+  "title": "Biblioteca | Fabrica PDF",
+  "url": "http://127.0.0.1:65143/",
+  "scrollHeight": 2517,
+  "clientHeight": 920,
+  "bodyText": "FABRICA PDF -> STAGING\n\nBiblioteca\n\nRegistra libros, divide instancias y abre la Fabrica por tramo de trabajo.\n\nStaging primero\nRevision humana\nBD bloqueada\nModo oscuro\nBiblioteca\nActualizar\nBIBLIOTECA\n78 libro(s)\nBase de datos\nmathcontentstudio_local_mirror\nBuscar\nTodos\n518\nPendientes\n380\nEn progreso\n0\nPor revisar\n102\nRevisadas\n35\nRegistrar libro\nAbrir Fabrica sin biblioteca\nVolver a libros\nInstancias del libro\n\nRevisa el avance por tramo y abre la Fabrica PDF solo para la instancia que quieras trabajar.\n\nCrear instancia\nACADEMIA-NOSTRADAMUS-SEMESTRAL-2022-I\nACADEMIA NOSTRADAMUS SEMESTRAL 2022 - I\n\nAcademia Nostradamus | Geometria\n\n25 instancia(s)\nsemana_n_01_-_segmentos_y_angulos_-_conjuntos_convexos\nPaginas por definir\nPendiente\n0\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_02_-_triangulos\nPaginas por definir\nPendiente\n0\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_03_-_triangulos_ii\nPaginas por definir\nPendiente\n0\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_04_-_congruencia_de_triangulos_i\nPaginas por definir\nPendiente\n0\nEscaneados\n0\nMeta\n0\nRevisadas\nAbrir Fabrica\nsemana_n_05_-_congruencia_de_triangulos_ii\nPaginas por definir\nPendiente\n0\nEscaneados\n0\nM",
+  "workspace": {
+    "className": "workspace library-mode",
+    "gridTemplateColumns": "260px 844px 280px"
+  },
+  "inspector": {
+    "x": 1146,
+    "y": 147.828125,
+    "width": 280,
+    "height": 726,
+    "display": "grid",
+    "gridColumn": "auto",
+    "overflow": "auto"
+  },
+  "stage": {
+    "x": 288,
+    "y": 147.828125,
+    "width": 844,
+    "height": 2293.65625
+  },
+  "overflowX": false
+}
