@@ -5,7 +5,7 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from modulos.modulo13_laboratorio_pdf_segmentacion.controlador_laboratorio_pdf import (
     DEFAULT_PROBLEM_CROPS_LIVE_ROOT,
@@ -725,6 +725,9 @@ class InstancePdfPipelineService:
         force_figure_model: bool = True,
         record_id: str = "",
         record_ids: list[str] | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        run_segmentation: bool = True,
+        run_ocr: bool = True,
     ) -> list[StagingProblemRecord]:
         records = self.staging.load_records()
         selected_record_ids = [str(item or "").strip() for item in list(record_ids or []) if str(item or "").strip()]
@@ -743,41 +746,137 @@ class InstancePdfPipelineService:
             records = records[: max(0, int(limit))]
         if not records:
             return []
-        from modulos.modulo0_transcriptor.scan_pipeline.pipeline import ScanPipeline
-        from modulos.modulo0_transcriptor.scan_pipeline.extractor import TRAINED_OCR_VISION_MODEL
-        from modulos.modulo0_transcriptor.segmentador_v2 import SegmentadorProblemasV2
+        if not run_segmentation and not run_ocr:
+            return records
+        if run_segmentation and run_ocr:
+            selected_ids = [str(record.record_id or "") for record in records if str(record.record_id or "")]
+            if progress_callback is not None:
+                try:
+                    progress_callback(
+                        {
+                            "event": "phase_start",
+                            "phase": "segmentation",
+                            "message": f"Segmentando graficos localmente 0 de {len(selected_ids)}",
+                            "total": len(selected_ids),
+                        }
+                    )
+                except Exception:
+                    pass
+            self.run_ocr_and_segmentation(
+                provider=provider,
+                curso=curso,
+                tema=tema,
+                start_n=start_n,
+                limit=None,
+                ocr_model=ocr_model,
+                figure_model=figure_model,
+                force_figure_model=force_figure_model,
+                record_ids=selected_ids,
+                progress_callback=progress_callback,
+                run_segmentation=True,
+                run_ocr=False,
+            )
+            if progress_callback is not None:
+                try:
+                    progress_callback(
+                        {
+                            "event": "phase_start",
+                            "phase": "ocr",
+                            "message": f"Ejecutando OCR remoto 0 de {len(selected_ids)}",
+                            "total": len(selected_ids),
+                        }
+                    )
+                except Exception:
+                    pass
+            return self.run_ocr_and_segmentation(
+                provider=provider,
+                curso=curso,
+                tema=tema,
+                start_n=start_n,
+                limit=None,
+                ocr_model=ocr_model,
+                figure_model=figure_model,
+                force_figure_model=force_figure_model,
+                record_ids=selected_ids,
+                progress_callback=progress_callback,
+                run_segmentation=False,
+                run_ocr=True,
+            )
+
+        if run_ocr:
+            from modulos.modulo0_transcriptor.scan_pipeline.pipeline import ScanPipeline
+            from modulos.modulo0_transcriptor.scan_pipeline.extractor import TRAINED_OCR_VISION_MODEL
+        else:
+            ScanPipeline = None  # type: ignore[assignment]
+            TRAINED_OCR_VISION_MODEL = ""
+        if run_segmentation:
+            from modulos.modulo0_transcriptor.segmentador_v2 import SegmentadorProblemasV2
+        else:
+            SegmentadorProblemasV2 = None  # type: ignore[assignment]
 
         active_ocr_model = str(ocr_model or self.models.ocr or "").strip()
         active_figure_model = str(figure_model or self.models.figure_segmenter or "").strip()
-        resolved_ocr_model = active_ocr_model or str(os.getenv("HF_MODEL", TRAINED_OCR_VISION_MODEL) or TRAINED_OCR_VISION_MODEL).strip()
-        self._validate_ocr_runtime(provider=provider, model=resolved_ocr_model, trained_model=TRAINED_OCR_VISION_MODEL)
-        endpoint_state = self._prepare_trained_ocr_endpoint(
-            provider=provider,
-            model=resolved_ocr_model,
-            trained_model=TRAINED_OCR_VISION_MODEL,
-        )
-        segmenter = SegmentadorProblemasV2(
-            self.staging.root / "segments",
-            model_path=active_figure_model,
-            force_model_default=bool(force_figure_model),
-        )
-        pipeline = ScanPipeline(
-            provider=provider,
-            model=active_ocr_model,
-            debug_dir=str(self.staging.root / "ocr_debug"),
-            strict_json=True,
-        )
+        endpoint_state: dict[str, Any] = {}
+        pipeline = None
+        if run_ocr:
+            resolved_ocr_model = active_ocr_model or str(os.getenv("HF_MODEL", TRAINED_OCR_VISION_MODEL) or TRAINED_OCR_VISION_MODEL).strip()
+            self._validate_ocr_runtime(provider=provider, model=resolved_ocr_model, trained_model=TRAINED_OCR_VISION_MODEL)
+            endpoint_state = self._prepare_trained_ocr_endpoint(
+                provider=provider,
+                model=resolved_ocr_model,
+                trained_model=TRAINED_OCR_VISION_MODEL,
+            )
+            pipeline = ScanPipeline(
+                provider=provider,
+                model=active_ocr_model,
+                debug_dir=str(self.staging.root / "ocr_debug"),
+                strict_json=True,
+            )
+        segmenter = None
+        if run_segmentation:
+            segmenter = SegmentadorProblemasV2(
+                self.staging.root / "segments",
+                model_path=active_figure_model,
+                force_model_default=bool(force_figure_model),
+            )
         processed: list[StagingProblemRecord] = []
         next_n = max(1, int(start_n))
-        for record in records:
+        phase_error_prefixes: list[str] = []
+        if run_segmentation:
+            phase_error_prefixes.append("segmentacion_grafica:")
+        if run_ocr:
+            phase_error_prefixes.extend(["ocr_crudo:", "ocr_estructura:"])
+        phase_name = "OCR" if run_ocr else "segmentacion"
+        for index, record in enumerate(records):
             crop_path = Path(record.crop_path)
-            record.errors = []
+            if phase_error_prefixes:
+                record.errors = [
+                    str(item)
+                    for item in list(record.errors or [])
+                    if not any(str(item).startswith(prefix) for prefix in phase_error_prefixes)
+                ]
+            if progress_callback is not None:
+                try:
+                    progress_callback(
+                        {
+                            "event": "record_start",
+                            "phase": "ocr" if run_ocr else "segmentation",
+                            "record_id": record.record_id,
+                            "index": index + 1,
+                            "total": len(records),
+                            "message": f"{phase_name} {index + 1} de {len(records)}",
+                        }
+                    )
+                except Exception:
+                    pass
             if not crop_path.exists():
                 record.status = StageStatus.ERROR
                 record.errors.append(f"crop_missing:{crop_path}")
                 record.set_step(PipelineStep.CROPS, StageStatus.ERROR, "crop no encontrado", crop_path=str(crop_path))
-                record.set_step(PipelineStep.OCR, StageStatus.PENDING, "pendiente hasta recuperar crop")
-                record.set_step(PipelineStep.SEGMENTATION, StageStatus.PENDING, "pendiente hasta recuperar crop")
+                if run_ocr:
+                    record.set_step(PipelineStep.OCR, StageStatus.PENDING, "pendiente hasta recuperar crop")
+                if run_segmentation:
+                    record.set_step(PipelineStep.SEGMENTATION, StageStatus.PENDING, "pendiente hasta recuperar crop")
                 record.set_step(PipelineStep.NORMALIZATION, StageStatus.PENDING, "pendiente hasta recuperar crop")
                 record.sync_status_from_steps()
                 self.staging.upsert_record(record)
@@ -785,134 +884,114 @@ class InstancePdfPipelineService:
                 continue
             record.status = StageStatus.PROCESSING
             record.set_step(PipelineStep.CROPS, StageStatus.READY, "crop disponible", crop_path=str(crop_path))
-            record.set_step(PipelineStep.SEGMENTATION, StageStatus.PROCESSING, "segmentando graficos internos")
-            record.set_step(PipelineStep.OCR, StageStatus.PROCESSING, "ejecutando OCR estructurado")
-            try:
-                segments = segmenter.segmentar(crop_path, force_model=bool(force_figure_model))
-                detector_payload = dict(segmenter.last_detector_payload or {})
+            if run_segmentation:
+                record.set_step(PipelineStep.SEGMENTATION, StageStatus.PROCESSING, "segmentando graficos internos")
                 try:
-                    figure_max_conf = float(detector_payload.get("max_conf", 0.0) or 0.0)
-                except Exception:
-                    figure_max_conf = 0.0
-                try:
-                    figure_avg_conf = float(detector_payload.get("avg_conf", 0.0) or 0.0)
-                except Exception:
-                    figure_avg_conf = 0.0
-                record.confidence["figure_segmenter_max"] = max(0.0, min(1.0, figure_max_conf))
-                record.confidence["figure_segmenter_avg"] = max(0.0, min(1.0, figure_avg_conf))
-                record.models = {
-                    **record.models,
-                    **self._model_snapshot(
-                        provider=provider,
-                        confidence_overrides={"figure_segmenter": record.confidence["figure_segmenter_max"]},
-                    ),
-                }
-                record.figure_segmentation = {
-                    "status": StageStatus.NEEDS_REVIEW if segments else StageStatus.READY,
-                    "segments_total": len(segments),
-                    "segments": [
-                        {
-                            "idx": int(seg.idx),
-                            "bbox_px": [int(v) for v in seg.bbox],
-                            "image_path": str(seg.image_path),
-                        }
-                        for seg in segments
-                    ],
-                    "detector": detector_payload,
-                }
-                record.set_step(
-                    PipelineStep.SEGMENTATION,
-                    StageStatus.NEEDS_REVIEW if segments else StageStatus.READY,
-                    "segmentos detectados para revisar" if segments else "sin graficos internos detectados",
-                    segments_total=len(segments),
-                )
-                record.set_step(PipelineStep.OCR, StageStatus.PROCESSING, "ejecutando OCR crudo remoto")
-                if endpoint_state:
-                    record.trace = {
-                        **dict(record.trace or {}),
-                        "hf_ocr_endpoint_before_run": dict(endpoint_state),
+                    if segmenter is None:
+                        raise RuntimeError("Segmentador no inicializado.")
+                    segments = segmenter.segmentar(crop_path, force_model=bool(force_figure_model))
+                    detector_payload = dict(segmenter.last_detector_payload or {})
+                    try:
+                        figure_max_conf = float(detector_payload.get("max_conf", 0.0) or 0.0)
+                    except Exception:
+                        figure_max_conf = 0.0
+                    try:
+                        figure_avg_conf = float(detector_payload.get("avg_conf", 0.0) or 0.0)
+                    except Exception:
+                        figure_avg_conf = 0.0
+                    record.confidence["figure_segmenter_max"] = max(0.0, min(1.0, figure_max_conf))
+                    record.confidence["figure_segmenter_avg"] = max(0.0, min(1.0, figure_avg_conf))
+                    record.models = {
+                        **record.models,
+                        **self._model_snapshot(
+                            provider=provider,
+                            confidence_overrides={"figure_segmenter": record.confidence["figure_segmenter_max"]},
+                        ),
                     }
-                initial_items, raw_output = self._extract_with_cold_start_retry(
-                    pipeline,
-                    image_path=crop_path,
-                    curso=curso,
-                    tema=tema,
-                    start_n=next_n,
-                )
-                record.raw_ocr = raw_output
-                record.set_step(
-                    PipelineStep.OCR,
-                    StageStatus.PROCESSING,
-                    "OCR crudo guardado; estructurando lectura",
-                    characters=len(str(raw_output or "")),
-                )
-                run = pipeline.process_raw_output(
-                    raw_output=raw_output,
-                    image_path=crop_path,
-                    start_n=next_n,
-                    curso=curso,
-                    tema=tema,
-                    has_figure_hint=bool(segments),
-                    initial_items=initial_items or None,
-                )
-                record.structured_ocr = run.to_report_dict()
-                items_total = int(record.structured_ocr.get("items_total", 0) or 0)
-                needs_review = int(record.structured_ocr.get("needs_review_count", 0) or 0)
-                if items_total > 0:
-                    record.confidence["ocr_quality_proxy"] = max(0.0, min(1.0, 1.0 - (needs_review / float(items_total))))
-                ocr_status = StageStatus.READY if items_total > 0 else StageStatus.NEEDS_REVIEW
-                confidence_overrides = {}
-                if "figure_segmenter_max" in record.confidence:
-                    confidence_overrides["figure_segmenter"] = float(record.confidence.get("figure_segmenter_max") or 0.0)
-                if "ocr_quality_proxy" in record.confidence:
-                    confidence_overrides["ocr"] = float(record.confidence.get("ocr_quality_proxy") or 0.0)
-                record.models = {
-                    **record.models,
-                    **self._model_snapshot(provider=provider, confidence_overrides=confidence_overrides or None),
-                }
-                record.set_step(
-                    PipelineStep.OCR,
-                    ocr_status,
-                    "OCR estructurado con items" if items_total > 0 else "OCR sin item estructurado",
-                    items_total=items_total,
-                    needs_review_count=needs_review,
-                )
-                record.normalized = {}
-                record.set_step(
-                    PipelineStep.NORMALIZATION,
-                    StageStatus.PENDING,
-                    "pendiente de definir/entrenar normalizador; OCR estructurado queda como fuente",
-                    source="normalizer_pending_training",
-                )
-                record.set_step(
-                    PipelineStep.REVIEW,
-                    StageStatus.NEEDS_REVIEW,
-                    "OCR listo para revision humana; normalizacion IA pendiente",
-                )
-                self._mark_record_downstream_active(record, reason="ocr_segmentation_reran_after_source_change")
-                self._write_raw_artifacts(record)
-                record.sync_status_from_steps()
-                if run.items:
-                    next_n = max(next_n + 1, max(int(item.item.n) for item in run.items) + 1)
-            except Exception as exc:
-                message = str(exc or "")
-                record.status = StageStatus.ERROR
-                if record.step_status(PipelineStep.SEGMENTATION) == StageStatus.PROCESSING:
+                    record.figure_segmentation = {
+                        "status": StageStatus.NEEDS_REVIEW if segments else StageStatus.READY,
+                        "segments_total": len(segments),
+                        "segments": [
+                            {
+                                "idx": int(seg.idx),
+                                "bbox_px": [int(v) for v in seg.bbox],
+                                "image_path": str(seg.image_path),
+                            }
+                            for seg in segments
+                        ],
+                        "detector": detector_payload,
+                    }
+                    record.set_step(
+                        PipelineStep.SEGMENTATION,
+                        StageStatus.NEEDS_REVIEW if segments else StageStatus.READY,
+                        "segmentos detectados para revisar" if segments else "sin graficos internos detectados",
+                        segments_total=len(segments),
+                    )
+                except Exception as exc:
+                    message = str(exc or "")
                     record.errors.append(f"segmentacion_grafica:{message}")
                     record.set_step(PipelineStep.SEGMENTATION, StageStatus.ERROR, f"segmentacion grafica: {message}")
-                if record.step_status(PipelineStep.OCR) == StageStatus.PROCESSING:
+            if run_ocr:
+                record.set_step(PipelineStep.OCR, StageStatus.PROCESSING, "ejecutando OCR crudo remoto")
+                try:
+                    if endpoint_state:
+                        record.trace = {
+                            **dict(record.trace or {}),
+                            "hf_ocr_endpoint_before_run": dict(endpoint_state),
+                        }
+                    if pipeline is None:
+                        raise RuntimeError("Pipeline OCR no inicializado.")
+                    _initial_items, raw_output = self._extract_with_cold_start_retry(
+                        pipeline,
+                        image_path=crop_path,
+                        curso=curso,
+                        tema=tema,
+                        start_n=next_n,
+                        progress_callback=progress_callback,
+                    )
+                    record.raw_ocr = raw_output
+                    record.structured_ocr = {}
+                    raw_has_text = bool(str(raw_output or "").strip())
+                    record.set_step(
+                        PipelineStep.OCR,
+                        StageStatus.READY if raw_has_text else StageStatus.NEEDS_REVIEW,
+                        "OCR crudo guardado" if raw_has_text else "OCR crudo vacio; requiere revision",
+                        characters=len(str(raw_output or "")),
+                    )
+                    if raw_has_text:
+                        record.confidence["ocr_raw_available"] = 1.0
+                    record.models = {
+                        **record.models,
+                        **self._model_snapshot(provider=provider, confidence_overrides={"ocr": float(record.confidence.get("ocr_raw_available") or 0.0)} if raw_has_text else None),
+                    }
+                    record.normalized = {}
+                    record.set_step(
+                        PipelineStep.NORMALIZATION,
+                        StageStatus.PENDING,
+                        "pendiente de normalizacion desde OCR crudo revisado",
+                        source="normalizer_pending_training",
+                    )
+                    record.set_step(
+                        PipelineStep.REVIEW,
+                        StageStatus.NEEDS_REVIEW,
+                        "OCR crudo listo para revision humana; normalizacion IA pendiente",
+                    )
+                    self._mark_record_downstream_active(record, reason="ocr_segmentation_reran_after_source_change")
+                    self._write_raw_artifacts(record)
+                    next_n += 1
+                except Exception as exc:
+                    message = str(exc or "")
                     if str(record.raw_ocr or "").strip():
-                        record.errors.append(f"ocr_estructura:{message}")
                         record.set_step(
                             PipelineStep.OCR,
-                            StageStatus.NEEDS_REVIEW,
-                            f"OCR crudo guardado; fallo estructura/formato: {message}",
+                            StageStatus.READY,
+                            "OCR crudo guardado; fallo posterior no bloquea revision",
                             characters=len(str(record.raw_ocr or "")),
                         )
                         record.set_step(
                             PipelineStep.NORMALIZATION,
-                            StageStatus.ERROR,
-                            f"normalizacion no ejecutada por fallo de estructura/formato: {message}",
+                            StageStatus.PENDING,
+                            "pendiente de normalizacion desde OCR crudo revisado",
                         )
                         try:
                             self._write_raw_artifacts(record)
@@ -922,22 +1001,16 @@ class InstancePdfPipelineService:
                         record.errors.append(f"ocr_crudo:{message}")
                         record.set_step(PipelineStep.OCR, StageStatus.ERROR, f"OCR crudo remoto: {message}")
                         record.set_step(PipelineStep.NORMALIZATION, StageStatus.ERROR, "normalizacion no ejecutada por error de OCR crudo")
-                elif record.step_status(PipelineStep.NORMALIZATION) == StageStatus.PROCESSING:
-                    record.errors.append(f"normalizacion:{message}")
-                    record.set_step(PipelineStep.NORMALIZATION, StageStatus.ERROR, f"normalizacion: {message}")
-                else:
-                    record.errors.append(message)
-                    record.set_step(PipelineStep.NORMALIZATION, StageStatus.ERROR, "normalizacion no ejecutada por error previo")
-                record.sync_status_from_steps()
             confidence_overrides = {}
             if "figure_segmenter_max" in record.confidence:
                 confidence_overrides["figure_segmenter"] = float(record.confidence.get("figure_segmenter_max") or 0.0)
-            if "ocr_quality_proxy" in record.confidence:
-                confidence_overrides["ocr"] = float(record.confidence.get("ocr_quality_proxy") or 0.0)
+            if "ocr_raw_available" in record.confidence:
+                confidence_overrides["ocr"] = float(record.confidence.get("ocr_raw_available") or 0.0)
             record.models = {
                 **record.models,
                 **self._model_snapshot(provider=provider, confidence_overrides=confidence_overrides or None),
             }
+            record.sync_status_from_steps()
             record.touch()
             self.staging.upsert_record(record)
             processed.append(record)
@@ -972,14 +1045,15 @@ class InstancePdfPipelineService:
         curso: str,
         tema: str,
         start_n: int,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> Any:
         from .hf_endpoint_manager import cold_start_sleep_seconds, is_cold_start_runtime_error
 
         try:
-            retries = int(str(os.getenv("HF_ENDPOINT_COLD_START_RETRIES", "3") or "3").strip())
+            retries = int(str(os.getenv("HF_ENDPOINT_COLD_START_RETRIES", "8") or "8").strip())
         except Exception:
-            retries = 3
-        retries = max(0, min(8, retries))
+            retries = 8
+        retries = max(0, min(12, retries))
         last_exc: Exception | None = None
         for attempt in range(retries + 1):
             try:
@@ -993,7 +1067,25 @@ class InstancePdfPipelineService:
                 last_exc = exc
                 if attempt >= retries or not is_cold_start_runtime_error(exc):
                     raise
-                time.sleep(cold_start_sleep_seconds(attempt))
+                delay_s = cold_start_sleep_seconds(attempt)
+                if progress_callback is not None:
+                    try:
+                        progress_callback(
+                            {
+                                "event": "ocr_cold_start_retry",
+                                "attempt": attempt + 1,
+                                "retries": retries,
+                                "delay_s": delay_s,
+                                "message": (
+                                    "Endpoint OCR despertando o temporalmente no disponible "
+                                    f"(reintento {attempt + 1}/{retries}, espera {int(delay_s)}s)."
+                                ),
+                                "error": str(exc or ""),
+                            }
+                        )
+                    except Exception:
+                        pass
+                time.sleep(delay_s)
         if last_exc is not None:
             raise last_exc
         raise RuntimeError("No se pudo ejecutar OCR.")
@@ -1057,16 +1149,18 @@ class InstancePdfPipelineService:
             try:
                 record.models = {**record.models, **self._model_snapshot()}
                 if str(record.raw_ocr or "").strip():
-                    run = self._structure_raw_ocr_for_normalization(record)
-                    record.structured_ocr = run.to_report_dict()
-                if str(record.raw_ocr or "").strip() or record.structured_ocr:
-                    record.set_step(PipelineStep.OCR, StageStatus.READY, "OCR disponible para preparar revision")
-                record.normalized = self._normalize_from_pipeline_record(record, record.structured_ocr)
+                    record.set_step(PipelineStep.OCR, StageStatus.READY, "OCR crudo disponible para preparar revision")
+                    record.normalized = self._draft_normalized_from_raw_ocr(record)
+                elif record.structured_ocr:
+                    record.set_step(PipelineStep.OCR, StageStatus.READY, "OCR historico disponible para preparar revision")
+                    record.normalized = self._normalize_from_pipeline_record(record, record.structured_ocr)
+                else:
+                    record.normalized = {}
                 if record.normalized:
-                    record.set_step(PipelineStep.NORMALIZATION, StageStatus.NEEDS_REVIEW, "normalizado pendiente de revision")
+                    record.set_step(PipelineStep.NORMALIZATION, StageStatus.NEEDS_REVIEW, "borrador desde OCR crudo pendiente de formato final")
                     record.set_step(PipelineStep.REVIEW, StageStatus.NEEDS_REVIEW, "pendiente de revision humana")
                 else:
-                    record.set_step(PipelineStep.NORMALIZATION, StageStatus.PENDING, "sin item OCR estructurado para preparar revision")
+                    record.set_step(PipelineStep.NORMALIZATION, StageStatus.PENDING, "sin OCR crudo para preparar revision")
                 self._write_raw_artifacts(record)
                 record.sync_status_from_steps()
             except Exception as exc:
@@ -1086,29 +1180,12 @@ class InstancePdfPipelineService:
             raise KeyError(record_id)
         record.raw_ocr = str(raw_ocr or "")
         record.errors = []
-        items_total = 0
-        needs_review = 0
-        if record.raw_ocr.strip():
-            try:
-                run = self._structure_raw_ocr_for_normalization(record)
-                record.structured_ocr = run.to_report_dict()
-                items_total = int(record.structured_ocr.get("items_total", 0) or 0)
-                needs_review = int(record.structured_ocr.get("needs_review_count", 0) or 0)
-            except Exception as exc:
-                record.structured_ocr = {}
-                record.errors.append(f"ocr_estructura:{exc}")
-        else:
+        if not record.raw_ocr.strip():
             record.structured_ocr = {}
         record.normalized = {}
-        if record.errors:
-            ocr_status = StageStatus.ERROR
-            ocr_detail = f"OCR crudo guardado; no se pudo regenerar lectura estructurada: {record.errors[-1]}"
-        elif record.raw_ocr.strip() and items_total > 0:
+        if record.raw_ocr.strip():
             ocr_status = StageStatus.READY
-            ocr_detail = "OCR crudo revisado y lectura LaTeX regenerada"
-        elif record.raw_ocr.strip():
-            ocr_status = StageStatus.NEEDS_REVIEW
-            ocr_detail = "OCR crudo revisado; sin item estructurado para render LaTeX"
+            ocr_detail = "OCR crudo revisado"
         else:
             ocr_status = StageStatus.PENDING
             ocr_detail = "OCR crudo vacio; pendiente"
@@ -1118,8 +1195,6 @@ class InstancePdfPipelineService:
             ocr_detail,
             source="human_raw_ocr_editor",
             characters=len(record.raw_ocr),
-            items_total=items_total,
-            needs_review_count=needs_review,
         )
         record.set_step(PipelineStep.NORMALIZATION, StageStatus.PENDING, "pendiente de preparar revision desde OCR crudo revisado")
         record.set_step(PipelineStep.REVIEW, StageStatus.PENDING, "pendiente de revision final")
@@ -1129,7 +1204,7 @@ class InstancePdfPipelineService:
                 "updated_at": utc_now_text(),
                 "source": "human_raw_ocr_editor",
                 "characters": len(record.raw_ocr),
-                "structured_items_total": items_total,
+                "structured_items_total": int((record.structured_ocr or {}).get("items_total") or 0),
             },
         }
         self._mark_record_downstream_active(record, reason="raw_ocr_reviewed_after_source_change")
@@ -1234,6 +1309,41 @@ class InstancePdfPipelineService:
             has_figure_hint=bool(record.figure_segmentation.get("segments_total")),
             initial_items=None,
         )
+
+    def _draft_normalized_from_raw_ocr(self, record: StagingProblemRecord) -> dict[str, Any]:
+        raw = str(record.raw_ocr or "").strip()
+        if not raw:
+            return {}
+        source = dict(record.source or {})
+        try:
+            number = str(int(record.normalized.get("numero") or source.get("problem_number") or source.get("n") or "")).strip()
+        except Exception:
+            number = str(record.normalized.get("numero") or source.get("problem_number") or source.get("n") or "").strip()
+        has_figure = bool((record.figure_segmentation or {}).get("segments_total"))
+        return {
+            "schema_version": "normalized_problem_staging_v1",
+            "normalizer": "manual_raw_ocr_review",
+            "status": StageStatus.NEEDS_REVIEW,
+            "updated_at": utc_now_text(),
+            "source_record_id": record.record_id,
+            "numero": number,
+            "curso": str((record.normalized or {}).get("curso") or "SIN_CURSO"),
+            "tema": str((record.normalized or {}).get("tema") or "SIN_TEMA"),
+            "enunciado_latex": raw,
+            "alternativas": {"A": "", "B": "", "C": "", "D": "", "E": ""},
+            "respuesta_correcta": "",
+            "respuesta_final": "",
+            "tiene_grafico": has_figure,
+            "figure_tag": f"img-{number or record.record_id}" if has_figure else "",
+            "latex_rendered_item": "",
+            "metadata_tecnica": {
+                "crop_path": record.crop_path,
+                "source": source,
+                "models": dict(record.models),
+                "confidence": dict(record.confidence),
+                "raw_ocr_source": "raw_ocr_only",
+            },
+        }
 
     def _normalize_from_pipeline_record(self, record: StagingProblemRecord, report: dict[str, Any]) -> dict[str, Any]:
         items = list(report.get("items") or []) if isinstance(report, dict) else []

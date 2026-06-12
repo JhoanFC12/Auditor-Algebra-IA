@@ -11,6 +11,7 @@ from unittest.mock import patch
 from modulos.instance_factory.model_inventory import build_model_inventory_manifest, resolve_model_defaults
 from modulos.instance_factory.models import InstancePipelineContext, PipelineStep, StageStatus, StagingProblemRecord
 from modulos.instance_factory.page_selection import parse_page_selection
+from modulos.instance_factory.pipeline import InstancePdfPipelineService
 from modulos.instance_factory.staging import InstanceStagingStore
 
 
@@ -264,7 +265,7 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertEqual(store.get_record("crop_002").normalized["numero"], "99")
             self.assertEqual(store.get_record("crop_002").normalized["enunciado_latex"], "preservar")
 
-    def test_update_raw_ocr_regenerates_structured_latex_without_normalizing(self) -> None:
+    def test_update_raw_ocr_keeps_raw_as_source_without_structured_requirement(self) -> None:
         try:
             from modulos.instance_factory.pipeline import InstancePdfPipelineService
         except Exception as exc:  # pragma: no cover - optional detector/OCR dependencies.
@@ -292,13 +293,47 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             )
 
             self.assertEqual(updated.raw_ocr[:5], "<01.>")
-            self.assertGreater(int(updated.structured_ocr.get("items_total") or 0), 0)
+            self.assertEqual(updated.structured_ocr, {})
             self.assertEqual(updated.normalized, {})
             self.assertEqual(updated.step_status(PipelineStep.OCR), StageStatus.READY)
             self.assertEqual(updated.step_status(PipelineStep.NORMALIZATION), StageStatus.PENDING)
             loaded = store.get_record("crop_001")
-            self.assertGreater(int(loaded.structured_ocr.get("items_total") or 0), 0)
+            self.assertEqual(loaded.structured_ocr, {})
             self.assertEqual(loaded.normalized, {})
+
+    def test_normalize_existing_ocr_prepares_review_from_raw_ocr_only(self) -> None:
+        try:
+            from modulos.instance_factory.pipeline import InstancePdfPipelineService
+        except Exception as exc:  # pragma: no cover - optional detector/OCR dependencies.
+            self.skipTest(f"pipeline deps unavailable: {exc}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            crop = Path(tmp) / "crop_001.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="GEO", instance_type="s03")
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(crop),
+                    raw_ocr="<01.> Determinar x. A) $10^\\circ$ B) $20^\\circ$",
+                    source={"problem_number": 1},
+                    errors=["ocr_estructura:error antiguo"],
+                )
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            out = service.normalize_existing_ocr(record_id="crop_001")
+            loaded = store.get_record("crop_001")
+
+            self.assertEqual([record.record_id for record in out], ["crop_001"])
+            self.assertEqual(loaded.errors, [])
+            self.assertEqual(loaded.structured_ocr, {})
+            self.assertEqual(loaded.step_status(PipelineStep.OCR), StageStatus.READY)
+            self.assertEqual(loaded.step_status(PipelineStep.NORMALIZATION), StageStatus.NEEDS_REVIEW)
+            self.assertEqual(loaded.normalized["normalizer"], "manual_raw_ocr_review")
+            self.assertEqual(loaded.normalized["enunciado_latex"], "<01.> Determinar x. A) $10^\\circ$ B) $20^\\circ$")
 
     def test_trained_ocr_rejects_hf_router_as_dedicated_endpoint(self) -> None:
         try:
@@ -1163,6 +1198,40 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertEqual(raw_dir.name, review_dir.name)
             self.assertEqual(raw_dir.parent.name, "raw_outputs")
             self.assertEqual(review_dir.parent.name, "review_outputs")
+
+    def test_cold_start_503_retry_keeps_ocr_request_alive(self) -> None:
+        class Extractor:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def extract_from_image(self, **_kwargs):
+                self.calls += 1
+                if self.calls < 3:
+                    raise RuntimeError("503 Service Unavailable: endpoint is initializing")
+                return [], "<01.> Halle x. A) $1$ B) $2$"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s01", pdf_path=str(Path(tmp) / "book.pdf"))
+            service = InstancePdfPipelineService(context, staging_store=InstanceStagingStore(context, root=Path(tmp) / "staging"))
+            extractor = Extractor()
+            pipeline = SimpleNamespace(extractor=extractor)
+            events: list[dict] = []
+
+            with patch.dict(os.environ, {"HF_ENDPOINT_COLD_START_RETRIES": "2"}, clear=False):
+                with patch("modulos.instance_factory.pipeline.time.sleep", lambda _seconds: None):
+                    _items, raw = service._extract_with_cold_start_retry(
+                        pipeline,
+                        image_path=Path(tmp) / "crop.png",
+                        curso="SIN_CURSO",
+                        tema="SIN_TEMA",
+                        start_n=1,
+                        progress_callback=events.append,
+                    )
+
+            self.assertEqual(raw, "<01.> Halle x. A) $1$ B) $2$")
+            self.assertEqual(extractor.calls, 3)
+            self.assertEqual(len(events), 2)
+            self.assertIn("despertando", events[0]["message"])
 
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@ class _FakeService:
         self.staging = store
         self.models = _FakeModels()
         self.calls = []
+        self.phase_calls = []
         self.pages = []
         self.delay_s = 0.0
 
@@ -74,9 +75,13 @@ class _FakeService:
         force_figure_model=True,
         record_id="",
         record_ids=None,
+        progress_callback=None,
+        run_segmentation=True,
+        run_ocr=True,
     ):
         if self.delay_s:
             time.sleep(float(self.delay_s))
+        self.phase_calls.append((record_id, list(record_ids or []), bool(run_segmentation), bool(run_ocr)))
         self.calls.append(("run_ocr_and_segmentation", provider, curso, tema, start_n, limit, ocr_model, figure_model, force_figure_model, record_id, list(record_ids or [])))
         return self.staging.load_records()
 
@@ -192,6 +197,23 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
             finally:
                 runtime.stop()
 
+    def test_web_runtime_exposes_shared_app_reload_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(Path(tmp) / "book.pdf"))
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            runtime = FactoryWebRuntime(context, service=_FakeService(context, store))
+            try:
+                base = runtime.start()
+                before = _get_json(base, "api/app/version")
+                after = _post_json(base, "api/app/reload-signal", {})
+                self.assertEqual(before["schema_version"], "pdf_factory_web_app_version_v1")
+                self.assertEqual(after["schema_version"], "pdf_factory_web_app_version_v1")
+                self.assertTrue(after["reload_requested"])
+                self.assertEqual(before["asset_version"], after["asset_version"])
+                self.assertNotEqual(before.get("reload_token"), after.get("reload_token"))
+            finally:
+                runtime.stop()
+
     def test_web_runtime_runs_ocr_queue_as_reconnectable_background_job(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -241,6 +263,13 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                 self.assertIn(
                     ("run_ocr_and_segmentation", "local", "SIN_CURSO", "SIN_TEMA", 1, 1, "ocr-test", "fig-test", True, "crop_001", []),
                     service.calls,
+                )
+                self.assertEqual(
+                    service.phase_calls,
+                    [
+                        ("crop_001", [], True, False),
+                        ("crop_001", [], False, True),
+                    ],
                 )
                 self.assertIn(("scale_to_zero",), endpoint.calls)
             finally:

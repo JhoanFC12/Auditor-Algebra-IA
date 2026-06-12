@@ -1444,6 +1444,12 @@ canvas {
   padding: 16px;
 }
 
+.raw-ocr-latex-preview .statement-preview {
+  white-space: pre-wrap;
+  font-size: 18px;
+  line-height: 1.55;
+}
+
 .ocr-latex-preview .options-preview {
   gap: 8px;
 }
@@ -1683,6 +1689,63 @@ canvas {
 }
 
 .metric-warning { border-color: var(--warning-border); background: var(--amber-soft); }
+
+.metric-button {
+  display: block;
+  width: 100%;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  color: inherit;
+}
+
+.metric-button:hover {
+  border-color: var(--active-border);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, .12);
+}
+
+.error-report-summary {
+  margin-bottom: 14px;
+}
+
+.error-group-list,
+.error-record-list {
+  display: grid;
+  gap: 10px;
+}
+
+.error-group-card,
+.error-record-card {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-soft);
+}
+
+.error-group-card strong,
+.error-record-card strong {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.error-record-card {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+}
+
+.error-record-card p {
+  margin: 8px 0 0;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.small-codebox {
+  max-height: 150px;
+  font-size: 11px;
+}
 
 .inspector {
   display: grid;

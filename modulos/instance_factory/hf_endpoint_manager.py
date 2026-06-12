@@ -207,10 +207,21 @@ def is_cold_start_runtime_error(exc: Exception) -> bool:
             "bad gateway",
             "service unavailable",
             "gateway timeout",
+            "temporarily unavailable",
+            "server unavailable",
+            "upstream",
+            "no healthy upstream",
             "timed out",
             "timeout",
+            "read timeout",
             "connection error",
+            "connection reset",
+            "server disconnected",
             "endpoint is starting",
+            "initializing",
+            "initialising",
+            "not ready",
+            "retry later",
             "currently loading",
             "loading",
         )
@@ -218,6 +229,6 @@ def is_cold_start_runtime_error(exc: Exception) -> bool:
 
 
 def cold_start_sleep_seconds(attempt: int) -> float:
-    schedule = (8.0, 15.0, 30.0)
+    schedule = (8.0, 15.0, 30.0, 45.0, 60.0, 60.0, 90.0, 120.0)
     idx = max(0, min(len(schedule) - 1, int(attempt)))
     return schedule[idx]

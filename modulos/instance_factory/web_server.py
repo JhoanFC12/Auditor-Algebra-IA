@@ -24,6 +24,53 @@ from .hf_endpoint_manager import HfEndpointManager
 from .normalizer_training_bank import load_manifest as load_normalizer_training_manifest
 
 
+WEB_APP_ASSET_NAMES = ("index.html", "app.js", "styles.css")
+WEB_RELOAD_SIGNAL_PATH = Path(__file__).resolve().parents[2] / ".cache" / "instance_factory" / "web_reload_signal.json"
+
+
+def build_web_app_version(static_root: Path) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    digest = hashlib.sha1()
+    root = Path(static_root)
+    for name in WEB_APP_ASSET_NAMES:
+        path = root / name
+        try:
+            stat = path.stat()
+            row = {"name": name, "mtime_ns": int(stat.st_mtime_ns), "size": int(stat.st_size)}
+        except Exception:
+            row = {"name": name, "mtime_ns": 0, "size": 0}
+        rows.append(row)
+        digest.update(json.dumps(row, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    reload_token = ""
+    try:
+        payload = json.loads(WEB_RELOAD_SIGNAL_PATH.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            reload_token = str(payload.get("token") or "")
+    except Exception:
+        reload_token = ""
+    return {
+        "schema_version": "pdf_factory_web_app_version_v1",
+        "asset_version": digest.hexdigest(),
+        "reload_token": reload_token,
+        "assets": rows,
+    }
+
+
+def signal_web_app_reload(static_root: Path) -> dict[str, Any]:
+    WEB_RELOAD_SIGNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    token = uuid.uuid4().hex
+    payload = {
+        "schema_version": "pdf_factory_web_reload_signal_v1",
+        "token": token,
+        "asset_version": build_web_app_version(static_root).get("asset_version", ""),
+    }
+    WEB_RELOAD_SIGNAL_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        **build_web_app_version(static_root),
+        "reload_requested": True,
+    }
+
+
 class WebApiError(Exception):
     def __init__(self, message: str, *, status: int = 400, code: str = "bad_request") -> None:
         super().__init__(message)
@@ -131,6 +178,10 @@ class FactoryWebRuntime:
         query: dict[str, list[str]],
         payload: dict[str, Any],
     ) -> Any:
+        if method == "GET" and path == "/api/app/version":
+            return build_web_app_version(self.static_root)
+        if method == "POST" and path == "/api/app/reload-signal":
+            return signal_web_app_reload(self.static_root)
         if method == "GET" and path == "/api/ocr/jobs/status":
             return self._ocr_job_status(self._first(query, "job_id", ""))
         if method == "POST" and path == "/api/ocr/jobs/start":
@@ -366,13 +417,14 @@ class FactoryWebRuntime:
             record_ids = list(job.get("record_ids") or [])
             options = dict(job.get("payload") or {})
         total = len(record_ids)
-        self._update_ocr_job(job_id, status="running", message=f"Ejecutando OCR 0 de {total}")
+        self._update_ocr_job(job_id, status="running", message=f"Segmentando graficos 0 de {total}", phase="segmentation")
         for index, record_id in enumerate(record_ids):
             self._update_ocr_job(
                 job_id,
                 current=index,
                 active_id=record_id,
-                message=f"Procesando {index + 1} de {total}",
+                active_event={"phase": "segmentation", "record_id": record_id},
+                message=f"Segmentando graficos {index + 1} de {total}",
             )
             try:
                 self.service.run_ocr_and_segmentation(
@@ -386,6 +438,52 @@ class FactoryWebRuntime:
                     force_figure_model=bool(options.get("force_figure_model", True)),
                     record_id=str(record_id),
                     record_ids=[],
+                    run_segmentation=True,
+                    run_ocr=False,
+                )
+            except Exception as exc:
+                with self._job_lock:
+                    job = self._ocr_jobs.get(job_id) or {}
+                    errors = list(job.get("errors") or [])
+                    errors.append({"record_id": record_id, "phase": "segmentation", "message": str(exc)})
+                    job["errors"] = errors[-50:]
+                    job["message"] = f"Error de segmentacion en {index + 1} de {total}; se intentara OCR igual"
+        self._update_ocr_job(job_id, current=0, message=f"Ejecutando OCR remoto 0 de {total}", phase="ocr")
+        for index, record_id in enumerate(record_ids):
+            self._update_ocr_job(
+                job_id,
+                current=index,
+                active_id=record_id,
+                active_event={"phase": "ocr", "record_id": record_id},
+                message=f"OCR remoto {index + 1} de {total}",
+            )
+            def _progress(event: dict[str, Any], *, _record_id: str = str(record_id)) -> None:
+                with self._job_lock:
+                    job = self._ocr_jobs.get(job_id)
+                    if not job:
+                        return
+                    clean_event = dict(event or {})
+                    job["active_id"] = _record_id
+                    job["active_event"] = clean_event
+                    message = str(clean_event.get("message") or "").strip()
+                    if message:
+                        job["message"] = message
+
+            try:
+                self.service.run_ocr_and_segmentation(
+                    provider=str(options.get("provider") or "hf"),
+                    curso=str(options.get("curso") or "SIN_CURSO"),
+                    tema=str(options.get("tema") or "SIN_TEMA"),
+                    start_n=int(options.get("start_n") or 1),
+                    limit=1,
+                    ocr_model=str(options.get("ocr_model") or ""),
+                    figure_model=str(options.get("figure_model") or ""),
+                    force_figure_model=bool(options.get("force_figure_model", True)),
+                    record_id=str(record_id),
+                    record_ids=[],
+                    progress_callback=_progress,
+                    run_segmentation=False,
+                    run_ocr=True,
                 )
                 with self._job_lock:
                     job = self._ocr_jobs.get(job_id) or {}
@@ -767,6 +865,8 @@ class FactoryWebRuntime:
     def _allowed_api_methods(path: str) -> set[str]:
         exact = {
             "/api/bootstrap": {"GET"},
+            "/api/app/version": {"GET"},
+            "/api/app/reload-signal": {"POST"},
             "/api/pdf/page": {"GET"},
             "/api/record": {"GET"},
             "/api/promotion": {"GET"},

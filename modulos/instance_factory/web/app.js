@@ -49,6 +49,10 @@ const state = {
   batchMode: "",
   batchText: "",
   batchResults: [],
+  errorReportOpen: false,
+  appVersion: null,
+  appReloadTimer: null,
+  appReloading: false,
   ocrEndpoint: null,
   ocrEndpointLoading: false,
   ocrJobPolling: false,
@@ -111,6 +115,72 @@ async function api(path, options = {}) {
     throw new Error(payload.error || payload.raw || response.statusText);
   }
   return payload;
+}
+
+function appVersionKey(payload) {
+  if (!payload || typeof payload !== "object") return "";
+  return `${String(payload.asset_version || "")}|${String(payload.reload_token || "")}`;
+}
+
+async function fetchAppVersion() {
+  const separator = String("/api/app/version").includes("?") ? "&" : "?";
+  return api(`/api/app/version${separator}t=${Date.now()}`);
+}
+
+async function startAppVersionWatcher() {
+  try {
+    state.appVersion = await fetchAppVersion();
+    syncAppReloadButton();
+  } catch (_) {
+    state.appVersion = null;
+  }
+  scheduleAppVersionPoll();
+}
+
+function scheduleAppVersionPoll() {
+  if (state.appReloadTimer) window.clearTimeout(state.appReloadTimer);
+  state.appReloadTimer = window.setTimeout(checkAppVersionChanged, 5000);
+}
+
+async function checkAppVersionChanged() {
+  if (state.appReloading) return;
+  try {
+    const next = await fetchAppVersion();
+    const previousKey = appVersionKey(state.appVersion);
+    const nextKey = appVersionKey(next);
+    if (previousKey && nextKey && previousKey !== nextKey) {
+      state.appReloading = true;
+      setStatus("Actualizando interfaz en esta pestaña...");
+      window.setTimeout(() => window.location.reload(), 300);
+      return;
+    }
+    state.appVersion = next;
+  } catch (_) {
+    // No interrumpimos el trabajo si una pestaña pierde conexion unos segundos.
+  }
+  scheduleAppVersionPoll();
+}
+
+function syncAppReloadButton() {
+  const btn = $("appReloadBtn");
+  if (!btn) return;
+  btn.disabled = Boolean(state.appReloading);
+  btn.title = "Recarga la interfaz y avisa a las otras pestañas abiertas.";
+}
+
+async function requestAppReloadAcrossTabs() {
+  if (state.appReloading) return;
+  state.appReloading = true;
+  syncAppReloadButton();
+  setBusy("Actualizando app en todas las pestañas...");
+  try {
+    await api("/api/app/reload-signal", { method: "POST", body: {} });
+  } catch (err) {
+    state.appReloading = false;
+    syncAppReloadButton();
+    setStatus(`No pude avisar a las otras pestañas: ${err.message}. Recargando esta pestaña.`);
+  }
+  window.setTimeout(() => window.location.reload(), 300);
 }
 
 function applyFactorySnapshot(payload) {
@@ -464,6 +534,29 @@ function recordCanRunOcr(record) {
   return Boolean(record && !recordSourceStale(record) && record.crop_url);
 }
 
+function recordHasOcrOutput(record) {
+  return Boolean(record && (
+    hasText(record.raw_ocr)
+    || hasObjectData(record.structured_ocr)
+    || hasObjectData(record.figure_segmentation)
+  ));
+}
+
+function recordHasProcessingError(record) {
+  if (!record) return false;
+  if (normalizeStatus(record.status || "") === "error") return true;
+  if ((record.errors || []).some((item) => String(item || "").trim())) return true;
+  const steps = record.steps || {};
+  return Object.keys(steps).some((key) => normalizeStatus(steps[key]?.status || "") === "error");
+}
+
+function ocrErrorRecordIds(records = state.snapshot?.records || []) {
+  return (records || [])
+    .filter((record) => recordCanRunOcr(record) && recordHasProcessingError(record))
+    .map((record) => String(record.record_id || ""))
+    .filter(Boolean);
+}
+
 function invalidatedRecords(records = state.snapshot?.records || []) {
   return (records || []).filter((record) => recordSourceStale(record) || recordDownstreamInvalidated(record));
 }
@@ -526,6 +619,139 @@ function recordErrorComment(record) {
     return detail || `Error en ${key}`;
   }
   return "";
+}
+
+function recordErrorEntries(record) {
+  if (!record) return [];
+  const rows = [];
+  const seen = new Set();
+  const add = (scope, message) => {
+    const clean = String(message || "").trim();
+    if (!clean) return;
+    const key = `${scope}:${clean}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    rows.push({ scope, message: clean });
+  };
+  (record.errors || []).forEach((message) => add("registro", message));
+  const steps = record.steps || {};
+  Object.keys(steps).forEach((key) => {
+    const step = steps[key] || {};
+    if (normalizeStatus(step.status || "") !== "error") return;
+    add(key, step.detail || step.message || `Error en ${key}`);
+  });
+  if (!rows.length && normalizeStatus(record.status || "") === "error") {
+    add("estado", record.status_label || "Registro marcado con error sin detalle.");
+  }
+  return rows;
+}
+
+function errorGroupKey(message) {
+  const clean = String(message || "").trim();
+  const prefix = clean.match(/^([A-Za-z0-9_.-]+:\[[^\]]+\])/);
+  if (prefix) return prefix[1];
+  const beforePath = clean.split(/:\s*[A-Za-z]:\\/)[0];
+  if (beforePath && beforePath.length < clean.length) return beforePath.trim();
+  const beforeColon = clean.match(/^([^:]{3,80}):/);
+  if (beforeColon) return beforeColon[1].trim();
+  return clean
+    .replace(/[A-Fa-f0-9]{8,}/g, "<id>")
+    .replace(/\d+/g, "#")
+    .slice(0, 120)
+    .trim();
+}
+
+function buildInstanceErrorReport(records = state.snapshot?.records || []) {
+  const groups = new Map();
+  const rows = [];
+  (records || []).forEach((record, index) => {
+    const entries = recordErrorEntries(record);
+    entries.forEach((entry) => {
+      const groupKey = errorGroupKey(entry.message) || "Error sin clasificar";
+      if (!groups.has(groupKey)) {
+        groups.set(groupKey, {
+          key: groupKey,
+          count: 0,
+          records: [],
+          examples: [],
+          scopes: new Set(),
+        });
+      }
+      const group = groups.get(groupKey);
+      group.count += 1;
+      group.scopes.add(entry.scope);
+      if (!group.records.some((item) => item.record_id === record.record_id)) {
+        group.records.push(record);
+      }
+      if (!group.examples.includes(entry.message) && group.examples.length < 3) {
+        group.examples.push(entry.message);
+      }
+      rows.push({ record, index, scope: entry.scope, message: entry.message, groupKey });
+    });
+  });
+  return {
+    rows,
+    groups: [...groups.values()]
+      .map((group) => ({ ...group, scopes: [...group.scopes] }))
+      .sort((a, b) => b.count - a.count || a.key.localeCompare(b.key)),
+  };
+}
+
+function buildErrorReportClipboardText(records = state.snapshot?.records || []) {
+  const report = buildInstanceErrorReport(records);
+  const summary = state.snapshot?.summary || {};
+  const labels = factoryHeaderLabels(state.snapshot || {});
+  const errorRecordIds = [...new Set(report.rows.map((row) => String(row.record.record_id || "")))];
+  const lines = [
+    "ERRORES DE LA INSTANCIA",
+    `Instancia: ${labels.title || "-"}`,
+    `PDF/BD: ${labels.subtitle || "-"}`,
+    `Errores activos: ${Number(summary.errors || report.rows.length || 0)}`,
+    `Registros afectados: ${errorRecordIds.length}`,
+    `Tipos comunes: ${report.groups.length}`,
+    "",
+  ];
+  if (report.groups.length) {
+    lines.push("TIPOS COMUNES");
+    report.groups.forEach((group, index) => {
+      lines.push(`${index + 1}. ${group.key}`);
+      lines.push(`   registros: ${group.records.length}; ocurrencias: ${group.count}; etapas: ${group.scopes.join(", ") || "registro"}`);
+      group.examples.forEach((example, exampleIndex) => {
+        lines.push(`   ejemplo ${exampleIndex + 1}: ${example}`);
+      });
+    });
+    lines.push("");
+  }
+  lines.push("DETALLE POR ERROR");
+  if (!report.rows.length) {
+    lines.push("Sin errores activos.");
+  } else {
+    report.rows.forEach((row, index) => {
+      const record = row.record || {};
+      const source = record.source || {};
+      const crop = record.crop_name || record.crop_id || "";
+      lines.push(`${index + 1}. ${recordOptionLabel(record, row.index)}`);
+      lines.push(`   record_id: ${record.record_id || "-"}`);
+      if (crop) lines.push(`   crop: ${crop}`);
+      if (source.page_number) lines.push(`   pagina: ${source.page_number}`);
+      lines.push(`   etapa: ${row.scope || "-"}`);
+      lines.push(`   tipo: ${row.groupKey || "-"}`);
+      lines.push(`   estado: ${record.status || "-"}`);
+      lines.push(`   error: ${row.message || "-"}`);
+    });
+  }
+  return lines.join("\n");
+}
+
+async function copyErrorReportToClipboard() {
+  const text = buildErrorReportClipboardText();
+  if (!text.trim()) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    setStatus("Errores copiados. Pegalos aqui para revisarlos juntos.");
+  } catch (_) {
+    setStatus("No se pudo copiar automaticamente el reporte de errores.");
+  }
 }
 
 function inferredStartNumberForRecord(record) {
@@ -1138,6 +1364,7 @@ function renderTimeline() {
   timeline.querySelectorAll("[data-stage]").forEach((btn) => {
     btn.addEventListener("click", () => {
       state.stage = btn.dataset.stage;
+      state.errorReportOpen = false;
       closeBatchMode({ rerender: false });
       persistFactoryUiState();
       renderStage();
@@ -1158,12 +1385,149 @@ function renderMetrics() {
     ["ready", "Listos"],
     ["errors", "Errores"],
   ];
-  $("metrics").innerHTML = fields.map(([key, label]) => `
-    <div class="metric ${key === "errors" && Number(s[key] || 0) ? "metric-warning" : ""}">
-      <span class="metric-label">${label}</span>
-      <strong>${Number(s[key] || 0)}</strong>
+  $("metrics").innerHTML = fields.map(([key, label]) => {
+    const value = Number(s[key] || 0);
+    const classes = `metric ${key === "errors" && value ? "metric-warning" : ""} ${key === "errors" ? "metric-button" : ""}`;
+    if (key === "errors") {
+      return `
+        <button class="${classes}" id="openErrorReportMetric" type="button" title="Ver errores de esta instancia">
+          <span class="metric-label">${label}</span>
+          <strong>${value}</strong>
+        </button>
+      `;
+    }
+    return `
+      <div class="${classes}">
+        <span class="metric-label">${label}</span>
+        <strong>${value}</strong>
+      </div>
+    `;
+  }).join("");
+  const errorsBtn = $("openErrorReportMetric");
+  if (errorsBtn) errorsBtn.onclick = () => openErrorReport();
+}
+
+function openErrorReport() {
+  state.errorReportOpen = true;
+  closeBatchMode({ rerender: false });
+  renderStage();
+  renderTimeline();
+  setStatus("Reporte de errores de la instancia.");
+}
+
+function closeErrorReport() {
+  state.errorReportOpen = false;
+  renderStage();
+  renderTimeline();
+  setStatus("Volviendo al flujo de trabajo.");
+}
+
+function renderErrorReportStage() {
+  const records = state.snapshot?.records || [];
+  const report = buildInstanceErrorReport(records);
+  const summary = state.snapshot?.summary || {};
+  const errorRecords = [...new Set(report.rows.map((row) => String(row.record.record_id || "")))];
+  $("stageHost").innerHTML = `
+    <div class="stage-header">
+      <div>
+        <h2>Errores de la instancia</h2>
+        <p class="muted">Revisa patrones comunes, registros afectados y detalles tecnicos para confirmar si ya se corrigieron.</p>
+      </div>
+      <div class="stage-actions">
+        <button id="copyErrorReport" type="button" ${report.rows.length ? "" : "disabled"}>Copiar errores</button>
+        <button id="queueReportErrors" type="button" ${errorRecords.length ? "" : "disabled"}>Poner errores en cola OCR</button>
+        <button id="closeErrorReport" type="button">Volver</button>
+      </div>
     </div>
-  `).join("");
+    <section class="panel error-report-summary">
+      <div class="candidate-grid">
+        <div class="candidate-cell"><span>Errores activos</span><strong>${Number(summary.errors || report.rows.length || 0)}</strong></div>
+        <div class="candidate-cell"><span>Registros afectados</span><strong>${errorRecords.length}</strong></div>
+        <div class="candidate-cell"><span>Tipos comunes</span><strong>${report.groups.length}</strong></div>
+      </div>
+      ${report.rows.length ? `
+        <div class="library-notice error-notice">
+          Estos son errores activos del snapshot actual. Si un problema ya fue reprocesado correctamente, debe desaparecer al actualizar la instancia.
+        </div>
+      ` : `
+        <div class="library-notice">
+          No hay errores activos en esta instancia. Si acabas de corregir algo, el resumen ya quedo limpio.
+        </div>
+      `}
+    </section>
+    ${report.groups.length ? `
+      <section class="panel">
+        <div class="panel-heading-row">
+          <div>
+            <h3>Errores comunes</h3>
+            <p class="muted">Agrupados por tipo de fallo para detectar lo que se repite.</p>
+          </div>
+        </div>
+        <div class="error-group-list">
+          ${report.groups.map((group) => `
+            <article class="error-group-card">
+              <div>
+                <strong>${escapeHtml(group.key)}</strong>
+                <span class="muted">${group.records.length} registro(s), ${group.count} ocurrencia(s) | ${escapeHtml(group.scopes.join(", ") || "registro")}</span>
+              </div>
+              <div class="codebox small-codebox">${escapeHtml(group.examples.join("\n\n"))}</div>
+            </article>
+          `).join("")}
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-heading-row">
+          <div>
+            <h3>Registros afectados</h3>
+            <p class="muted">Abre el registro para revisar crop, OCR, segmentos y trazabilidad.</p>
+          </div>
+        </div>
+        <div class="error-record-list">
+          ${report.rows.map((row) => `
+            <article class="error-record-card">
+              <div>
+                <strong>${escapeHtml(recordOptionLabel(row.record, row.index))}</strong>
+                <span class="muted">${escapeHtml(row.scope)} | ${escapeHtml(row.groupKey)}</span>
+                <p>${escapeHtml(row.message)}</p>
+              </div>
+              <button type="button" data-open-error-record="${escapeAttr(row.record.record_id)}">Abrir</button>
+            </article>
+          `).join("")}
+        </div>
+      </section>
+    ` : ""}
+  `;
+  const copyBtn = $("copyErrorReport");
+  if (copyBtn) copyBtn.onclick = copyErrorReportToClipboard;
+  const closeBtn = $("closeErrorReport");
+  if (closeBtn) closeBtn.onclick = closeErrorReport;
+  const queueBtn = $("queueReportErrors");
+  if (queueBtn) queueBtn.onclick = () => {
+    state.ocrQueueIds = new Set(ocrErrorRecordIds(records));
+    state.errorReportOpen = false;
+    state.stage = "crops";
+    persistFactoryUiState();
+    renderStage();
+    renderTimeline();
+    setStatus(`${state.ocrQueueIds.size} problema(s) con error en cola OCR.`);
+  };
+  document.querySelectorAll("[data-open-error-record]").forEach((btn) => {
+    btn.onclick = () => {
+      state.selectedRecordId = btn.dataset.openErrorRecord || "";
+      state.selectedOcrIndex = 0;
+      state.errorReportOpen = false;
+      state.stage = "crops";
+      persistFactoryUiState();
+      renderStage();
+      renderTimeline();
+    };
+  });
+  setInspector({
+    "Errores activos": Number(summary.errors || report.rows.length || 0),
+    "Registros afectados": errorRecords.length,
+    "Tipos comunes": report.groups.length,
+    "Siguiente paso": errorRecords.length ? "Poner errores en cola OCR o abrir un registro." : "Sin errores activos.",
+  });
 }
 
 function activeModelPayload() {
@@ -1350,6 +1714,12 @@ async function prepareOcrEndpointForRun() {
 }
 
 function renderStage() {
+  if (state.errorReportOpen) {
+    renderErrorReportStage();
+    syncWorkspaceMode();
+    syncPrimaryAction();
+    return;
+  }
   if (state.batchMode) {
     renderBatchEditor();
     syncWorkspaceMode();
@@ -2168,6 +2538,7 @@ function renderCropsStage() {
   const queuedCount = queuedOcrRecordIds(records).length;
   const queueBusy = isTaskRunning("ocr");
   const invalidatedCount = invalidatedRecords(records).length;
+  const errorCount = ocrErrorRecordIds(records).length;
   $("stageHost").innerHTML = `
     <div class="stage-header">
       <div>
@@ -2189,6 +2560,7 @@ function renderCropsStage() {
       </div>
       <div class="queue-actions">
         <button id="queueAllCrops" type="button" ${records.length && !queueBusy ? "" : "disabled"}>Seleccionar todo</button>
+        <button id="queueErrorCrops" type="button" ${errorCount && !queueBusy ? "" : "disabled"}>Seleccionar errores${errorCount ? ` (${errorCount})` : ""}</button>
         <button id="clearOcrQueue" type="button" ${queuedCount && !queueBusy ? "" : "disabled"}>Limpiar cola</button>
         <button id="runOcrQueue" class="primary" type="button" ${queuedCount && !queueBusy ? "" : "disabled"}>Ejecutar cola</button>
       </div>
@@ -2282,14 +2654,71 @@ function queuedOcrRecordIds(records = state.snapshot.records || []) {
     .filter((id) => id && state.ocrQueueIds.has(id) && recordCanRunOcr(findRecordById(id, records)));
 }
 
+function ocrRunnableRecordIds(records = state.snapshot.records || []) {
+  return (records || [])
+    .filter(recordCanRunOcr)
+    .map((record) => String(record.record_id || ""))
+    .filter(Boolean);
+}
+
+function shouldOfferSecondOcrPass(records = state.snapshot.records || []) {
+  const runnable = (records || []).filter(recordCanRunOcr);
+  if (runnable.length <= 1) return false;
+  const errors = runnable.filter(recordHasProcessingError);
+  if (!errors.length || errors.length >= runnable.length) return false;
+  return runnable.some((record) => recordHasOcrOutput(record) || recordHasProcessingError(record));
+}
+
+function chooseSecondPassOcrScope(targetIds, records = state.snapshot.records || []) {
+  const uniqueIds = [...new Set((targetIds || []).map((id) => String(id || "").trim()).filter(Boolean))];
+  const targetRecords = uniqueIds
+    .map((id) => findRecordById(id, records))
+    .filter((record) => recordCanRunOcr(record));
+  const errorIds = targetRecords
+    .filter(recordHasProcessingError)
+    .map((record) => String(record.record_id || ""))
+    .filter(Boolean);
+  const hasPriorPass = targetRecords.some((record) => recordHasOcrOutput(record) || recordHasProcessingError(record));
+  if (!hasPriorPass || !errorIds.length || errorIds.length >= targetRecords.length) {
+    return { cancelled: false, ids: uniqueIds };
+  }
+  const choice = window.prompt(
+    [
+      "Segunda pasada OCR detectada.",
+      `1 = Solo problemas con error (${errorIds.length})`,
+      `2 = Todos los problemas seleccionados (${targetRecords.length})`,
+      "",
+      "Escribe 1 o 2. Cancelar no inicia OCR.",
+    ].join("\n"),
+    "1",
+  );
+  if (choice === null) return { cancelled: true, ids: [] };
+  const clean = String(choice || "").trim().toLowerCase();
+  if (clean === "1" || clean === "error" || clean === "errores") {
+    return { cancelled: false, ids: errorIds };
+  }
+  if (clean === "2" || clean === "todo" || clean === "todos") {
+    return { cancelled: false, ids: uniqueIds };
+  }
+  setStatus("OCR no iniciado: opcion no reconocida. Usa 1 para errores o 2 para todos.");
+  return { cancelled: true, ids: [] };
+}
+
 function bindOcrQueueControls(records = state.snapshot.records || []) {
   const allBtn = $("queueAllCrops");
+  const errorsBtn = $("queueErrorCrops");
   const clearBtn = $("clearOcrQueue");
   const runBtn = $("runOcrQueue");
   if (allBtn) allBtn.onclick = () => {
     state.ocrQueueIds = new Set((records || []).filter(recordCanRunOcr).map((record) => String(record.record_id || "")).filter(Boolean));
     persistFactoryUiState();
     renderCropsStage();
+  };
+  if (errorsBtn) errorsBtn.onclick = () => {
+    state.ocrQueueIds = new Set(ocrErrorRecordIds(records));
+    persistFactoryUiState();
+    renderCropsStage();
+    setStatus(`${state.ocrQueueIds.size} problema(s) con error en cola OCR.`);
   };
   if (clearBtn) clearBtn.onclick = () => {
     state.ocrQueueIds = new Set();
@@ -2392,7 +2821,7 @@ function renderOcrStage() {
     <div class="stage-header">
       <div>
         <h2>OCR y segmentacion grafica</h2>
-        <p class="muted">Compara la lectura estructurada con el crop antes de cargarla al formulario final.</p>
+        <p class="muted">Revisa el OCR crudo y los segmentos graficos antes de pasar al formato final.</p>
       </div>
       <div class="stage-actions">
         <button id="openRawOcrBatch" type="button">Modo lote OCR crudo</button>
@@ -2429,7 +2858,7 @@ function renderOcrStage() {
     "Registro": record.record_id,
     ...(recordErrorComment(record) ? { "Error": recordErrorComment(record) } : {}),
     "OCR crudo": record.raw_ocr ? `si (${String(record.raw_ocr).length} caracteres)` : "no",
-    "Lecturas OCR": (record.structured_items_web || []).length,
+    "Vista LaTeX opcional": (record.structured_items_web || []).length,
     "Segmentos graficos": (record.figure_segments_web || []).length,
   } : "");
 }
@@ -2438,12 +2867,9 @@ function renderOcrRecord(record) {
   const records = state.snapshot.records || [];
   const currentRecordIndex = recordIndex(records);
   const totalRecords = records.length;
-  const items = record.structured_items_web || [];
   const segments = record.figure_segments_web || [];
   const errorComment = recordErrorComment(record);
   syncFigureSegments(record, segments);
-  const selectedIndex = Math.max(0, Math.min(items.length - 1, Number(state.selectedOcrIndex || 0)));
-  const selectedPayload = items.length ? selectedOcrPayload(record, selectedIndex) : {};
   return `
     <div class="record-layout ocr-layout">
       <div class="ocr-left-column">
@@ -2466,22 +2892,10 @@ function renderOcrRecord(record) {
           <div class="panel-heading-row">
             <div>
               <h3>Visor LaTeX</h3>
-              <p class="muted">${items.length ? "Lectura estructurada lista para revisar antes de editar." : "Sin lectura estructurada todavia."}</p>
+              <p class="muted">OCR crudo renderizado con MathJax para revisar formulas sin convertirlo a JSON.</p>
             </div>
-            ${items.length ? `
-              <div class="ocr-nav" aria-label="Navegacion de lecturas OCR">
-                <button id="prevOcrItem" class="mini-arrow" type="button" title="Lectura anterior" ${selectedIndex <= 0 ? "disabled" : ""}>&larr;</button>
-                <span class="nav-counter">${selectedIndex + 1} de ${items.length}</span>
-                <button id="nextOcrItem" class="mini-arrow" type="button" title="Lectura siguiente" ${selectedIndex >= items.length - 1 ? "disabled" : ""}>&rarr;</button>
-              </div>
-            ` : ""}
           </div>
-          ${items.length ? renderOcrLatexViewer(selectedPayload, selectedIndex, items.length) : `
-            <div class="empty-state raw-empty">
-              Ejecuta OCR sobre la imagen actual. Cuando el modelo devuelva una lectura estructurada, aparecera aqui como vista LaTeX.
-            </div>
-          `}
-          ${items.length ? `<button data-use-ocr="${selectedIndex}" class="primary wide-action">Editar lectura</button>` : ""}
+          ${renderRawOcrLatexViewer(record.raw_ocr)}
         </section>
         ${renderRawOcrPanel(record)}
         <dl class="meta-list record-meta-compact">
@@ -2788,6 +3202,43 @@ async function saveFigureSegments(record) {
   }, "Segmentos graficos revisados guardados.");
 }
 
+function renderRawOcrLatexViewer(rawOcr) {
+  const raw = String(rawOcr || "").trim();
+  if (!raw) {
+    return `
+      <div id="ocrLatexPreview" class="latex-preview ocr-latex-preview raw-ocr-latex-preview">
+        <div class="empty-state raw-empty">
+          Todavia no hay OCR crudo para renderizar.
+        </div>
+      </div>
+    `;
+  }
+  return `
+    <div id="ocrLatexPreview" class="latex-preview ocr-latex-preview raw-ocr-latex-preview">
+      <article class="preview-problem raw-ocr-rendered">
+        <div class="statement-preview">${formatPreviewText(raw)}</div>
+      </article>
+    </div>
+  `;
+}
+
+let rawOcrPreviewTimer = null;
+function updateRawOcrLatexPreview({ schedule = false } = {}) {
+  const preview = $("ocrLatexPreview");
+  const editor = $("rawOcrEditor");
+  if (!preview || !editor) return;
+  const update = () => {
+    preview.outerHTML = renderRawOcrLatexViewer(editor.value || "");
+    typesetMath($("ocrLatexPreview"));
+  };
+  if (!schedule) {
+    update();
+    return;
+  }
+  if (rawOcrPreviewTimer) window.clearTimeout(rawOcrPreviewTimer);
+  rawOcrPreviewTimer = window.setTimeout(update, 220);
+}
+
 function renderOcrLatexViewer(payload, index, total) {
   const options = payload.options || {};
   const optionRows = ["A", "B", "C", "D", "E"].map((key) => `
@@ -2834,6 +3285,9 @@ function bindRawOcrActions(record) {
   const copyBtn = $("copyRawOcr");
   const saveBtn = $("saveRawOcr");
   const editor = $("rawOcrEditor");
+  if (editor) {
+    editor.oninput = () => updateRawOcrLatexPreview({ schedule: true });
+  }
   if (copyBtn) copyBtn.onclick = async () => {
     const raw = String(editor?.value || record?.raw_ocr || "");
     if (!raw.trim()) return;
@@ -3044,11 +3498,13 @@ function normalizedForBatchRecord(record) {
   if (hasObjectData(record?.normalized)) return record.normalized;
   const firstItem = selectedOcrPayload(record, 0);
   if (hasObjectData(firstItem)) return normalizedFromOcr(record, firstItem);
+  const source = record?.source || {};
+  const number = String(source.problem_number || source.n || "").trim();
   return {
-    numero: "",
+    numero: number,
     curso: "",
     tema: "",
-    enunciado_latex: "",
+    enunciado_latex: String(record?.raw_ocr || "").trim(),
     alternativas: { A: "", B: "", C: "", D: "", E: "" },
     respuesta_correcta: "",
     tiene_grafico: Boolean((record?.figure_segments_web || []).length),
@@ -4174,6 +4630,13 @@ function blockingIssuesHtml(issues) {
 
 function syncPrimaryAction() {
   const btn = $("primaryAction");
+  if (state.errorReportOpen) {
+    btn.textContent = "Volver al flujo";
+    btn.onclick = closeErrorReport;
+    btn.disabled = isTaskRunning();
+    $("actionHint").textContent = "Reporte de errores de la instancia actual.";
+    return;
+  }
   if (state.batchMode) {
     const config = batchModeConfig();
     btn.textContent = config.action;
@@ -4183,12 +4646,15 @@ function syncPrimaryAction() {
     return;
   }
   const queuedCount = state.stage === "crops" ? queuedOcrRecordIds().length : 0;
+  const secondPassAvailable = state.stage === "crops" && !queuedCount && shouldOfferSecondOcrPass();
   const actions = {
     pages: ["Detectar con modelo", "Usa el detector entrenado sobre las paginas elegidas.", detectSelectedPages],
     boxes: ["Crear staging", "Materializa crops solo desde boxes revisados.", materializeStaging],
     crops: [
-      queuedCount ? `OCR cola (${queuedCount})` : "OCR imagen actual",
-      queuedCount ? "Procesa las imagenes seleccionadas con OCR y segmentacion grafica." : "Usa OCR entrenado y segmentador grafico en el crop seleccionado.",
+      queuedCount ? `OCR cola (${queuedCount})` : (secondPassAvailable ? "OCR segunda pasada" : "OCR imagen actual"),
+      queuedCount
+        ? "Procesa las imagenes seleccionadas con OCR y segmentacion grafica."
+        : (secondPassAvailable ? "Pregunta si reprocesar todos o solo los problemas con error." : "Usa OCR entrenado y segmentador grafico en el crop seleccionado."),
       () => runOcr(),
     ],
     ocr: ["Preparar revision completa", "Crea borradores editables para todos los problemas con OCR; no ejecuta normalizador IA final.", normalizeRecords],
@@ -4245,10 +4711,16 @@ async function runOcr(recordIds = null) {
   const models = activeModelPayload();
   const record = selectedRecord();
   const records = state.snapshot.records || [];
+  const explicitRecordIds = Array.isArray(recordIds);
   const queuedIds = Array.isArray(recordIds) ? recordIds : queuedOcrRecordIds(records);
   const fallbackIds = record?.record_id ? [record.record_id] : [];
-  const targetIds = queuedIds.length ? queuedIds : fallbackIds;
+  const targetIds = queuedIds.length
+    ? queuedIds
+    : (!explicitRecordIds && shouldOfferSecondOcrPass(records) ? ocrRunnableRecordIds(records) : fallbackIds);
+  const scope = chooseSecondPassOcrScope(targetIds, records);
+  if (scope.cancelled) return;
   const pending = [...new Set(targetIds.map((id) => String(id || "").trim()).filter(Boolean))]
+    .filter((id) => scope.ids.includes(id))
     .filter((id) => recordCanRunOcr(findRecordById(id, records)));
   if (!pending.length) {
     const blocked = targetIds.some((id) => {
@@ -4403,7 +4875,7 @@ async function runOcrForRecord(recordId, models) {
 
 async function normalizeRecords() {
   const records = normalizableRecords();
-  if (!records.length) return setStatus("No hay OCR crudo o estructurado para preparar revision todavia.");
+  if (!records.length) return setStatus("No hay OCR crudo para preparar revision todavia.");
   const total = records.length;
   const failures = [];
   state.stage = "review";
@@ -4835,8 +5307,13 @@ $("libraryBtn").onclick = () => {
   loadLibrary("Biblioteca actualizada.").catch((err) => setStatus(`Error de biblioteca: ${err.message}`));
 };
 $("refreshBtn").onclick = () => refresh("Actualizado.").catch((err) => setStatus(`Error: ${err.message}`));
+if ($("appReloadBtn")) {
+  $("appReloadBtn").onclick = () => requestAppReloadAcrossTabs();
+  syncAppReloadButton();
+}
 if ($("themeToggle")) {
   $("themeToggle").onclick = () => toggleTheme();
   syncThemeToggle();
 }
+startAppVersionWatcher().catch(() => {});
 bootApp().catch((err) => setStatus(`Error inicial: ${err.message}`));

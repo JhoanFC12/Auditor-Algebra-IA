@@ -57,7 +57,7 @@ from utils.project_layout import remap_legacy_drive_path
 from .models import InstancePipelineContext
 from .library_api import LibraryApiError, LibraryWebApi
 from .runtime_env import load_factory_runtime_env
-from .web_server import FactoryWebRuntime, WebApiError, _FilePayload
+from .web_server import FactoryWebRuntime, WebApiError, _FilePayload, build_web_app_version, signal_web_app_reload
 
 
 class LibraryWebRuntime:
@@ -140,6 +140,18 @@ class LibraryWebRuntime:
         path = parsed.path or "/"
         query = urllib.parse.parse_qs(parsed.query)
         try:
+            if path == "/api/app/version":
+                if method != "GET":
+                    self._send_json(handler, {"error": "method_not_allowed"}, status=405)
+                    return
+                self._send_json(handler, build_web_app_version(self.static_root))
+                return
+            if path == "/api/app/reload-signal":
+                if method != "POST":
+                    self._send_json(handler, {"error": "method_not_allowed"}, status=405)
+                    return
+                self._send_json(handler, signal_web_app_reload(self.static_root))
+                return
             if method == "GET" and path.startswith("/api/library/file/"):
                 self._send_registered_file(handler, path)
                 return

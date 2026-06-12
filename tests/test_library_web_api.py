@@ -25,6 +25,11 @@ def _post_json(base: str, path: str, body: dict) -> dict:
         return json.loads(response.read().decode("utf-8"))
 
 
+def _get_json(base: str, path: str) -> dict:
+    with urllib.request.urlopen(base + path, timeout=5) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
 class _FakeRuntime:
     def __init__(self, context: InstancePipelineContext) -> None:
         self.context = context
@@ -268,6 +273,20 @@ class LibraryWebApiTests(unittest.TestCase):
             self.assertIn("<h1 id=\"title\">Biblioteca</h1>", html)
             self.assertIn("id=\"themeToggle\"", html)
             self.assertNotIn("Cargando instancia", html)
+        finally:
+            runtime.stop()
+
+    def test_library_runtime_exposes_shared_app_reload_signal(self) -> None:
+        runtime = LibraryWebRuntime(controller=_FakeController())
+        try:
+            base = runtime.start()
+            before = _get_json(base, "api/app/version")
+            after = _post_json(base, "api/app/reload-signal", {})
+            self.assertEqual(before["schema_version"], "pdf_factory_web_app_version_v1")
+            self.assertEqual(after["schema_version"], "pdf_factory_web_app_version_v1")
+            self.assertTrue(after["reload_requested"])
+            self.assertEqual(before["asset_version"], after["asset_version"])
+            self.assertNotEqual(before.get("reload_token"), after.get("reload_token"))
         finally:
             runtime.stop()
 
