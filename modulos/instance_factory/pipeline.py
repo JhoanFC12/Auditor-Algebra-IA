@@ -1269,7 +1269,7 @@ class InstancePdfPipelineService:
         }
 
     def _write_raw_artifacts(self, record: StagingProblemRecord) -> None:
-        artifacts_dir = self.staging.root / "raw_outputs" / record.record_id
+        artifacts_dir = self.staging.artifact_dir("raw_outputs", record.record_id, probe_file="figure_segmentation.json")
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         raw_path = artifacts_dir / "raw_ocr.txt"
         structured_path = artifacts_dir / "structured_ocr.json"

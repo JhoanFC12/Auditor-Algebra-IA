@@ -1148,6 +1148,22 @@ class InstanceFactoryStagingTests(unittest.TestCase):
                 else:
                     os.environ[key] = value
 
+    def test_artifact_dirs_compact_long_record_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s01", pdf_path=str(Path(tmp) / "book.pdf"))
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            long_record_id = "aseuni-semianual-geometria__semana_2_dc9b1f016c____ASEUNI_SEM_" + ("x" * 120)
+
+            raw_dir = store.artifact_dir("raw_outputs", long_record_id, probe_file="figure_segmentation.json")
+            review_dir = store.artifact_dir("review_outputs", long_record_id, probe_file="training_examples.json")
+
+            self.assertNotEqual(raw_dir.name, long_record_id)
+            self.assertNotEqual(review_dir.name, long_record_id)
+            self.assertLessEqual(len(raw_dir.name), 48)
+            self.assertEqual(raw_dir.name, review_dir.name)
+            self.assertEqual(raw_dir.parent.name, "raw_outputs")
+            self.assertEqual(review_dir.parent.name, "review_outputs")
+
 
 if __name__ == "__main__":
     unittest.main()

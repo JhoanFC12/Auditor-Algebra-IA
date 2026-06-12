@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -36,6 +37,20 @@ def _build_model_inventory_manifest() -> dict[str, Any]:
         return {}
 
 
+MAX_ARTIFACT_RECORD_DIR_LEN = 48
+MAX_ARTIFACT_PATH_LEN_SOFT_LIMIT = 240
+
+
+def compact_artifact_dir_name(record_id: str, *, max_len: int = MAX_ARTIFACT_RECORD_DIR_LEN) -> str:
+    raw = str(record_id or "").strip()
+    clean = re.sub(r"[^A-Za-z0-9._-]+", "_", raw).strip("._-") or "record"
+    if len(clean) <= int(max_len):
+        return clean
+    digest = hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    keep = max(1, int(max_len) - len(digest) - 1)
+    return f"{clean[:keep].rstrip('._-')}_{digest}"
+
+
 class InstanceStagingStore:
     schema_version = "pdf_factory_staging_v1"
     candidate_schema_version = "pdf_factory_promotion_candidate_v1"
@@ -68,6 +83,19 @@ class InstanceStagingStore:
         if not clean or not self.safe_record_id_re.match(clean):
             raise ValueError(f"record_id invalido para staging: {record_id!r}")
         return self.records_dir / f"{clean}.json"
+
+    def artifact_dir(self, kind: str, record_id: str, *, probe_file: str = "latest.json") -> Path:
+        clean_kind = re.sub(r"[^A-Za-z0-9._-]+", "_", str(kind or "").strip()).strip("._-")
+        if not clean_kind:
+            raise ValueError("kind de artefacto requerido")
+        clean_record_id = str(record_id or "").strip()
+        if not clean_record_id or not self.safe_record_id_re.match(clean_record_id):
+            raise ValueError(f"record_id invalido para artefactos: {record_id!r}")
+        root = self.root / clean_kind
+        legacy = root / clean_record_id
+        if len(clean_record_id) <= MAX_ARTIFACT_RECORD_DIR_LEN and len(str(legacy / probe_file)) < MAX_ARTIFACT_PATH_LEN_SOFT_LIMIT:
+            return legacy
+        return root / compact_artifact_dir_name(clean_record_id)
 
     def _source_identity_key(self, record: StagingProblemRecord) -> str:
         source = dict(record.source or {})
@@ -761,7 +789,7 @@ class InstanceStagingStore:
             record.golden_sync["errors"] = [*list(record.golden_sync.get("errors") or []), str(exc)]
 
     def _write_review_artifacts(self, record: StagingProblemRecord) -> None:
-        artifacts_dir = self.root / "review_outputs" / record.record_id
+        artifacts_dir = self.artifact_dir("review_outputs", record.record_id, probe_file="training_examples.json")
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         latest_path = artifacts_dir / "latest_review.json"
         examples_path = artifacts_dir / "training_examples.json"
