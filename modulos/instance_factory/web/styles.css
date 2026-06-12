@@ -395,9 +395,64 @@ img, canvas { max-width: 100%; }
   overflow: clip;
 }
 
+#trainingNotice {
+  padding: 16px 16px 0;
+}
+
+.training-notice {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-soft);
+  color: var(--muted);
+}
+
+.training-notice strong {
+  display: block;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.2;
+}
+
+.training-notice span {
+  display: block;
+  margin-top: 2px;
+  font-size: 13px;
+}
+
+.training-notice small {
+  max-width: 380px;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: Consolas, ui-monospace, monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.training-notice.ready {
+  border-color: var(--green-border);
+  background: var(--green-soft);
+}
+
+.training-notice.ready strong,
+.training-notice.ready span {
+  color: var(--green);
+}
+
+.training-notice.warning {
+  border-color: var(--warning-border);
+  background: var(--amber-soft);
+  color: var(--warning-text);
+}
+
 #stageHost {
   container-type: inline-size;
-  height: 100%;
+  height: calc(100% - 1px);
   min-height: 0;
   padding: 16px;
   overflow: auto;
@@ -997,6 +1052,33 @@ canvas {
   overflow: hidden;
 }
 
+.review-image-stack {
+  display: grid;
+  gap: 10px;
+}
+
+.review-image-frame {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-soft);
+}
+
+.review-image-frame figcaption {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.review-image-frame.continuation {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+
 .record-switcher {
   display: flex;
   flex-wrap: wrap;
@@ -1460,13 +1542,17 @@ canvas {
 
 .form-grid .wide { grid-column: 1 / -1; }
 
-.plain-review-form {
+.plain-review-form,
+.json-review-form,
+.final-review-form {
   display: grid;
   gap: 12px;
   align-content: start;
 }
 
-.plain-review-text {
+.plain-review-text,
+.json-review-text,
+.final-review-text {
   width: 100%;
   min-height: 540px;
   resize: vertical;
@@ -1481,10 +1567,28 @@ canvas {
   white-space: pre-wrap;
 }
 
-.plain-review-text:focus {
+.plain-review-text:focus,
+.json-review-text:focus {
   border-color: var(--blue);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 22%, transparent);
   outline: none;
+}
+
+.json-review-text {
+  min-height: 680px;
+  white-space: pre;
+  tab-size: 2;
+}
+
+.final-review-text {
+  min-height: 260px;
+  white-space: pre-wrap;
+}
+
+.nav-counter.status-error {
+  border-color: color-mix(in srgb, var(--red) 55%, var(--border));
+  color: var(--red);
+  background: color-mix(in srgb, var(--red-soft) 50%, var(--surface-soft));
 }
 
 .check-row {
@@ -1502,6 +1606,10 @@ canvas {
   padding: 12px;
   background: var(--surface-soft);
   overflow-wrap: anywhere;
+}
+
+.final-latex-preview {
+  min-height: 260px;
 }
 
 .preview-problem {

@@ -142,3 +142,4 @@ Agente 4: Staging, BD y QA
 3. Priorizar el contrato de pipeline y staging antes de ampliar UI.
 4. Mantener `problemas` fuera del flujo automatico hasta que staging este probado.
 5. Crear una instancia pequena de prueba con 2-3 paginas para validar el flujo completo.
+6. Para normalizacion, seguir `docs/plan_entrenamiento_normalizador.md`: primero problemas normales, luego examenes mixtos.

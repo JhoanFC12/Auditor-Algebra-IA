@@ -7,6 +7,7 @@ import tempfile
 import threading
 import traceback
 import urllib.parse
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ from .pipeline import InstancePdfPipelineService
 from .library_api import LibraryApiError, LibraryWebApi
 from .runtime_env import load_factory_runtime_env
 from .hf_endpoint_manager import HfEndpointManager
+from .normalizer_training_bank import load_manifest as load_normalizer_training_manifest
 
 
 class WebApiError(Exception):
@@ -53,6 +55,10 @@ class FactoryWebRuntime:
         self.cache_root = Path(tempfile.mkdtemp(prefix="pdf_factory_web_"))
         self._file_tokens: dict[str, Path] = {}
         self._lock = threading.RLock()
+        self._job_lock = threading.RLock()
+        self._endpoint_lifecycle_lock = threading.RLock()
+        self._ocr_jobs: dict[str, dict[str, Any]] = {}
+        self._active_ocr_job_id = ""
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self.url = ""
@@ -125,6 +131,10 @@ class FactoryWebRuntime:
         query: dict[str, list[str]],
         payload: dict[str, Any],
     ) -> Any:
+        if method == "GET" and path == "/api/ocr/jobs/status":
+            return self._ocr_job_status(self._first(query, "job_id", ""))
+        if method == "POST" and path == "/api/ocr/jobs/start":
+            return self._start_ocr_job(payload)
         with self._lock:
             if path.startswith("/api/library/"):
                 return self.library_api.dispatch(method, path, query, payload)
@@ -151,6 +161,8 @@ class FactoryWebRuntime:
                 return self.service.staging.build_promotion_candidate(record_id)
             if method == "GET" and path == "/api/endpoint/ocr/status":
                 return self.endpoint_manager.status()
+            if method == "GET" and path == "/api/training/normalizer/status":
+                return self._normalizer_training_status()
             if method == "POST" and path == "/api/endpoint/ocr/resume":
                 return self.endpoint_manager.resume(
                     wait=self._bool(payload.get("wait"), default=True),
@@ -232,7 +244,14 @@ class FactoryWebRuntime:
                     raise ValueError("normalized debe ser un objeto JSON.")
                 notes = str(payload.get("notes") or "")
                 mark_ready = bool(payload.get("mark_ready", False))
-                updated = self.service.staging.update_review(record_id, dict(normalized), notes, mark_ready=mark_ready)
+                sync_golden = not self._bool(payload.get("defer_golden_sync"), default=False)
+                updated = self.service.staging.update_review(
+                    record_id,
+                    dict(normalized),
+                    notes,
+                    mark_ready=mark_ready,
+                    sync_golden=sync_golden,
+                )
                 if self._bool(payload.get("compact"), default=False):
                     return {
                         "schema_version": "pdf_factory_web_record_saved_v1",
@@ -244,6 +263,198 @@ class FactoryWebRuntime:
                     "snapshot": self._snapshot(),
                 }
             raise FileNotFoundError(f"Ruta API no encontrada: {method} {path}")
+
+    def _start_ocr_job(self, payload: dict[str, Any]) -> dict[str, Any]:
+        record_ids = self._record_ids_from_payload(payload)
+        explicit_record_id = str(payload.get("record_id") or "").strip()
+        if not record_ids and explicit_record_id:
+            record_ids = [explicit_record_id]
+        record_ids = [item for item in dict.fromkeys(record_ids) if item]
+        if not record_ids:
+            raise WebApiError("record_ids requerido para iniciar cola OCR.", status=400, code="missing_record_ids")
+        with self._endpoint_lifecycle_lock, self._job_lock:
+            job_id = uuid.uuid4().hex
+            job = {
+                "schema_version": "pdf_factory_ocr_job_v1",
+                "job_id": job_id,
+                "status": "queued",
+                "record_ids": record_ids,
+                "total": len(record_ids),
+                "current": 0,
+                "ok": 0,
+                "failed": 0,
+                "active_id": record_ids[0] if record_ids else "",
+                "active_name": "",
+                "message": f"Cola OCR preparada 0 de {len(record_ids)}",
+                "errors": [],
+                "payload": {
+                    "provider": str(payload.get("provider") or "hf"),
+                    "curso": str(payload.get("curso") or "SIN_CURSO"),
+                    "tema": str(payload.get("tema") or "SIN_TEMA"),
+                    "start_n": self._bounded_int(payload.get("start_n") or 1, "start_n", minimum=1, maximum=100000),
+                    "limit": self._optional_int(payload.get("limit")),
+                    "ocr_model": str(payload.get("ocr_model") or ""),
+                    "figure_model": str(payload.get("figure_model") or ""),
+                    "force_figure_model": self._bool(payload.get("force_figure_model"), default=True),
+                },
+                "endpoint_shutdown": {},
+            }
+            self._ocr_jobs[job_id] = job
+            self._active_ocr_job_id = job_id
+            thread = threading.Thread(target=self._run_ocr_job, args=(job_id,), daemon=True)
+            job["thread_name"] = thread.name
+            response = self._public_ocr_job(job)
+            thread.start()
+            return response
+
+    def _ocr_job_status(self, job_id: str = "") -> dict[str, Any]:
+        with self._job_lock:
+            selected = str(job_id or self._current_ocr_job_id() or "").strip()
+            job = self._ocr_jobs.get(selected) if selected else None
+            if not job:
+                return {
+                    "schema_version": "pdf_factory_ocr_job_v1",
+                    "job_id": selected,
+                    "status": "idle",
+                    "running": False,
+                    "total": 0,
+                    "current": 0,
+                    "ok": 0,
+                    "failed": 0,
+                    "errors": [],
+                }
+            return self._public_ocr_job(job)
+
+    def _current_ocr_job_id(self) -> str:
+        active_id = str(self._active_ocr_job_id or "").strip()
+        active = self._ocr_jobs.get(active_id)
+        if active and self._ocr_job_is_running(active):
+            return active_id
+        for job_id in reversed(list(self._ocr_jobs.keys())):
+            job = self._ocr_jobs.get(job_id)
+            if job and self._ocr_job_is_running(job):
+                return job_id
+        return active_id
+
+    @staticmethod
+    def _ocr_job_is_running(job: dict[str, Any]) -> bool:
+        return str(job.get("status") or "") in {"queued", "running"}
+
+    def _active_ocr_job_count(self) -> int:
+        return sum(1 for job in self._ocr_jobs.values() if self._ocr_job_is_running(job))
+
+    def _public_ocr_job(self, job: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(job)
+        payload.pop("payload", None)
+        payload.pop("thread_name", None)
+        payload["running"] = self._ocr_job_is_running(payload)
+        payload["active_jobs"] = self._active_ocr_job_count()
+        return payload
+
+    def _update_ocr_job(self, job_id: str, **updates: Any) -> None:
+        with self._job_lock:
+            job = self._ocr_jobs.get(job_id)
+            if not job:
+                return
+            job.update(updates)
+
+    def _run_ocr_job(self, job_id: str) -> None:
+        with self._job_lock:
+            job = self._ocr_jobs.get(job_id)
+            if not job:
+                return
+            record_ids = list(job.get("record_ids") or [])
+            options = dict(job.get("payload") or {})
+        total = len(record_ids)
+        self._update_ocr_job(job_id, status="running", message=f"Ejecutando OCR 0 de {total}")
+        for index, record_id in enumerate(record_ids):
+            self._update_ocr_job(
+                job_id,
+                current=index,
+                active_id=record_id,
+                message=f"Procesando {index + 1} de {total}",
+            )
+            try:
+                self.service.run_ocr_and_segmentation(
+                    provider=str(options.get("provider") or "hf"),
+                    curso=str(options.get("curso") or "SIN_CURSO"),
+                    tema=str(options.get("tema") or "SIN_TEMA"),
+                    start_n=int(options.get("start_n") or 1),
+                    limit=1,
+                    ocr_model=str(options.get("ocr_model") or ""),
+                    figure_model=str(options.get("figure_model") or ""),
+                    force_figure_model=bool(options.get("force_figure_model", True)),
+                    record_id=str(record_id),
+                    record_ids=[],
+                )
+                with self._job_lock:
+                    job = self._ocr_jobs.get(job_id) or {}
+                    job["ok"] = int(job.get("ok") or 0) + 1
+                    job["current"] = index + 1
+                    job["message"] = f"Guardado {index + 1} de {total}"
+            except Exception as exc:
+                with self._job_lock:
+                    job = self._ocr_jobs.get(job_id) or {}
+                    errors = list(job.get("errors") or [])
+                    errors.append({"record_id": record_id, "message": str(exc)})
+                    job["errors"] = errors[-50:]
+                    job["failed"] = int(job.get("failed") or 0) + 1
+                    job["current"] = index + 1
+                    job["message"] = f"Error en {index + 1} de {total}"
+        should_shutdown = False
+        endpoint_shutdown: dict[str, Any] = {}
+        with self._job_lock:
+            job = self._ocr_jobs.get(job_id)
+            if job:
+                failed = int(job.get("failed") or 0)
+                job["status"] = "error" if failed else "done"
+                job["running"] = False
+                job["current"] = total
+                job["message"] = f"Cola terminada con {failed} error(es)." if failed else f"OCR terminado para {total} imagen(es)."
+                should_shutdown = self._active_ocr_job_count() == 0
+                if not should_shutdown:
+                    endpoint_shutdown = {
+                        "status": "skipped",
+                        "reason": "other_ocr_jobs_running",
+                        "message": "Endpoint OCR se mantiene activo porque hay otros jobs en curso.",
+                    }
+                    job["endpoint_shutdown"] = endpoint_shutdown
+        if should_shutdown:
+            with self._endpoint_lifecycle_lock:
+                with self._job_lock:
+                    should_shutdown = self._active_ocr_job_count() == 0
+                if should_shutdown:
+                    try:
+                        endpoint_shutdown = self.endpoint_manager.scale_to_zero()
+                    except Exception as exc:
+                        endpoint_shutdown = {"error": str(exc)}
+                else:
+                    endpoint_shutdown = {
+                        "status": "skipped",
+                        "reason": "other_ocr_jobs_running",
+                        "message": "Endpoint OCR se mantiene activo porque hay otros jobs en curso.",
+                    }
+            with self._job_lock:
+                job = self._ocr_jobs.get(job_id)
+                if job:
+                    job["endpoint_shutdown"] = endpoint_shutdown
+
+    def _normalizer_training_status(self) -> dict[str, Any]:
+        manifest = load_normalizer_training_manifest()
+        samples_total = int(manifest.get("samples_total") or 0)
+        threshold = int(manifest.get("threshold") or 200)
+        return {
+            **manifest,
+            "schema_version": "normalizer_training_bank_status_v1",
+            "samples_total": samples_total,
+            "threshold": threshold,
+            "ready_to_train": samples_total >= threshold,
+            "notification": (
+                f"Ya hay {samples_total} muestras listas para entrenar una primera version del normalizador."
+                if samples_total >= threshold
+                else ""
+            ),
+        }
 
     def _snapshot(self) -> dict[str, Any]:
         return {
@@ -560,8 +771,11 @@ class FactoryWebRuntime:
             "/api/record": {"GET"},
             "/api/promotion": {"GET"},
             "/api/endpoint/ocr/status": {"GET"},
+            "/api/ocr/jobs/status": {"GET"},
+            "/api/training/normalizer/status": {"GET"},
             "/api/endpoint/ocr/resume": {"POST"},
             "/api/endpoint/ocr/scale-to-zero": {"POST"},
+            "/api/ocr/jobs/start": {"POST"},
             "/api/pages/detect": {"POST"},
             "/api/pages/boxes": {"POST"},
             "/api/staging/materialize": {"POST"},

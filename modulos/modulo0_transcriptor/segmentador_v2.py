@@ -38,6 +38,9 @@ DEFAULT_LIVE_GOLDEN_BASE_DIR = (
     / "datasets"
     / "segment_training_live"
 )
+MAX_LEGACY_SEGMENT_STEM_LEN = 64
+MAX_SEGMENT_PATH_LEN_SOFT_LIMIT = 240
+MAX_COMPACT_SEGMENT_DIR_LEN = 32
 
 
 @dataclass
@@ -206,6 +209,59 @@ print(json.dumps(out, ensure_ascii=False))
     def _segment_manifest_path(self, out_dir: Path) -> Path:
         return Path(out_dir) / self.manifest_name
 
+    @staticmethod
+    def _safe_path_component(value: str, *, fallback: str = "src", max_len: int = 32) -> str:
+        cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "").strip()).strip("._-")
+        if not cleaned:
+            cleaned = fallback
+        if len(cleaned) <= max_len:
+            return cleaned
+        digest = hashlib.sha1(cleaned.encode("utf-8", errors="ignore")).hexdigest()[:8]
+        keep = max(1, int(max_len) - len(digest) - 1)
+        return f"{cleaned[:keep].rstrip('._-')}_{digest}"
+
+    @staticmethod
+    def _source_key(src: Path) -> str:
+        try:
+            return str(Path(src).expanduser().resolve()).lower()
+        except Exception:
+            return str(src).strip().lower()
+
+    def _compact_segment_dir_name(self, src: Path) -> str:
+        digest = hashlib.sha1(self._source_key(src).encode("utf-8", errors="ignore")).hexdigest()[:16]
+        stem = self._safe_path_component(Path(src).stem, fallback="src", max_len=12)
+        return self._safe_path_component(f"{stem}_{digest}", fallback=f"src_{digest}", max_len=MAX_COMPACT_SEGMENT_DIR_LEN)
+
+    def _legacy_segment_dir(self, src: Path) -> Path:
+        return self.out_root / Path(src).stem
+
+    def _should_compact_segment_dir(self, src: Path, legacy_dir: Path) -> bool:
+        stem = str(Path(src).stem or "")
+        if len(stem) > MAX_LEGACY_SEGMENT_STEM_LEN:
+            return True
+        return any(
+            len(str(candidate)) >= MAX_SEGMENT_PATH_LEN_SOFT_LIMIT
+            for candidate in (
+                legacy_dir / self.manifest_name,
+                legacy_dir / "seg_99.png",
+            )
+        )
+
+    def _segment_dir_for_write(self, src: Path) -> Path:
+        legacy_dir = self._legacy_segment_dir(src)
+        if self._should_compact_segment_dir(src, legacy_dir):
+            return self.out_root / self._compact_segment_dir_name(src)
+        return legacy_dir
+
+    def _segment_dir_for_read(self, src: Path) -> Path:
+        preferred = self._segment_dir_for_write(src)
+        if preferred.exists():
+            return preferred
+        legacy = self._legacy_segment_dir(src)
+        if legacy != preferred and legacy.exists():
+            return legacy
+        return preferred
+
     def _normalize_detector_payload(self, raw: Optional[dict]) -> Optional[dict]:
         if not isinstance(raw, dict):
             return None
@@ -291,6 +347,7 @@ print(json.dumps(out, ensure_ascii=False))
             "schema_version": 2,
             "source_path": str(src),
             "source_stem": str(src.stem),
+            "source_dir": str(Path(out_dir).name),
             "segments": [
                 {
                     "idx": int(seg.idx),
@@ -318,7 +375,7 @@ print(json.dumps(out, ensure_ascii=False))
         segments: List[SegmentoProblemaV2],
         detector_payload: Optional[dict] = None,
     ) -> None:
-        out_dir = self.out_root / Path(src).stem
+        out_dir = self._segment_dir_for_write(Path(src))
         out_dir.mkdir(parents=True, exist_ok=True)
         self._write_segment_manifest(
             src=Path(src),
@@ -459,7 +516,8 @@ print(json.dumps(out, ensure_ascii=False))
         live_dir = self._live_golden_base_dir()
         record_id = self._live_record_id(source)
         source_ext = source.suffix.lower() or ".png"
-        source_name = f"{record_id}_{source.stem}{source_ext}"
+        source_stem = self._safe_path_component(source.stem, fallback="source", max_len=32)
+        source_name = f"{record_id}_{source_stem}{source_ext}"
         copied_source = live_dir / "source_images" / source_name
         self._copy_file_safe(source, copied_source)
 
@@ -882,7 +940,7 @@ print(json.dumps(out, ensure_ascii=False))
         *,
         detector_payload: Optional[dict] = None,
     ) -> List[SegmentoProblemaV2]:
-        out_dir = self.out_root / src.stem
+        out_dir = self._segment_dir_for_write(src)
         out_dir.mkdir(parents=True, exist_ok=True)
         for old_path in out_dir.iterdir():
             try:
@@ -975,7 +1033,7 @@ print(json.dumps(out, ensure_ascii=False))
         return self._save_segments_from_boxes(src, list(boxes or []), detector_payload=self.last_detector_payload)
 
     def _load_existing_segments(self, src: Path) -> List[SegmentoProblemaV2]:
-        out_dir = self.out_root / src.stem
+        out_dir = self._segment_dir_for_read(src)
         if not out_dir.exists() or (not out_dir.is_dir()):
             return []
         manifest = self._load_segment_manifest(out_dir)
@@ -1075,7 +1133,7 @@ print(json.dumps(out, ensure_ascii=False))
         return result
 
     def _has_cached_segment_decision(self, src: Path) -> bool:
-        out_dir = self.out_root / src.stem
+        out_dir = self._segment_dir_for_read(src)
         manifest = self._load_segment_manifest(out_dir)
         if not isinstance(manifest, dict) or not manifest:
             return False
@@ -1094,7 +1152,7 @@ print(json.dumps(out, ensure_ascii=False))
             self.last_detector_source = "none"
             return []
 
-        manifest = self._load_segment_manifest(self.out_root / src.stem)
+        manifest = self._load_segment_manifest(self._segment_dir_for_read(src))
         force_model = bool(force_model or self._force_model_default)
         if not force_model:
             cached = self._load_existing_segments(src)

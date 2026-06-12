@@ -191,6 +191,41 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertEqual(contract["raw_ocr"], "12. Halle x. A) 1 B) 2 C) 3 D) 4 E) 5")
             self.assertIn("Halle x.", contract["corrected_text"])
 
+    def test_ready_review_is_added_to_normalizer_training_bank(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bank = root / "normalizer_bank"
+            context = InstancePipelineContext(book_code="GEO", instance_type="s02")
+            store = InstanceStagingStore(context, root=root / "staging")
+            crop = root / "crop.png"
+            crop.write_bytes(b"png")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_002",
+                    crop_id="crop_002",
+                    crop_path=str(crop),
+                    raw_ocr="12. Halle x. A) 1 B) 2 C) 3 D) 4 E) 5",
+                )
+            )
+
+            with patch.dict(os.environ, {"NORMALIZER_TRAINING_BANK_ROOT": str(bank)}):
+                updated = store.update_review(
+                    "crop_002",
+                    {
+                        "numero": "12",
+                        "latex_rendered_item": r"\item[\textbf{12.}] Halle $x$. £A)$1$æB)$2$æC)$3$£D)$4$ææE)$5$£",
+                    },
+                    notes="listo",
+                    mark_ready=True,
+                )
+
+            manifest = json.loads((bank / "manifest.json").read_text(encoding="utf-8"))
+            rows = [json.loads(line) for line in (bank / "samples.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(manifest["samples_total"], 1)
+            self.assertEqual(rows[0]["final_latex"], updated.normalized["latex_rendered_item"])
+            self.assertTrue(Path(rows[0]["images"][0]["bank_path"]).exists())
+            self.assertEqual(updated.artifacts["normalizer_training_samples_total"], 1)
+
     def test_normalize_existing_ocr_can_target_single_record(self) -> None:
         try:
             from modulos.instance_factory.pipeline import InstancePdfPipelineService
@@ -328,6 +363,46 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertIsNone(candidate["sql"])
             self.assertEqual(candidate["write_operations"], [])
             self.assertTrue(candidate["policy"]["never_insert_directly_into_problemas"])
+
+    def test_promotion_candidate_blocks_continuation_record_as_independent_problem(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = InstancePipelineContext(
+                book_code="GEO",
+                instance_type="s03",
+                pdf_path="E:/Banco/geometria.pdf",
+            )
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            crop = Path(tmp) / "crop_cont.png"
+            crop.write_bytes(b"png")
+            record = StagingProblemRecord(
+                record_id="crop_cont",
+                crop_id="crop_cont",
+                crop_path=str(crop),
+                status=StageStatus.READY,
+                source={"page_number": 2, "bbox_px": [10, 20, 210, 320]},
+                raw_ocr="[CONT.] A) 1 B) 2 C) 3 D) 4 E) 5",
+                normalized={
+                    "status": "listo",
+                    "enunciado_latex": "A) 1 B) 2 C) 3 D) 4 E) 5",
+                    "continuacion": {
+                        "es_continuacion": True,
+                        "fusionar_con_anterior": True,
+                        "parent_record_id": "crop_prev",
+                    },
+                },
+                models={"ocr": "test", "normalizer": "human"},
+                confidence={"ocr": 0.95},
+                review={"review_status": StageStatus.READY},
+            )
+            record.set_step(PipelineStep.REVIEW, StageStatus.READY, "continuacion fusionada")
+            store.upsert_record(record)
+
+            candidate = store.build_promotion_candidate("crop_cont")
+
+            self.assertFalse(candidate["promotion_enabled"])
+            self.assertFalse(candidate["ready_for_future_promotion"])
+            self.assertIn("continuacion:fusionada_con_anterior", candidate["blocking_issues"])
+            self.assertEqual(candidate["write_operations"], [])
 
     def test_upsert_many_coalesces_duplicate_source_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -887,6 +962,7 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             summary = service.build_instance_summary()
             page_rows = service.build_page_box_overview()
             stage_rows = service.build_record_stage_rows()
+            overview = service.build_stage_overview()
 
             self.assertEqual(summary["pages_total"], 1)
             self.assertEqual(summary["boxes_total"], 2)
@@ -895,6 +971,8 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertEqual(stage_rows[0]["ocr_items"], 1)
             self.assertEqual(stage_rows[0]["segments_total"], 2)
             self.assertEqual(stage_rows[0]["steps"][PipelineStep.OCR], StageStatus.READY)
+            ocr_overview = next(row for row in overview if str(row["stage"]).startswith("OCR"))
+            self.assertEqual(ocr_overview["status"], StageStatus.READY)
 
     def test_run_instance_pipeline_materializes_only_to_staging(self) -> None:
         try:

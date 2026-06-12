@@ -14,6 +14,8 @@ from .models import (
     build_pipeline_contract,
     utc_now_text,
 )
+from .normalizer_training_bank import remove_sample as remove_normalizer_training_sample
+from .normalizer_training_bank import upsert_sample as upsert_normalizer_training_sample
 
 
 def _build_retraining_evaluation_matrix() -> dict[str, Any]:
@@ -545,6 +547,7 @@ class InstanceStagingStore:
         notes: str = "",
         *,
         mark_ready: bool = False,
+        sync_golden: bool = True,
     ) -> StagingProblemRecord:
         record = self.get_record(record_id)
         if record is None:
@@ -606,9 +609,45 @@ class InstanceStagingStore:
             notes_present=bool(str(notes or "").strip()),
         )
         self._write_review_artifacts(record)
-        self._sync_review_to_golden_bases(record, notes=str(notes or ""))
+        if sync_golden:
+            self._sync_review_to_golden_bases(record, notes=str(notes or ""))
+        else:
+            record.golden_sync = {
+                **dict(record.golden_sync or {}),
+                "updated_at": utc_now_text(),
+                "status": "deferred",
+                "reason": "batch_review_save",
+                "targets": {},
+                "errors": [],
+            }
+        self._sync_review_to_normalizer_training_bank(record, review_status=review_status)
         self.upsert_record(record)
         return record
+
+    def _sync_review_to_normalizer_training_bank(self, record: StagingProblemRecord, *, review_status: str) -> None:
+        try:
+            if StageStatus.normalize(review_status) != StageStatus.READY:
+                manifest = remove_normalizer_training_sample(self.context, record)
+            else:
+                rows = self.load_records()
+                rows = [row for row in rows if row.record_id != record.record_id] + [record]
+                manifest = upsert_normalizer_training_sample(
+                    self.context,
+                    record,
+                    staging_root=self.root,
+                    all_records=rows,
+                )
+            record.artifacts = {
+                **dict(record.artifacts or {}),
+                "normalizer_training_bank_manifest": str(manifest.get("manifest_path", "")),
+                "normalizer_training_samples_total": int(manifest.get("samples_total") or 0),
+                "normalizer_training_ready_to_train": bool(manifest.get("ready_to_train")),
+            }
+        except Exception as exc:
+            record.artifacts = {
+                **dict(record.artifacts or {}),
+                "normalizer_training_bank_error": str(exc),
+            }
 
     def build_promotion_candidate(self, record_id: str) -> dict[str, Any]:
         record = self.get_record(record_id)
@@ -616,8 +655,12 @@ class InstanceStagingStore:
             raise KeyError(record_id)
         metadata_issues = self.metadata_issues(record)
         blocking_issues = list(metadata_issues)
-        if not dict(record.normalized or {}):
+        normalized = dict(record.normalized or {})
+        continuation = normalized.get("continuacion") if isinstance(normalized.get("continuacion"), dict) else {}
+        if not normalized:
             blocking_issues.append("missing:normalized")
+        if bool(continuation.get("es_continuacion") or continuation.get("fusionar_con_anterior")):
+            blocking_issues.append("continuacion:fusionada_con_anterior")
         if StageStatus.normalize(record.status) != StageStatus.READY:
             blocking_issues.append("not_ready:human_review")
         return {
@@ -632,7 +675,7 @@ class InstanceStagingStore:
             "record_id": record.record_id,
             "crop_id": record.crop_id,
             "payload": {
-                "normalized": dict(record.normalized or {}),
+                "normalized": normalized,
                 "source": dict(record.source or {}),
                 "crop_path": record.crop_path,
                 "models": dict(record.models or {}),

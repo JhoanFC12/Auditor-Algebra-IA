@@ -32,6 +32,7 @@ const state = {
   selectedPageRecordId: "",
   selectedRecordId: "",
   ocrQueueIds: new Set(),
+  ocrJobId: "",
   selectedOcrIndex: 0,
   boxes: [],
   boxMode: "select",
@@ -50,6 +51,8 @@ const state = {
   batchResults: [],
   ocrEndpoint: null,
   ocrEndpointLoading: false,
+  ocrJobPolling: false,
+  normalizerTraining: null,
   taskProgress: null,
 };
 
@@ -59,6 +62,8 @@ const FACTORY_UI_STORAGE_PREFIX = "pdfFactoryUiState:v1";
 const BOX_ZOOM_MIN = 0.35;
 const BOX_ZOOM_MAX = 8;
 const BOX_SCALE_MAX = 2;
+
+const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
 
 function currentTheme() {
   return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
@@ -120,9 +125,11 @@ async function refresh(message = "") {
   if (state.view === "library") return loadLibrary(message || "Biblioteca actualizada.");
   setBusy("Actualizando...");
   applyFactorySnapshot(await loadFactorySnapshot());
+  await refreshNormalizerTrainingStatus({ silent: true });
   restoreFactoryUiState({ preserveCurrentStage: true });
   render();
   setStatus(message || "Listo para trabajar.");
+  resumeOcrJobIfRunning({ silent: true });
 }
 
 function render() {
@@ -133,11 +140,56 @@ function render() {
   renderFactoryShell();
   const snap = state.snapshot;
   if (!snap) return;
-  $("title").textContent = `${snap.context.book_code || "Libro"} / ${snap.context.instance_type || "Instancia"}`;
-  $("subtitle").textContent = `${snap.pdf.name || "PDF"} | Flujo revisable, sin insercion directa en problemas`;
+  const labels = factoryHeaderLabels(snap);
+  document.title = labels.browserTitle;
+  $("title").textContent = labels.title;
+  $("subtitle").textContent = labels.subtitle;
   renderTimeline();
   renderMetrics();
+  renderTrainingNotice();
   renderStage();
+}
+
+function factoryHeaderLabels(snap) {
+  const context = snap?.context || {};
+  const pdf = snap?.pdf || {};
+  const current = state.currentInstance || {};
+  const book = current.book || {};
+  const instanceName = String(
+    current.title
+    || current.name
+    || current.tipo
+    || current.instance_type
+    || context.instance_type
+    || context.instance_name
+    || context.instance_id
+    || "Instancia"
+  ).trim();
+  const bookName = String(
+    book.title
+    || book.titulo
+    || current.book_title
+    || current.book_name
+    || context.project_name
+    || context.book_code
+    || context.book_id
+    || "Libro"
+  ).trim();
+  const pdfName = String(pdf.name || context.pdf_name || "").trim();
+  const dbName = String(context.db_name || "").trim();
+  const title = instanceName && bookName
+    ? `${instanceName} / ${bookName}`
+    : (instanceName || bookName || "Fabrica PDF");
+  const subtitleParts = [
+    pdfName || "PDF",
+    dbName ? `BD: ${dbName}` : "",
+    "Staging revisable; sin insercion directa en problemas",
+  ].filter(Boolean);
+  return {
+    title: compactText(title, 120),
+    subtitle: subtitleParts.join(" | "),
+    browserTitle: `${compactText(instanceName || bookName || "Fabrica PDF", 42)} | Fabrica PDF`,
+  };
 }
 
 function renderFactoryShell() {
@@ -166,6 +218,53 @@ function renderFactoryShell() {
       </div>
     `;
   }
+}
+
+async function refreshNormalizerTrainingStatus({ silent = true } = {}) {
+  if (state.view === "library") return null;
+  try {
+    state.normalizerTraining = await api("/api/training/normalizer/status");
+    renderTrainingNotice();
+    if (!silent && state.normalizerTraining?.ready_to_train) {
+      setStatus(state.normalizerTraining.notification || "Dataset normalizador listo para entrenar.");
+    }
+    return state.normalizerTraining;
+  } catch (err) {
+    state.normalizerTraining = {
+      schema_version: "normalizer_training_bank_status_v1",
+      error: err.message || String(err),
+      samples_total: 0,
+      threshold: 200,
+      ready_to_train: false,
+    };
+    renderTrainingNotice();
+    return state.normalizerTraining;
+  }
+}
+
+function renderTrainingNotice() {
+  const host = $("trainingNotice");
+  if (!host) return;
+  const bank = state.normalizerTraining;
+  if (!bank || bank.error) {
+    host.innerHTML = bank?.error ? `<div class="training-notice warning">Base normalizador: ${escapeHtml(bank.error)}</div>` : "";
+    return;
+  }
+  const total = Number(bank.samples_total || 0);
+  const threshold = Number(bank.threshold || 200);
+  const ready = Boolean(bank.ready_to_train || total >= threshold);
+  const remaining = Math.max(0, threshold - total);
+  host.innerHTML = `
+    <div class="training-notice ${ready ? "ready" : ""}">
+      <div>
+        <strong>${ready ? "Normalizador listo para entrenar" : "Base normalizador"}</strong>
+        <span>${ready
+          ? `Ya hay ${total} muestra(s). Podemos entrenar la primera version.`
+          : `${total}/${threshold} muestra(s). Faltan ${remaining}.`}</span>
+      </div>
+      <small>${escapeHtml(bank.samples_jsonl || bank.root || "")}</small>
+    </div>
+  `;
 }
 
 async function loadFactorySnapshot() {
@@ -220,6 +319,7 @@ function persistFactoryUiState() {
       selectedPageRecordId: state.selectedPageRecordId,
       selectedRecordId: state.selectedRecordId,
       ocrQueueIds: [...state.ocrQueueIds].sort(),
+      ocrJobId: state.ocrJobId,
       selectedOcrIndex: state.selectedOcrIndex,
       savedAt: new Date().toISOString(),
     }));
@@ -235,6 +335,7 @@ function restoreFactoryUiState({ preserveCurrentStage = false } = {}) {
   const validRecordIds = new Set(records.map((record) => String(record.record_id || "")));
   const persistedQueueIds = Array.isArray(persisted.ocrQueueIds) ? persisted.ocrQueueIds : [];
   state.ocrQueueIds = new Set(persistedQueueIds.map((id) => String(id || "")).filter((id) => validRecordIds.has(id)));
+  state.ocrJobId = String(persisted.ocrJobId || state.ocrJobId || "").trim();
   const detectedPages = detectedPageNumbers(pages);
   const persistedPages = sortedPageNumbers(persisted.selectedPages || []).filter((page) => !pageCount || page <= pageCount);
   const selectedPages = persistedPages.length ? persistedPages : detectedPages;
@@ -538,6 +639,7 @@ function ensureLibrarySelection() {
 }
 
 function renderLibrary() {
+  document.title = "Biblioteca | Fabrica PDF";
   $("workspace").classList.remove("ocr-focus-mode");
   $("workspace").classList.add("library-mode");
   $("title").textContent = "Biblioteca";
@@ -1559,6 +1661,59 @@ function syncSelectedRecord() {
   }
 }
 
+function isReviewContinuationRecord(record) {
+  if (!record) return false;
+  const normalized = record.normalized && typeof record.normalized === "object" ? record.normalized : {};
+  const continuation = normalized.continuacion && typeof normalized.continuacion === "object"
+    ? normalized.continuacion
+    : {};
+  return Boolean(continuation.es_continuacion || continuation.fusionar_con_anterior || isFinalLatexContinuation(record.raw_ocr));
+}
+
+function reviewRecords(allRecords = state.snapshot?.records || []) {
+  return (allRecords || []).filter((record) => !isReviewContinuationRecord(record));
+}
+
+function findParentForContinuation(record, allRecords = state.snapshot?.records || []) {
+  if (!record) return null;
+  const normalized = record.normalized && typeof record.normalized === "object" ? record.normalized : {};
+  const continuation = normalized.continuacion && typeof normalized.continuacion === "object"
+    ? normalized.continuacion
+    : {};
+  const parentId = String(continuation.parent_record_id || "").trim();
+  if (parentId) {
+    const parent = findRecordById(parentId, allRecords);
+    if (parent && !isReviewContinuationRecord(parent)) return parent;
+  }
+  const index = allRecords.findIndex((row) => String(row.record_id || "") === String(record.record_id || ""));
+  for (let i = index - 1; i >= 0; i -= 1) {
+    if (!isReviewContinuationRecord(allRecords[i])) return allRecords[i];
+  }
+  return reviewRecords(allRecords)[0] || null;
+}
+
+function ensureReviewSelectedRecord(visibleRecords, allRecords = state.snapshot?.records || []) {
+  if (!visibleRecords.length) {
+    state.selectedRecordId = "";
+    state.selectedOcrIndex = 0;
+    return null;
+  }
+  const current = findRecordById(state.selectedRecordId, allRecords);
+  if (current && isReviewContinuationRecord(current)) {
+    const parent = findParentForContinuation(current, allRecords);
+    if (parent) {
+      state.selectedRecordId = parent.record_id;
+      state.selectedOcrIndex = 0;
+      return parent;
+    }
+  }
+  const visible = visibleRecords.find((record) => record.record_id === state.selectedRecordId);
+  if (visible) return visible;
+  state.selectedRecordId = visibleRecords[0].record_id;
+  state.selectedOcrIndex = 0;
+  return visibleRecords[0];
+}
+
 function pageBoxesSignature(page) {
   return [
     page.record_id || "",
@@ -2175,8 +2330,7 @@ function recordIndex(records = state.snapshot.records || []) {
   return index >= 0 ? index : 0;
 }
 
-function selectRecordAt(index) {
-  const records = state.snapshot.records || [];
+function selectRecordAt(index, records = state.snapshot.records || []) {
   if (!records.length) return;
   const nextIndex = Math.max(0, Math.min(records.length - 1, Number(index || 0)));
   const next = records[nextIndex];
@@ -2188,19 +2342,18 @@ function selectRecordAt(index) {
   renderStage();
 }
 
-function selectRecordByOffset(delta) {
-  const records = state.snapshot.records || [];
+function selectRecordByOffset(delta, records = state.snapshot.records || []) {
   if (!records.length) return;
-  selectRecordAt(recordIndex(records) + delta);
+  selectRecordAt(recordIndex(records) + delta, records);
 }
 
-function bindRecordNavigation() {
+function bindRecordNavigation(records = state.snapshot.records || []) {
   const prev = $("prevRecord");
   const next = $("nextRecord");
   const jump = $("recordJump");
-  if (prev) prev.onclick = () => selectRecordByOffset(-1);
-  if (next) next.onclick = () => selectRecordByOffset(1);
-  if (jump) jump.onchange = () => selectRecordAt(Number(jump.value || 0));
+  if (prev) prev.onclick = () => selectRecordByOffset(-1, records);
+  if (next) next.onclick = () => selectRecordByOffset(1, records);
+  if (jump) jump.onchange = () => selectRecordAt(Number(jump.value || 0), records);
 }
 
 function selectOcrItemAt(index, record = selectedRecord()) {
@@ -2720,15 +2873,28 @@ async function saveRawOcr(record) {
 }
 
 function batchModeConfig(mode = state.batchMode) {
+  if (mode === "final_latex") {
+    return {
+      mode: "final_latex",
+      title: "Formato final en bloque",
+      description: "Pega el formato LaTeX final por imagen. Se guarda como salida final para futura BD y como ejemplo de entrenamiento.",
+      action: "Guardar formato final",
+      empty: "No hay registros de staging para guardar formato final.",
+      placeholder: "----imagen.png-----\n\\item[\\textbf{01.}] [[curso=Geometria]] [[tema=Triangulos]] [[Estado=sin_revisar]] [[Clave=C]] Enunciado... [[Imagen=img-01]] £A)...æB)...æC)...£D)...ææE)...£",
+      saving: "Guardando formato final por lote...",
+      done: "Formato final por lote terminado.",
+    };
+  }
   if (mode === "normalization") {
     return {
       mode: "normalization",
-      title: "Modo lote revision",
-      description: "Edita borradores de revision desde OCR. Estas correcciones serviran para entrenar el normalizador futuro.",
+      title: "Normalizar en grupo",
+      description: "Edita varios borradores de revision desde OCR en un solo texto. Estas correcciones serviran para entrenar el normalizador futuro.",
       action: "Guardar validos",
       empty: "No hay registros de staging con OCR para revisar.",
-      saving: "Guardando revision por lote...",
-      done: "Revision por lote terminada.",
+      placeholder: "----imagen.png-----\n{\n  \"schema_version\": \"normalized_problem_staging_v1\",\n  \"numero\": \"01\",\n  \"respuesta_final\": \"\"\n}",
+      saving: "Guardando normalizacion por lote...",
+      done: "Normalizacion por lote terminada.",
     };
   }
   return {
@@ -2737,6 +2903,7 @@ function batchModeConfig(mode = state.batchMode) {
     description: "Edita el OCR crudo de todos los crops. Al guardar, cada bloque regenera su lectura LaTeX.",
     action: "Guardar validos",
     empty: "No hay registros de staging para editar OCR crudo.",
+    placeholder: "----imagen.png-----\n<01.> Texto... A) ... B) ...",
     saving: "Guardando OCR crudo por lote...",
     done: "OCR crudo por lote terminado.",
   };
@@ -2788,7 +2955,7 @@ function renderBatchEditor() {
           <button id="saveBatchText" class="primary" type="button" ${records.length ? "" : "disabled"}>${escapeHtml(config.action)}</button>
         </div>
       </div>
-      <textarea id="batchEditor" class="batch-editor" spellcheck="false" placeholder="----imagen.png-----&#10;<01.> Texto...">${escapeHtml(state.batchText || "")}</textarea>
+      <textarea id="batchEditor" class="batch-editor" spellcheck="false" placeholder="${escapeAttr(config.placeholder || "")}">${escapeHtml(state.batchText || "")}</textarea>
       <div id="batchProgressInline" class="batch-progress-inline muted">${records.length ? `0 de ${records.length}` : "Sin registros."}</div>
       ${renderBatchResults()}
     </section>
@@ -2839,11 +3006,38 @@ async function copyBatchText() {
 function buildBatchText(mode) {
   const records = state.snapshot?.records || [];
   return records.map((record, index) => {
-    const body = mode === "normalization"
-      ? reviewTextFromNormalized(normalizedForBatchRecord(record), record)
-      : String(record.raw_ocr || "").trim();
+    let body = String(record.raw_ocr || "").trim();
+    if (mode === "normalization") body = reviewJsonFromNormalized(normalizedForBatchRecord(record), record);
+    if (mode === "final_latex") body = finalLatexFromRecord(record);
     return `----${batchRecordTitle(record, index)}-----\n${body}`.trimEnd();
   }).join("\n\n");
+}
+
+function finalLatexFromRecord(record) {
+  const normalized = normalizedForBatchRecord(record);
+  const rendered = String(normalized.latex_rendered_item || "").trim();
+  if (rendered) return rendered;
+  const number = String(normalized.numero || "").trim();
+  const curso = String(normalized.curso || "SIN_CURSO").trim() || "SIN_CURSO";
+  const tema = String(normalized.tema || "SIN_TEMA").trim() || "SIN_TEMA";
+  const estado = String(normalized.estado || "sin_revisar").trim() || "sin_revisar";
+  const clave = String(normalized.respuesta_correcta || "").trim();
+  const statement = String(normalized.enunciado_latex || "").trim();
+  const image = normalized.tiene_grafico
+    ? ` [[Imagen=${String(normalized.figure_tag || `img-${number || record.record_id}`).trim()}]]`
+    : "";
+  const alternatives = normalized.alternativas && typeof normalized.alternativas === "object" ? normalized.alternativas : {};
+  const optionText = `£A)${String(alternatives.A || "").trim()}æB)${String(alternatives.B || "").trim()}æC)${String(alternatives.C || "").trim()}£D)${String(alternatives.D || "").trim()}ææE)${String(alternatives.E || "").trim()}£`;
+  return `\\item[\\textbf{${number || ""}.}] [[curso=${curso}]] [[tema=${tema}]] [[Estado=${estado}]] [[Clave=${clave}]] ${statement}${image} ${optionText}`.trim();
+}
+
+function finalReviewTextFromRecord(record) {
+  const normalized = normalizedForBatchRecord(record);
+  const rendered = String(normalized.latex_rendered_item || "").trim();
+  if (rendered) return rendered;
+  const continuation = continuationTextFromRecord(record);
+  if (continuation) return continuation;
+  return finalLatexFromRecord(record);
 }
 
 function normalizedForBatchRecord(record) {
@@ -2887,6 +3081,37 @@ function parseBatchBlocks(text) {
   });
   if (current) blocks.push({ ...current, body: current.lines.join("\n").trim() });
   return { blocks, preamble: preamble.join("\n").trim() };
+}
+
+function normalizeBatchTitle(value) {
+  return String(value || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+function takeBatchBlockForRecord(blocks, usedBlocks, record, recordIndex, allowSequentialFallback = true) {
+  const titleKey = normalizeBatchTitle(batchRecordTitle(record, recordIndex));
+  const directIndex = (blocks || []).findIndex((block, blockIndex) => (
+    !usedBlocks.has(blockIndex) && normalizeBatchTitle(block.title) === titleKey
+  ));
+  if (directIndex >= 0) {
+    usedBlocks.add(directIndex);
+    return { block: blocks[directIndex], index: directIndex, matchedTitle: true };
+  }
+  if (!allowSequentialFallback) return null;
+  const nextIndex = (blocks || []).findIndex((_, blockIndex) => !usedBlocks.has(blockIndex));
+  if (nextIndex < 0) return null;
+  usedBlocks.add(nextIndex);
+  return { block: blocks[nextIndex], index: nextIndex, matchedTitle: false };
+}
+
+function takeNextContinuationBlock(blocks, usedBlocks) {
+  const nextIndex = (blocks || []).findIndex((_, blockIndex) => !usedBlocks.has(blockIndex));
+  if (nextIndex < 0) return null;
+  if (!isFinalLatexContinuation(blocks[nextIndex].body)) return null;
+  usedBlocks.add(nextIndex);
+  return { block: blocks[nextIndex], index: nextIndex, matchedTitle: false };
 }
 
 function renderBatchResults() {
@@ -2943,31 +3168,99 @@ async function saveBatchEditor(mode = state.batchMode) {
   const saveBtn = $("saveBatchText");
   if (saveBtn) saveBtn.disabled = true;
   setBusy(batchModeConfig(mode).saving);
-  if (parsed.preamble) {
-    failed += 1;
-    results.push({ status: "error", title: "Texto sin separador", message: "Hay texto antes del primer separador; no se guardo." });
-    state.batchResults = results.slice();
-    updateBatchResultsInline();
+  try {
+    if (parsed.preamble) {
+      failed += 1;
+      results.push({ status: "error", title: "Texto sin separador", message: "Hay texto antes del primer separador; no se guardo." });
+      state.batchResults = results.slice();
+      updateBatchResultsInline();
+    }
+    if (mode === "final_latex") {
+      await saveFinalLatexBatchEditor(records, parsed, { results, failed, saveBtn });
+      return;
+    }
+    for (let index = 0; index < total; index += 1) {
+      const record = records[index];
+      const block = parsed.blocks[index];
+      const title = record ? batchRecordTitle(record, index) : (block?.title || `Bloque extra ${index + 1}`);
+      updateBatchProgressInline({ current: index, total, ok, failed, skipped, active: title });
+      if (!record) {
+        failed += 1;
+        results.push({ status: "error", title, message: "Bloque sobrante: no existe un registro de staging en esa posicion." });
+        state.batchResults = results.slice();
+        updateBatchResultsInline();
+        continue;
+      }
+      if (!block) {
+        failed += 1;
+        results.push({ status: "error", title, message: "Falta el bloque para esta imagen." });
+        state.batchResults = results.slice();
+        updateBatchResultsInline();
+        continue;
+      }
+      if (recordSourceStale(record) || recordDownstreamInvalidated(record)) {
+        skipped += 1;
+        results.push({ status: "skipped", title, message: "Regenera staging antes de editar este registro." });
+        state.batchResults = results.slice();
+        updateBatchResultsInline();
+        continue;
+      }
+      if (!String(block.body || "").trim()) {
+        skipped += 1;
+        results.push({ status: "skipped", title, message: "Bloque vacio; no se guardo para evitar borrar el registro." });
+        state.batchResults = results.slice();
+        updateBatchResultsInline();
+        continue;
+      }
+      try {
+        const updated = mode === "normalization"
+          ? await saveBatchNormalizationRecord(record, block.body)
+          : await saveBatchRawOcrRecord(record, block.body);
+        replaceRecordInSnapshot(updated);
+        ok += 1;
+        results.push({ status: "ok", title, message: "Guardado." });
+      } catch (err) {
+        failed += 1;
+        results.push({ status: "error", title, message: err.message || String(err) });
+      }
+      state.batchResults = results.slice();
+      updateBatchResultsInline();
+      updateBatchProgressInline({ current: index + 1, total, ok, failed, skipped, active: title });
+    }
+    try {
+      applyFactorySnapshot(await loadFactorySnapshot());
+      await refreshNormalizerTrainingStatus({ silent: true });
+    } catch (err) {
+      failed += 1;
+      results.push({ status: "error", title: "Actualizacion final", message: err.message || String(err) });
+    }
+    state.batchResults = results;
+    state.taskProgress = null;
+    renderBatchEditor();
+    setStatus(`Lote terminado: ${ok} guardado(s), ${skipped} omitido(s), ${failed} error(es).`);
+  } catch (err) {
+    setStatus(`Error: ${err.message || String(err)}`);
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
+    const busy = $("busyText");
+    if (busy) busy.textContent = "";
   }
-  for (let index = 0; index < total; index += 1) {
+}
+
+async function saveFinalLatexBatchEditor(records, parsed, initial = {}) {
+  const results = Array.isArray(initial.results) ? initial.results : [];
+  let ok = 0;
+  let failed = Number(initial.failed || 0);
+  let skipped = 0;
+  let lastFinalLatexPrimary = null;
+  let lastFinalLatexBody = "";
+  let lastFinalLatexTitle = "";
+  const usedBlocks = new Set();
+  const total = records.length;
+  for (let index = 0; index < records.length; index += 1) {
     const record = records[index];
-    const block = parsed.blocks[index];
-    const title = record ? batchRecordTitle(record, index) : (block?.title || `Bloque extra ${index + 1}`);
+    const title = batchRecordTitle(record, index);
     updateBatchProgressInline({ current: index, total, ok, failed, skipped, active: title });
-    if (!record) {
-      failed += 1;
-      results.push({ status: "error", title, message: "Bloque sobrante: no existe un registro de staging en esa posicion." });
-      state.batchResults = results.slice();
-      updateBatchResultsInline();
-      continue;
-    }
-    if (!block) {
-      failed += 1;
-      results.push({ status: "error", title, message: "Falta el bloque para esta imagen." });
-      state.batchResults = results.slice();
-      updateBatchResultsInline();
-      continue;
-    }
     if (recordSourceStale(record) || recordDownstreamInvalidated(record)) {
       skipped += 1;
       results.push({ status: "skipped", title, message: "Regenera staging antes de editar este registro." });
@@ -2975,6 +3268,49 @@ async function saveBatchEditor(mode = state.batchMode) {
       updateBatchResultsInline();
       continue;
     }
+    const recordContinuation = continuationTextFromRecord(record);
+    let picked = takeBatchBlockForRecord(parsed.blocks, usedBlocks, record, index, !recordContinuation);
+    if (!picked && recordContinuation) {
+      picked = takeNextContinuationBlock(parsed.blocks, usedBlocks);
+    }
+    if (!picked && recordContinuation) {
+      try {
+        if (!lastFinalLatexPrimary) {
+          throw new Error("[CONT.] no tiene un problema anterior para fusionar.");
+        }
+        const continuationBody = stripFinalContinuationMarker(recordContinuation) || "[sin texto OCR visible]";
+        const updatedPrimary = await saveBatchFinalLatexRecord(
+          lastFinalLatexPrimary,
+          lastFinalLatexBody,
+          {
+            notes: `Formato final conserva continuacion omitida como bloque: ${record.record_id}.`,
+            continuationRecord: record,
+            continuationText: continuationBody,
+          },
+        );
+        replaceRecordInSnapshot(updatedPrimary);
+        lastFinalLatexPrimary = updatedPrimary;
+        const updated = await saveBatchContinuationRecord(record, recordContinuation, lastFinalLatexPrimary);
+        replaceRecordInSnapshot(updated);
+        ok += 1;
+        results.push({ status: "ok", title, message: `Continuacion fusionada con ${lastFinalLatexTitle || lastFinalLatexPrimary.record_id}.` });
+      } catch (err) {
+        failed += 1;
+        results.push({ status: "error", title, message: err.message || String(err) });
+      }
+      state.batchResults = results.slice();
+      updateBatchResultsInline();
+      updateBatchProgressInline({ current: index + 1, total, ok, failed, skipped, active: title });
+      continue;
+    }
+    if (!picked) {
+      failed += 1;
+      results.push({ status: "error", title, message: "Falta el bloque para esta imagen." });
+      state.batchResults = results.slice();
+      updateBatchResultsInline();
+      continue;
+    }
+    const block = picked.block;
     if (!String(block.body || "").trim()) {
       skipped += 1;
       results.push({ status: "skipped", title, message: "Bloque vacio; no se guardo para evitar borrar el registro." });
@@ -2983,12 +3319,38 @@ async function saveBatchEditor(mode = state.batchMode) {
       continue;
     }
     try {
-      const updated = mode === "normalization"
-        ? await saveBatchNormalizationRecord(record, block.body)
-        : await saveBatchRawOcrRecord(record, block.body);
-      replaceRecordInSnapshot(updated);
+      if (isFinalLatexContinuation(block.body)) {
+        if (!lastFinalLatexPrimary) {
+          throw new Error("[CONT.] no tiene un problema anterior para fusionar.");
+        }
+        const continuationBody = stripFinalContinuationMarker(block.body);
+        if (!continuationBody) {
+          throw new Error("[CONT.] no contiene texto para fusionar.");
+        }
+        lastFinalLatexBody = mergeFinalLatexContinuation(lastFinalLatexBody, continuationBody);
+        const updatedPrimary = await saveBatchFinalLatexRecord(
+          lastFinalLatexPrimary,
+          lastFinalLatexBody,
+          {
+            notes: `Formato final actualizado con continuacion de ${record.record_id}.`,
+            continuationRecord: record,
+            continuationText: continuationBody,
+          },
+        );
+        replaceRecordInSnapshot(updatedPrimary);
+        lastFinalLatexPrimary = updatedPrimary;
+        const updated = await saveBatchContinuationRecord(record, block.body, lastFinalLatexPrimary);
+        replaceRecordInSnapshot(updated);
+        results.push({ status: "ok", title, message: `Fusionado con ${lastFinalLatexTitle || lastFinalLatexPrimary.record_id}.` });
+      } else {
+        const updated = await saveBatchFinalLatexRecord(record, block.body);
+        replaceRecordInSnapshot(updated);
+        lastFinalLatexPrimary = updated;
+        lastFinalLatexBody = String(block.body || "").trim();
+        lastFinalLatexTitle = title;
+        results.push({ status: "ok", title, message: picked.matchedTitle ? "Guardado." : "Guardado por orden." });
+      }
       ok += 1;
-      results.push({ status: "ok", title, message: "Guardado." });
     } catch (err) {
       failed += 1;
       results.push({ status: "error", title, message: err.message || String(err) });
@@ -2997,8 +3359,14 @@ async function saveBatchEditor(mode = state.batchMode) {
     updateBatchResultsInline();
     updateBatchProgressInline({ current: index + 1, total, ok, failed, skipped, active: title });
   }
+  (parsed.blocks || []).forEach((block, blockIndex) => {
+    if (usedBlocks.has(blockIndex)) return;
+    failed += 1;
+    results.push({ status: "error", title: block.title || `Bloque extra ${blockIndex + 1}`, message: "Bloque sobrante: no corresponde a ningun registro de staging." });
+  });
   try {
     applyFactorySnapshot(await loadFactorySnapshot());
+    await refreshNormalizerTrainingStatus({ silent: true });
   } catch (err) {
     failed += 1;
     results.push({ status: "error", title: "Actualizacion final", message: err.message || String(err) });
@@ -3022,21 +3390,155 @@ async function saveBatchRawOcrRecord(record, raw) {
 }
 
 async function saveBatchNormalizationRecord(record, text) {
-  const parsed = parsePlainReviewText(text, normalizedForBatchRecord(record), record);
+  const parsed = parseReviewJsonText(text, record);
   const payload = await api("/api/review/save", {
     method: "POST",
     body: {
       record_id: record.record_id,
       normalized: {
         ...parsed.normalized,
-        status: parsed.markReady ? "listo" : "requiere_revision",
+        status: parsed.markReady ? "listo" : String(parsed.normalized.status || "requiere_revision"),
       },
       notes: parsed.notes,
       mark_ready: parsed.markReady,
       compact: true,
+      defer_golden_sync: true,
     },
   });
   return payload.record;
+}
+
+async function saveBatchFinalLatexRecord(record, text, options = {}) {
+  const finalLatex = String(text || "").trim();
+  if (!finalLatex) throw new Error("Formato final vacio.");
+  const parsed = parseFinalLatexItem(finalLatex, normalizedForBatchRecord(record), record);
+  const normalized = {
+    ...parsed.normalized,
+    latex_rendered_item: finalLatex,
+    status: "listo",
+  };
+  if (options.continuationRecord) {
+    const continuationRecord = options.continuationRecord;
+    const source = continuationRecord?.source && typeof continuationRecord.source === "object"
+      ? continuationRecord.source
+      : {};
+    const previous = Array.isArray(normalized.continuaciones_fusionadas)
+      ? normalized.continuaciones_fusionadas.filter((item) => String(item?.record_id || "") !== String(continuationRecord?.record_id || ""))
+      : [];
+    normalized.continuaciones_fusionadas = [
+      ...previous,
+      {
+        record_id: String(continuationRecord?.record_id || ""),
+        crop_id: String(continuationRecord?.crop_id || ""),
+        crop_name: batchRecordTitle(continuationRecord, previous.length),
+        page_number: source.page_number ?? null,
+        bbox_px: Array.isArray(source.bbox_px) ? source.bbox_px : null,
+        texto_fusionado: String(options.continuationText || "").trim(),
+      },
+    ];
+  }
+  const payload = await api("/api/review/save", {
+    method: "POST",
+    body: {
+      record_id: record.record_id,
+      normalized,
+      notes: String(options.notes || parsed.notes || ""),
+      mark_ready: true,
+      compact: true,
+      defer_golden_sync: true,
+    },
+  });
+  return payload.record;
+}
+
+async function saveBatchContinuationRecord(record, text, parentRecord) {
+  const continuationText = stripFinalContinuationMarker(text);
+  const normalized = normalizedJsonForReview(normalizedForBatchRecord(record), record);
+  normalized.status = "listo";
+  normalized.continuacion = {
+    ...(normalized.continuacion && typeof normalized.continuacion === "object" ? normalized.continuacion : {}),
+    es_continuacion: true,
+    fusionar_con_anterior: true,
+    parent_record_id: parentRecord?.record_id || "",
+  };
+  normalized.enunciado_latex = continuationText;
+  normalized.latex_rendered_item = "";
+  const payload = await api("/api/review/save", {
+    method: "POST",
+    body: {
+      record_id: record.record_id,
+      normalized,
+      notes: `Continuacion fusionada con ${parentRecord?.record_id || "registro anterior"}.`,
+      mark_ready: true,
+      compact: true,
+      defer_golden_sync: true,
+    },
+  });
+  return payload.record;
+}
+
+function isFinalLatexContinuation(text) {
+  return /^\s*\[CONT\.?\]/i.test(String(text || ""));
+}
+
+function continuationTextFromRecord(record) {
+  const normalized = record?.normalized && typeof record.normalized === "object" ? record.normalized : {};
+  const continuation = normalized.continuacion && typeof normalized.continuacion === "object"
+    ? normalized.continuacion
+    : {};
+  const candidates = [
+    record?.raw_ocr,
+    normalized.enunciado_latex,
+    normalized.latex_rendered_item,
+  ].map((value) => String(value || "").trim()).filter(Boolean);
+  const explicit = candidates.find((value) => isFinalLatexContinuation(value));
+  if (explicit) return explicit;
+  if (continuation.es_continuacion || continuation.fusionar_con_anterior) {
+    return `[CONT.] ${candidates[0] || "[sin texto OCR visible]"}`.trim();
+  }
+  return "";
+}
+
+function stripFinalContinuationMarker(text) {
+  return String(text || "").replace(/^\s*\[CONT\.?\]\s*/i, "").trim();
+}
+
+function mergeFinalLatexContinuation(primaryText, continuationText) {
+  const primary = String(primaryText || "").trim();
+  const continuation = String(continuationText || "").trim();
+  if (!primary) return continuation;
+  if (!continuation) return primary;
+  return `${primary}\n${continuation}`.trim();
+}
+
+function parseFinalLatexItem(text, base, record) {
+  const normalized = normalizedJsonForReview(base, record);
+  const finalLatex = String(text || "").trim();
+  const numberMatch = finalLatex.match(/\\item\s*\[\s*\\textbf\{\s*([^}.]+)\.?\s*\}\s*\]/i);
+  if (numberMatch) normalized.numero = numberMatch[1].trim();
+  const tags = [...finalLatex.matchAll(/\[\[\s*([^=\]]+?)\s*=\s*([^\]]*?)\s*\]\]/g)];
+  tags.forEach((match) => {
+    const key = normalizePlainLabel(match[1]);
+    const value = String(match[2] || "").trim();
+    if (key === "curso") normalized.curso = value || "SIN_CURSO";
+    else if (key === "tema") normalized.tema = value || "SIN_TEMA";
+    else if (key === "subtema") normalized.subtema = value;
+    else if (key === "estado") normalized.estado = value || "sin_revisar";
+    else if (key === "clave") normalized.respuesta_correcta = normalizeAnswerValue(value);
+    else if (key === "imagen") {
+      normalized.tiene_grafico = true;
+      normalized.figure_tag = value;
+    }
+  });
+  normalized.respuesta_final = String(normalized.respuesta_final || "").trim()
+    || String(normalized.alternativas?.[normalized.respuesta_correcta] || "").trim();
+  normalized.latex_rendered_item = finalLatex;
+  normalized.status = "listo";
+  return {
+    normalized,
+    notes: "Formato final pegado en bloque.",
+    markReady: true,
+  };
 }
 
 function renderTechnicalDetails(title, payload, mode = "json") {
@@ -3049,34 +3551,103 @@ function renderTechnicalDetails(title, payload, mode = "json") {
   `;
 }
 
+function continuationRecordsForParent(parent, allRecords = state.snapshot?.records || []) {
+  if (!parent) return [];
+  const parentId = String(parent.record_id || "");
+  const normalized = parent.normalized && typeof parent.normalized === "object" ? parent.normalized : {};
+  const fused = Array.isArray(normalized.continuaciones_fusionadas) ? normalized.continuaciones_fusionadas : [];
+  const wantedIds = new Set(fused.map((item) => String(item?.record_id || "").trim()).filter(Boolean));
+  const rows = [];
+  const seen = new Set();
+  const addRecord = (record) => {
+    if (!record || !isReviewContinuationRecord(record)) return;
+    const id = String(record.record_id || "");
+    if (!id || seen.has(id)) return;
+    rows.push(record);
+    seen.add(id);
+  };
+  wantedIds.forEach((id) => addRecord(findRecordById(id, allRecords)));
+  allRecords.forEach((record) => {
+    const continuation = record?.normalized?.continuacion;
+    const continuationParentId = continuation && typeof continuation === "object"
+      ? String(continuation.parent_record_id || "").trim()
+      : "";
+    if (continuationParentId === parentId) addRecord(record);
+  });
+  const parentIndex = allRecords.findIndex((record) => String(record.record_id || "") === parentId);
+  if (parentIndex >= 0) {
+    for (let index = parentIndex + 1; index < allRecords.length; index += 1) {
+      const candidate = allRecords[index];
+      if (!isReviewContinuationRecord(candidate)) break;
+      addRecord(candidate);
+    }
+  }
+  return rows;
+}
+
+function renderReviewImageStack(record, allRecords = state.snapshot?.records || []) {
+  const images = [record, ...continuationRecordsForParent(record, allRecords)].filter(Boolean);
+  if (!images.length) return `<p class="muted">Imagen no encontrada.</p>`;
+  return `
+    <div class="review-image-stack">
+      ${images.map((item, index) => `
+        <figure class="review-image-frame ${index > 0 ? "continuation" : "primary"}">
+          <figcaption>${index === 0 ? "Imagen principal" : `Continuacion ${index}`}</figcaption>
+          ${item.crop_url
+            ? `<img class="preview-img" src="${item.crop_url}" alt="${index === 0 ? "Problema" : "Continuacion"}" loading="lazy" decoding="async" />`
+            : `<p class="muted">Imagen no encontrada.</p>`}
+        </figure>
+      `).join("")}
+    </div>
+  `;
+}
+
 function renderReviewStage() {
-  const record = selectedRecord();
+  syncSelectedRecord();
+  const allRecords = state.snapshot.records || [];
+  const records = reviewRecords(allRecords);
+  const record = ensureReviewSelectedRecord(records, allRecords);
+  const currentRecordIndex = recordIndex(records);
+  const totalRecords = records.length;
   const normalized = state.reviewDraft || (record ? record.normalized || {} : {});
-  const reviewText = reviewTextFromNormalized(normalized, record);
+  const finalLatexText = record ? finalReviewTextFromRecord(record) : "";
   const errorComment = recordErrorComment(record);
   $("stageHost").innerHTML = `
     <div class="stage-header">
       <div>
-        <h2>Revision y normalizacion pendiente</h2>
-        <p class="muted">Usa el OCR estructurado como borrador editable. El normalizador IA definitivo queda pendiente de entrenamiento.</p>
+        <h2>Revision del formato final</h2>
+        <p class="muted">Corrige el item LaTeX final, revisa el render matematico y guarda la salida que quedara lista para futura BD.</p>
       </div>
       <div class="stage-actions">
-        <button id="openReviewBatch" type="button">Modo lote revision</button>
+        <button id="openReviewBatch" type="button">Normalizar en grupo</button>
+        <button id="openFinalLatexBatch" type="button">Formato final en bloque</button>
       </div>
     </div>
     ${renderTaskProgress("normalize")}
     ${record ? `
       <div class="library-notice">
-        Esta etapa todavia es experimental: guarda correcciones como datos de entrenamiento, no como salida final automatica.
+        Esta etapa guarda el formato final en staging y conserva la correccion como dato de entrenamiento.
       </div>
       ${errorComment ? `<div class="library-notice error-notice"><strong>Error:</strong> ${escapeHtml(errorComment)}</div>` : ""}
+      <div class="record-nav panel review-record-nav" aria-label="Navegacion de problemas en revision">
+        <button id="prevRecord" class="nav-arrow" type="button" title="Problema anterior" ${currentRecordIndex <= 0 ? "disabled" : ""}>&larr;</button>
+        <div class="record-nav-main">
+          <span class="section-label">Problema en revision</span>
+          <strong>${totalRecords ? currentRecordIndex + 1 : 0} de ${totalRecords}</strong>
+          <span class="muted">${escapeHtml(recordOptionLabel(record, currentRecordIndex))}</span>
+        </div>
+        <button id="nextRecord" class="nav-arrow" type="button" title="Problema siguiente" ${currentRecordIndex >= totalRecords - 1 ? "disabled" : ""}>&rarr;</button>
+        <label class="record-jump-label">
+          <span class="muted">Saltar a</span>
+          <select id="recordJump">
+            ${records.map((row, index) => `<option value="${index}" ${index === currentRecordIndex ? "selected" : ""}>${escapeHtml(recordOptionLabel(row, index))}</option>`).join("")}
+          </select>
+        </label>
+      </div>
       <div class="record-layout">
         <div>
-          ${record.crop_url ? `<img class="preview-img" src="${record.crop_url}" alt="Problema" loading="lazy" decoding="async" />` : ""}
-          <div class="panel" style="margin-top:12px">
-            <h3>Render LaTeX</h3>
-            <div id="latexPreview" class="latex-preview"></div>
-          </div>
+          ${renderReviewImageStack(record, allRecords)}
+          ${renderTechnicalDetails("OCR crudo", record.raw_ocr || "(sin OCR crudo)", "text")}
           <details class="technical-details">
             <summary>Contexto tecnico del registro</summary>
             <div class="codebox">${escapeHtml(JSON.stringify({
@@ -3087,13 +3658,19 @@ function renderReviewStage() {
             }, null, 2))}</div>
           </details>
         </div>
-        <form id="reviewForm" class="panel plain-review-form">
+        <form id="reviewForm" class="panel final-review-form">
           <div class="panel-heading-row">
-            <h3>Editor texto plano</h3>
-            <span class="nav-counter">borrador de entrenamiento</span>
+            <div>
+              <h3>Formato final</h3>
+              <p class="muted">Texto que quedara como salida final revisable para futura BD.</p>
+            </div>
+            <span id="finalLatexReviewStatus" class="nav-counter">Formato pendiente</span>
           </div>
-          <textarea id="plainReviewText" class="plain-review-text" spellcheck="false">${escapeHtml(reviewText)}</textarea>
-          <button type="submit" class="primary wide-action">Guardar revision en staging</button>
+          <textarea id="finalLatexText" class="final-review-text" spellcheck="false">${escapeHtml(finalLatexText)}</textarea>
+          <section id="finalLatexPreview" class="latex-preview final-latex-preview" aria-label="Vista renderizada del formato final">
+            ${renderFinalLatexPreviewHtml(finalLatexText)}
+          </section>
+          <button type="submit" class="primary wide-action">Guardar formato final en staging</button>
         </form>
       </div>
     ` : `<div class="panel muted">Selecciona un problema.</div>`}
@@ -3101,10 +3678,20 @@ function renderReviewStage() {
   if (record) {
     const reviewBatchBtn = $("openReviewBatch");
     if (reviewBatchBtn) reviewBatchBtn.onclick = () => openBatchMode("normalization");
+    const finalLatexBatchBtn = $("openFinalLatexBatch");
+    if (finalLatexBatchBtn) finalLatexBatchBtn.onclick = () => openBatchMode("final_latex");
+    bindRecordNavigation(records);
     $("reviewForm").onsubmit = saveReviewForm;
-    $("reviewForm").addEventListener("input", updateLatexPreview);
-    $("reviewForm").addEventListener("change", updateLatexPreview);
-    updateLatexPreview();
+    $("reviewForm").addEventListener("input", () => {
+      updateFinalLatexReviewStatus();
+      updateFinalLatexPreview();
+    });
+    $("reviewForm").addEventListener("change", () => {
+      updateFinalLatexReviewStatus();
+      updateFinalLatexPreview();
+    });
+    updateFinalLatexReviewStatus();
+    updateFinalLatexPreview();
   }
   setInspector(record ? {
     "Registro": record.record_id,
@@ -3145,6 +3732,75 @@ function typesetMath(preview) {
   MathJax.typesetPromise([preview]).catch(() => {});
 }
 
+function normalizeFinalLatexForStorage(value) {
+  return String(value || "")
+    .replaceAll("Â£", "£")
+    .replaceAll("Ã¦", "æ")
+    .replaceAll("Â¦", "æ")
+    .replaceAll("¦", "æ")
+    .trim();
+}
+
+function updateFinalLatexPreview() {
+  const preview = $("finalLatexPreview") || document.querySelector(".final-latex-preview");
+  if (!preview) return;
+  preview.innerHTML = renderFinalLatexPreviewHtml($("finalLatexText")?.value || "");
+  typesetMath(preview);
+}
+
+function renderFinalLatexPreviewHtml(value) {
+  const raw = normalizeFinalLatexForStorage(value);
+  if (!raw) return `<div class="muted">Sin formato final para renderizar.</div>`;
+  if (isFinalLatexContinuation(raw)) {
+    return `
+      <article class="preview-problem continuation-preview">
+        <header><strong>[CONT.]</strong><span>Continuacion del problema anterior</span></header>
+        <div class="statement-preview">${formatPreviewText(stripFinalContinuationMarker(raw) || "[sin texto OCR visible]")}</div>
+      </article>
+    `;
+  }
+  const numberMatch = raw.match(/\\item\s*\[\s*\\textbf\{\s*([^}.]+)\.?\s*\}\s*\]/i);
+  const number = numberMatch ? numberMatch[1].trim() : "";
+  const tags = {};
+  raw.replace(/\[\[\s*([^=\]]+?)\s*=\s*([^\]]*?)\s*\]\]/g, (_match, key, tagValue) => {
+    tags[normalizePlainLabel(key)] = String(tagValue || "").trim();
+    return "";
+  });
+  let body = raw
+    .replace(/\\item\s*\[\s*\\textbf\{\s*([^}.]+)\.?\s*\}\s*\]/i, "")
+    .replace(/\[\[\s*([^=\]]+?)\s*=\s*([^\]]*?)\s*\]\]/g, "")
+    .trim();
+  const optionsMatch = body.match(/£A\)([\s\S]*?)æB\)([\s\S]*?)æC\)([\s\S]*?)£D\)([\s\S]*?)ææE\)([\s\S]*?)£/);
+  let optionsHtml = "";
+  if (optionsMatch) {
+    const labels = ["A", "B", "C", "D", "E"];
+    optionsHtml = `
+      <div class="options-preview">
+        ${labels.map((label, index) => `
+          <div class="option-row"><strong>${label}</strong><span>${formatLatexPreviewText(optionsMatch[index + 1] || "")}</span></div>
+        `).join("")}
+      </div>
+    `;
+    body = body.replace(optionsMatch[0], "").trim();
+  }
+  const headerMeta = [
+    tags.curso || "",
+    tags.tema || "",
+    tags.clave ? `Clave ${tags.clave}` : "",
+  ].filter(Boolean).join(" - ");
+  return `
+    <article class="preview-problem">
+      <header>
+        <strong>${escapeHtml(number || "Sin numero")}</strong>
+        <span>${escapeHtml(headerMeta || "Formato final")}</span>
+      </header>
+      <div class="statement-preview">${formatPreviewText(body || raw)}</div>
+      ${optionsHtml}
+      ${tags.imagen ? `<footer><strong>Imagen:</strong><span>${escapeHtml(tags.imagen)}</span></footer>` : ""}
+    </article>
+  `;
+}
+
 function formatLatexPreviewText(value) {
   const raw = normalizeLatexPreviewValueSafe(String(value || "").trim());
   if (!raw) return "-";
@@ -3170,8 +3826,8 @@ async function saveReviewForm(event) {
   event.preventDefault();
   const record = selectedRecord();
   if (!record) return;
-  const payload = collectReviewPayload();
   await runAction("Guardando revision...", async () => {
+    const payload = collectReviewPayload();
     const result = await api("/api/review/save", {
       method: "POST",
       body: {
@@ -3183,6 +3839,7 @@ async function saveReviewForm(event) {
     });
     state.snapshot = result.snapshot;
     state.reviewDraft = null;
+    await refreshNormalizerTrainingStatus({ silent: true });
     persistFactoryUiState();
     render();
   }, "Revision guardada en staging como entrenamiento futuro.");
@@ -3194,19 +3851,151 @@ function collectReviewForm() {
 
 function collectReviewPayload() {
   const record = selectedRecord();
-  const base = {
-    ...((record && record.normalized) || {}),
-    ...(state.reviewDraft || {}),
-  };
-  const parsed = parsePlainReviewText($("plainReviewText")?.value || "", base, record);
+  const finalLatex = normalizeFinalLatexForStorage($("finalLatexText")?.value || "");
+  if (!finalLatex) throw new Error("Formato final vacio.");
+  if (isFinalLatexContinuation(finalLatex)) {
+    const normalized = normalizedJsonForReview(normalizedForBatchRecord(record), record);
+    normalized.status = "listo";
+    normalized.continuacion = {
+      ...(normalized.continuacion && typeof normalized.continuacion === "object" ? normalized.continuacion : {}),
+      es_continuacion: true,
+      fusionar_con_anterior: true,
+    };
+    normalized.enunciado_latex = stripFinalContinuationMarker(finalLatex);
+    normalized.latex_rendered_item = "";
+    return {
+      normalized,
+      notes: String(record?.review?.notes || "Continuacion revisada en formato final.").trim(),
+      markReady: true,
+    };
+  }
+  const parsed = parseFinalLatexItem(finalLatex, normalizedForBatchRecord(record), record);
   return {
     normalized: {
       ...parsed.normalized,
-      status: parsed.markReady ? "listo" : "requiere_revision",
+      latex_rendered_item: finalLatex,
+      status: "listo",
     },
     notes: parsed.notes,
-    markReady: parsed.markReady,
+    markReady: true,
   };
+}
+
+function reviewJsonFromNormalized(normalized, record) {
+  return JSON.stringify(normalizedJsonForReview(normalized, record), null, 2);
+}
+
+function normalizedJsonForReview(normalized, record) {
+  const base = normalized && typeof normalized === "object" ? normalized : {};
+  const alternatives = base.alternativas && typeof base.alternativas === "object" ? base.alternativas : {};
+  const answerKey = String(base.respuesta_correcta || "").trim();
+  const normalizedAnswerKey = normalizeAnswerValue(answerKey);
+  const respuestaFinal = String(base.respuesta_final || "").trim()
+    || String(alternatives[normalizedAnswerKey] || "").trim();
+  const source = record?.source || base.metadata_tecnica?.source || {};
+  return {
+    ...base,
+    schema_version: base.schema_version || "normalized_problem_staging_v1",
+    normalizer: base.normalizer || "manual_json_review",
+    status: String(base.status || (record?.status === "listo" ? "listo" : "requiere_revision")),
+    numero: String(base.numero || ""),
+    curso: String(base.curso || "SIN_CURSO"),
+    tema: String(base.tema || "SIN_TEMA"),
+    subtema: String(base.subtema || ""),
+    estado: String(base.estado || "sin_revisar"),
+    respuesta_correcta: answerKey,
+    respuesta_final: respuestaFinal,
+    enunciado_latex: String(base.enunciado_latex || ""),
+    tiene_grafico: Boolean(base.tiene_grafico || (record?.figure_segments_web || []).length),
+    figure_tag: String(base.figure_tag || ""),
+    alternativas: {
+      A: String(alternatives.A || ""),
+      B: String(alternatives.B || ""),
+      C: String(alternatives.C || ""),
+      D: String(alternatives.D || ""),
+      E: String(alternatives.E || ""),
+    },
+    continuacion: base.continuacion && typeof base.continuacion === "object"
+      ? base.continuacion
+      : { es_continuacion: false, fusionar_con_anterior: false },
+    classification: base.classification && typeof base.classification === "object"
+      ? base.classification
+      : {
+          curso_confidence: 0,
+          tema_confidence: 0,
+          requires_human_review: true,
+          candidate_new_topic: "",
+        },
+    latex_rendered_item: String(base.latex_rendered_item || ""),
+    metadata_tecnica: base.metadata_tecnica && typeof base.metadata_tecnica === "object"
+      ? base.metadata_tecnica
+      : {
+          crop_path: record?.crop_path || "",
+          source,
+          models: record?.models || {},
+          confidence: record?.confidence || {},
+        },
+  };
+}
+
+function parseReviewJsonText(text, record) {
+  let parsed;
+  try {
+    parsed = JSON.parse(String(text || "").trim() || "{}");
+  } catch (err) {
+    throw new Error(`JSON invalido: ${err.message}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("JSON invalido: la normalizacion debe ser un objeto.");
+  }
+  const normalized = normalizedJsonForReview(parsed, record);
+  normalized.respuesta_correcta = normalizeAnswerValue(normalized.respuesta_correcta);
+  const notes = String(parsed.review_notes || parsed.notas || record?.review?.notes || "").trim();
+  const markReady = normalizedStatusIsReady(normalized);
+  return { normalized, notes, markReady };
+}
+
+function normalizedStatusIsReady(normalized) {
+  const values = [normalized.status, normalized.estado, normalized.review_status]
+    .map((value) => String(value || "").trim().toLowerCase());
+  return values.some((value) => ["listo", "ready", "revisado", "reviewed", "done"].includes(value));
+}
+
+function updateJsonReviewStatus() {
+  const host = $("jsonReviewStatus");
+  if (!host) return;
+  try {
+    const parsed = parseReviewJsonText($("normalizedJsonText")?.value || "", selectedRecord());
+    host.textContent = parsed.markReady ? "JSON listo" : "JSON valido";
+    host.classList.remove("status-error");
+  } catch (err) {
+    host.textContent = "JSON invalido";
+    host.classList.add("status-error");
+  }
+}
+
+function updateFinalLatexReviewStatus() {
+  const host = $("finalLatexReviewStatus");
+  if (!host) return;
+  const text = normalizeFinalLatexForStorage($("finalLatexText")?.value || "");
+  host.classList.remove("status-error");
+  if (!text) {
+    host.textContent = "Formato vacio";
+    host.classList.add("status-error");
+    return;
+  }
+  if (isFinalLatexContinuation(text)) {
+    host.textContent = "Continuacion";
+    return;
+  }
+  const hasItem = /\\item\s*\[\s*\\textbf\{/i.test(text);
+  const hasOptions = /£A\)[\s\S]*?æB\)[\s\S]*?æC\)[\s\S]*?£D\)[\s\S]*?ææE\)[\s\S]*?£/.test(text);
+  if (hasItem && hasOptions) {
+    host.textContent = "Formato listo";
+    return;
+  }
+  host.textContent = hasItem ? "Revisar opciones" : "Revisar item";
+  host.classList.add("status-error");
 }
 
 function reviewTextFromNormalized(normalized, record) {
@@ -3331,9 +4120,11 @@ function normalizePlainLabel(label) {
 }
 
 function normalizeAnswerValue(value) {
-  const raw = String(value || "").trim().toUpperCase();
-  const match = raw.match(/[A-E]/);
-  return match ? match[0] : raw;
+  const original = String(value || "").trim();
+  const raw = original.toUpperCase();
+  if (/^[A-E]$/.test(raw)) return raw;
+  const labeled = raw.match(/^(?:CLAVE|RESPUESTA)?\s*[:=-]?\s*([A-E])[\).]?\s*$/);
+  return labeled ? labeled[1] : original;
 }
 
 function truthyText(value) {
@@ -3400,7 +4191,7 @@ function syncPrimaryAction() {
       queuedCount ? "Procesa las imagenes seleccionadas con OCR y segmentacion grafica." : "Usa OCR entrenado y segmentador grafico en el crop seleccionado.",
       () => runOcr(),
     ],
-    ocr: ["Preparar revision", "Crea borradores editables desde el OCR estructurado; no ejecuta normalizador IA final.", normalizeRecords],
+    ocr: ["Preparar revision completa", "Crea borradores editables para todos los problemas con OCR; no ejecuta normalizador IA final.", normalizeRecords],
     review: ["Guardar revision", "Persiste correcciones en staging como entrenamiento futuro.", () => $("reviewForm")?.requestSubmit()],
     candidate: ["Actualizar candidato", "Recalcula bloqueos sin escribir en problemas.", renderCandidateStage],
   };
@@ -3469,7 +4260,6 @@ async function runOcr(recordIds = null) {
       : "Selecciona al menos una imagen de staging.");
   }
   const total = pending.length;
-  const failures = [];
   state.ocrQueueIds = new Set(pending);
   state.taskProgress = {
     type: "ocr",
@@ -3488,71 +4278,108 @@ async function runOcr(recordIds = null) {
   render();
   setBusy(`Ejecutando modelos 0 de ${total}...`);
   try {
-    try {
-      await prepareOcrEndpointForRun();
-    } catch (err) {
-      throw new Error(`No se pudo preparar el endpoint OCR: ${err.message}`);
-    }
-    for (let index = 0; index < pending.length; index += 1) {
-      const id = pending[index];
-      state.taskProgress = {
-        ...state.taskProgress,
-        current: index,
-        message: `Procesando ${index + 1} de ${total}`,
-        activeId: id,
-        activeName: recordLabelById(id),
-      };
-      state.selectedRecordId = id;
-      render();
-      setBusy(`Ejecutando modelos ${index + 1} de ${total}...`);
-      try {
-        state.snapshot = await runOcrForRecord(id, models);
-        state.ocrQueueIds.delete(id);
-        state.taskProgress = {
-          ...state.taskProgress,
-          current: index + 1,
-          ok: Number(state.taskProgress.ok || 0) + 1,
-          message: `Guardado ${index + 1} de ${total}`,
-          activeName: recordLabelById(id),
-        };
-      } catch (err) {
-        failures.push({ id, message: err.message });
-        state.ocrQueueIds.delete(id);
-        state.taskProgress = {
-          ...state.taskProgress,
-          current: index + 1,
-          failed: Number(state.taskProgress.failed || 0) + 1,
-          message: `Error en ${index + 1} de ${total}`,
-        };
-        setStatus(`Error en ${recordLabelById(id)}: ${err.message}`);
-      }
-      state.stage = "ocr";
-      state.selectedRecordId = id;
-      state.selectedOcrIndex = 0;
-      restoreFactoryUiState({ preserveCurrentStage: true });
-      state.stage = "ocr";
-      state.selectedRecordId = id;
-      state.selectedOcrIndex = 0;
-      persistFactoryUiState();
-      render();
-    }
-    const doneText = failures.length
-      ? `Cola terminada con ${failures.length} error(es).`
-      : `OCR y segmentacion guardados para ${total} imagen(es).`;
-    let endpointText = "";
-    try {
-      const scaled = await scaleOcrEndpointToZero({ silent: true });
-      endpointText = scaled?.message ? ` ${scaled.message}` : " Endpoint OCR apagado para ahorro.";
-    } catch (err) {
-      endpointText = ` No se pudo apagar el endpoint OCR: ${err.message}`;
-    }
-    state.taskProgress = null;
+    const job = await startOcrJob(pending, models);
+    state.ocrJobId = String(job.job_id || "");
     persistFactoryUiState();
-    render();
-    setStatus(`${doneText}${endpointText}`);
+    await pollOcrJob(job.job_id || "");
   } finally {
     state.taskProgress = null;
     $("busyText").textContent = "";
+  }
+}
+
+async function startOcrJob(recordIds, models) {
+  return api("/api/ocr/jobs/start", {
+    method: "POST",
+    body: {
+      provider: "hf",
+      curso: "SIN_CURSO",
+      tema: "SIN_TEMA",
+      start_n: 1,
+      record_ids: recordIds,
+      ocr_model: models.ocr,
+      figure_model: models.figure_segmenter,
+      force_figure_model: true,
+    },
+  });
+}
+
+async function pollOcrJob(jobId = "") {
+  if (state.ocrJobPolling) return null;
+  state.ocrJobPolling = true;
+  state.ocrJobId = String(jobId || state.ocrJobId || "").trim();
+  persistFactoryUiState();
+  let lastActiveId = "";
+  try {
+    while (true) {
+      const query = jobId ? `?job_id=${encodeURIComponent(jobId)}` : "";
+      const job = await api(`/api/ocr/jobs/status${query}`);
+      if (!job || job.status === "idle") return job;
+      const total = Number(job.total || 0);
+      const current = Number(job.current || 0);
+      const activeId = String(job.active_id || "");
+      if (activeId) {
+        lastActiveId = activeId;
+        state.selectedRecordId = activeId;
+        state.ocrQueueIds.delete(activeId);
+      }
+      state.taskProgress = {
+        type: "ocr",
+        running: Boolean(job.running),
+        label: "OCR + segmentacion",
+        total,
+        current,
+        ok: Number(job.ok || 0),
+        failed: Number(job.failed || 0),
+        message: String(job.message || "Procesando OCR..."),
+        activeId,
+        activeName: activeId ? recordLabelById(activeId) : "",
+      };
+      setBusy(job.running ? `Ejecutando modelos ${current} de ${total}...` : "");
+      render();
+      if (!job.running) {
+        applyFactorySnapshot(await loadFactorySnapshot());
+        state.stage = "ocr";
+        state.selectedRecordId = lastActiveId || activeId || state.selectedRecordId;
+        state.selectedOcrIndex = 0;
+        state.taskProgress = null;
+        state.ocrQueueIds.clear();
+        state.ocrJobId = "";
+        persistFactoryUiState();
+        render();
+        const endpointText = job.endpoint_shutdown?.message
+          ? ` ${job.endpoint_shutdown.message}`
+          : (job.endpoint_shutdown?.error ? ` No se pudo apagar el endpoint OCR: ${job.endpoint_shutdown.error}` : "");
+        setStatus(`${job.message || "OCR terminado."}${endpointText}`);
+        return job;
+      }
+      await sleep(1500);
+    }
+  } finally {
+    state.ocrJobPolling = false;
+  }
+}
+
+async function resumeOcrJobIfRunning({ silent = true } = {}) {
+  if (state.view !== "factory" || state.ocrJobPolling) return;
+  try {
+    const savedJobId = String(state.ocrJobId || "").trim();
+    const savedQuery = savedJobId ? `?job_id=${encodeURIComponent(savedJobId)}` : "";
+    let job = await api(`/api/ocr/jobs/status${savedQuery}`);
+    if (!job?.running && savedJobId) {
+      state.ocrJobId = "";
+      persistFactoryUiState();
+      job = await api("/api/ocr/jobs/status");
+    }
+    if (!job?.running) return;
+    state.stage = "crops";
+    state.ocrJobId = String(job.job_id || state.ocrJobId || "").trim();
+    state.ocrQueueIds = new Set((job.record_ids || []).map((id) => String(id || "")).filter(Boolean));
+    persistFactoryUiState();
+    if (!silent) setStatus("OCR sigue ejecutandose en segundo plano; reconectando progreso.");
+    pollOcrJob(job.job_id || "").catch((err) => setStatus(`Error consultando OCR: ${err.message}`));
+  } catch (_) {
+    // El servidor puede ser una version anterior; en ese caso no bloqueamos el arranque.
   }
 }
 
@@ -3648,12 +4475,9 @@ async function normalizeRecords() {
 
 function normalizableRecords() {
   const records = state.snapshot?.records || [];
-  const current = selectedRecord();
   const hasNormalizableData = (record) => !recordSourceStale(record)
     && !recordDownstreamInvalidated(record)
     && (hasText(record.raw_ocr) || hasObjectData(record.structured_ocr));
-  const currentHasData = current && hasNormalizableData(current);
-  if (currentHasData) return [current];
   return records.filter(hasNormalizableData);
 }
 
@@ -3993,9 +4817,11 @@ async function bootApp() {
   try {
     state.snapshot = await api("/api/bootstrap");
     state.view = "factory";
+    await refreshNormalizerTrainingStatus({ silent: true });
     restoreFactoryUiState();
     render();
     setStatus("Fabrica lista.");
+    resumeOcrJobIfRunning({ silent: true });
     return;
   } catch (_) {
     state.view = "library";

@@ -146,7 +146,7 @@ class InstancePdfPipelineService:
         if not records:
             boxes_status = StageStatus.READY if boxes_total else StageStatus.PENDING
         crops_status = self._aggregate_step_status(records, PipelineStep.CROPS)
-        ocr_status = self._aggregate_group_status(records, [PipelineStep.OCR, PipelineStep.SEGMENTATION])
+        ocr_status = self._aggregate_step_status(records, PipelineStep.OCR)
         normalization_status = self._aggregate_step_status(records, PipelineStep.NORMALIZATION)
         staging_status = self._aggregate_record_status(records)
         review_detail = (

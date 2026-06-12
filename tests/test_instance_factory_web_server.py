@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
+import time
 import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest.mock import patch
 
 from modulos.modulo13_laboratorio_pdf_segmentacion.controlador_laboratorio_pdf import ProblemPageRecord
 from modulos.instance_factory.models import InstancePipelineContext, StageStatus, StagingProblemRecord
@@ -25,6 +28,7 @@ class _FakeService:
         self.models = _FakeModels()
         self.calls = []
         self.pages = []
+        self.delay_s = 0.0
 
     def build_instance_summary(self):
         return self.staging.summarize_records()
@@ -71,6 +75,8 @@ class _FakeService:
         record_id="",
         record_ids=None,
     ):
+        if self.delay_s:
+            time.sleep(float(self.delay_s))
         self.calls.append(("run_ocr_and_segmentation", provider, curso, tema, start_n, limit, ocr_model, figure_model, force_figure_model, record_id, list(record_ids or [])))
         return self.staging.load_records()
 
@@ -130,6 +136,11 @@ def _post_json(base: str, path: str, body: dict) -> dict:
         return json.loads(response.read().decode("utf-8"))
 
 
+def _get_json(base: str, path: str) -> dict:
+    with urllib.request.urlopen(base + path, timeout=5) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
 def _read_http_error(exc: urllib.error.HTTPError) -> dict:
     return json.loads(exc.read().decode("utf-8"))
 
@@ -180,6 +191,140 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                 ])
             finally:
                 runtime.stop()
+
+    def test_web_runtime_runs_ocr_queue_as_reconnectable_background_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            crop = root / "crop.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(crop),
+                    status=StageStatus.NEEDS_REVIEW,
+                )
+            )
+            service = _FakeService(context, store)
+            endpoint = _FakeEndpointManager()
+            runtime = FactoryWebRuntime(context, service=service, endpoint_manager=endpoint)
+            try:
+                base = runtime.start()
+                started = _post_json(
+                    base,
+                    "api/ocr/jobs/start",
+                    {
+                        "provider": "local",
+                        "record_ids": ["crop_001"],
+                        "ocr_model": "ocr-test",
+                        "figure_model": "fig-test",
+                    },
+                )
+                self.assertEqual(started["schema_version"], "pdf_factory_ocr_job_v1")
+                self.assertTrue(started["running"])
+                job_id = started["job_id"]
+
+                status = {}
+                for _ in range(40):
+                    status = _get_json(base, f"api/ocr/jobs/status?job_id={job_id}")
+                    if not status["running"]:
+                        break
+                    time.sleep(0.05)
+
+                self.assertEqual(status["status"], "done")
+                self.assertEqual(status["ok"], 1)
+                self.assertEqual(status["failed"], 0)
+                self.assertEqual(status["current"], 1)
+                self.assertEqual(status["endpoint_shutdown"]["status"], "scaledToZero")
+                self.assertIn(
+                    ("run_ocr_and_segmentation", "local", "SIN_CURSO", "SIN_TEMA", 1, 1, "ocr-test", "fig-test", True, "crop_001", []),
+                    service.calls,
+                )
+                self.assertIn(("scale_to_zero",), endpoint.calls)
+            finally:
+                runtime.stop()
+
+    def test_web_runtime_keeps_ocr_endpoint_on_until_parallel_jobs_finish(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            crop_1 = root / "crop_1.png"
+            crop_2 = root / "crop_2.png"
+            crop_1.write_bytes(b"png")
+            crop_2.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            for record_id, crop in (("crop_001", crop_1), ("crop_002", crop_2)):
+                store.upsert_record(
+                    StagingProblemRecord(
+                        record_id=record_id,
+                        crop_id=record_id,
+                        crop_path=str(crop),
+                        status=StageStatus.NEEDS_REVIEW,
+                    )
+                )
+            service = _FakeService(context, store)
+            service.delay_s = 0.25
+            endpoint = _FakeEndpointManager()
+            runtime = FactoryWebRuntime(context, service=service, endpoint_manager=endpoint)
+            try:
+                base = runtime.start()
+                first = _post_json(base, "api/ocr/jobs/start", {"provider": "local", "record_ids": ["crop_001"]})
+                second = _post_json(base, "api/ocr/jobs/start", {"provider": "local", "record_ids": ["crop_002"]})
+                self.assertNotEqual(first["job_id"], second["job_id"])
+
+                statuses = {}
+                for job_id in (first["job_id"], second["job_id"]):
+                    status = {}
+                    for _ in range(60):
+                        status = _get_json(base, f"api/ocr/jobs/status?job_id={job_id}")
+                        if not status["running"]:
+                            break
+                        time.sleep(0.05)
+                    statuses[job_id] = status
+
+                self.assertEqual(statuses[first["job_id"]]["status"], "done")
+                self.assertEqual(statuses[second["job_id"]]["status"], "done")
+                self.assertEqual(endpoint.calls.count(("scale_to_zero",)), 1)
+                shutdown_payloads = [status.get("endpoint_shutdown") or {} for status in statuses.values()]
+                self.assertTrue(any(payload.get("status") == "scaledToZero" for payload in shutdown_payloads))
+                self.assertTrue(any(payload.get("reason") == "other_ocr_jobs_running" for payload in shutdown_payloads))
+            finally:
+                runtime.stop()
+
+    def test_web_runtime_exposes_normalizer_training_bank_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bank = root / "normalizer_bank"
+            crop = root / "crop.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(crop),
+                    raw_ocr="Halle x. A) 1 B) 2 C) 3 D) 4 E) 5",
+                )
+            )
+            with patch.dict(os.environ, {"NORMALIZER_TRAINING_BANK_ROOT": str(bank)}):
+                store.update_review(
+                    "crop_001",
+                    {"latex_rendered_item": r"\item[\textbf{1.}] Halle $x$. £A)$1$æB)$2$æC)$3$£D)$4$ææE)$5$£"},
+                    mark_ready=True,
+                )
+                runtime = FactoryWebRuntime(context, service=_FakeService(context, store))
+                try:
+                    base = runtime.start()
+                    with urllib.request.urlopen(base + "api/training/normalizer/status", timeout=5) as response:
+                        status = json.loads(response.read().decode("utf-8"))
+                    self.assertEqual(status["schema_version"], "normalizer_training_bank_status_v1")
+                    self.assertEqual(status["samples_total"], 1)
+                    self.assertFalse(status["ready_to_train"])
+                finally:
+                    runtime.stop()
 
     def test_web_runtime_exposes_snapshot_review_and_disabled_promotion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -309,11 +454,13 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                         "notes": "batch",
                         "mark_ready": True,
                         "compact": True,
+                        "defer_golden_sync": True,
                     },
                 )
                 self.assertEqual(review_compact["schema_version"], "pdf_factory_web_record_saved_v1")
                 self.assertEqual(review_compact["record"]["record_id"], "crop_001")
                 self.assertEqual(review_compact["record"]["normalized"]["numero"], "8")
+                self.assertEqual(review_compact["record"]["golden_sync"]["status"], "deferred")
                 self.assertEqual(review_compact["record"]["status"], StageStatus.READY)
 
                 with urllib.request.urlopen(base + "api/record?record_id=crop_001", timeout=5) as response:

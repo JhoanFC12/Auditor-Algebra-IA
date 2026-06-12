@@ -6,7 +6,7 @@ Este laboratorio prueba modelos locales para reemplazar o reducir el uso del end
 imagen crop -> OCR crudo corregido en nuestro formato
 ```
 
-La normalizacion queda pendiente hasta definir y entrenar ese modelo aparte.
+La normalizacion se planifica aparte en `docs/plan_entrenamiento_normalizador.md`.
 
 ## 1. Preparar Dataset
 
