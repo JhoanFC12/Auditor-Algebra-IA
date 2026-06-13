@@ -513,6 +513,10 @@ class ScanPipeline:
             if has_figure_hint and (not normalized.has_figure) and len(parsed) == 1:
                 normalized.has_figure = True
                 normalized.figure_tag = f"img-{normalized.n}"
+                normalized.image_binding.status = "confirmed"
+                normalized.image_binding.marker_name = normalized.figure_tag
+                normalized.image_binding.marker_names = [normalized.figure_tag]
+                normalized.image_binding.needs_review = False
             result_item = self._validate_and_retry_item(
                 item=normalized,
                 normalize_meta=normalize_meta,

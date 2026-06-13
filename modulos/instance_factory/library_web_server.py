@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import dataclasses
+import base64
+import binascii
 import hashlib
 import json
 import mimetypes
@@ -17,6 +19,7 @@ try:
         BOOK_STATES,
         BookCreateInput,
         BookInstanceInput,
+        BookUpdateInput,
         BookProgressController,
     )
     _BOOK_PROGRESS_IMPORT_ERROR: Exception | None = None
@@ -51,9 +54,15 @@ except ModuleNotFoundError as exc:
         notas: str = ""
         activo: bool = True
 
+    @dataclasses.dataclass(slots=True)
+    class BookUpdateInput(BookCreateInput):
+        pass
+
     BookProgressController = None  # type: ignore[assignment]
 from utils.project_layout import remap_legacy_drive_path
 
+from .hf_endpoint_manager import HfEndpointManager
+from .library_covers import library_cover_dir, save_cover_bytes
 from .models import InstancePipelineContext
 from .library_api import LibraryApiError, LibraryWebApi
 from .runtime_env import load_factory_runtime_env
@@ -63,7 +72,14 @@ from .web_server import FactoryWebRuntime, WebApiError, _FilePayload, build_web_
 class LibraryWebRuntime:
     """Local web app for the book library and per-instance factory entrypoints."""
 
-    def __init__(self, *, controller: Any | None = None, default_db_name: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        controller: Any | None = None,
+        default_db_name: str = "",
+        host: str = "127.0.0.1",
+        port: int = 0,
+    ) -> None:
         load_factory_runtime_env()
         if controller is None and BookProgressController is None:
             raise RuntimeError(
@@ -80,13 +96,16 @@ class LibraryWebRuntime:
         self.cache_root = Path(tempfile.mkdtemp(prefix="pdf_library_web_"))
         self._file_tokens: dict[str, Path] = {}
         self._factory_runtimes: list[FactoryWebRuntime] = []
+        self.endpoint_manager = HfEndpointManager()
         self._lock = threading.RLock()
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+        self.host = str(host or "127.0.0.1").strip() or "127.0.0.1"
+        self.port = max(0, int(port or 0))
         self.url = ""
 
     def _create_factory_runtime(self, context: InstancePipelineContext) -> FactoryWebRuntime:
-        runtime = FactoryWebRuntime(context, library_api=self.library_api)
+        runtime = FactoryWebRuntime(context, library_api=self.library_api, endpoint_manager=self.endpoint_manager)
         self._factory_runtimes.append(runtime)
         return runtime
 
@@ -103,10 +122,13 @@ class LibraryWebRuntime:
             def do_POST(self) -> None:  # noqa: N802
                 runtime._handle_request(self, method="POST")
 
+            def do_OPTIONS(self) -> None:  # noqa: N802
+                runtime._send_options(self)
+
             def log_message(self, _format: str, *_args: Any) -> None:
                 return
 
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server = ThreadingHTTPServer((self.host, self.port), Handler)
         host, port = self._server.server_address
         self.url = f"http://{host}:{port}/"
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
@@ -155,14 +177,22 @@ class LibraryWebRuntime:
             if method == "GET" and path.startswith("/api/library/file/"):
                 self._send_registered_file(handler, path)
                 return
+            if method == "GET" and path.startswith("/api/file/"):
+                result = self._dispatch_factory_file(path, query)
+                self._send_file(handler, result.path, result.content_type)
+                return
+            if method == "POST" and path == "/api/library/cover/paste":
+                result = self._save_pasted_cover(self._read_json(handler, max_bytes=24_000_000))
+                self._send_json(handler, result)
+                return
             if path.startswith("/api/library/"):
                 payload = self._read_json(handler) if method == "POST" else {}
                 result = self._dispatch_api(method, path, query, payload)
                 self._send_json(handler, result)
                 return
-            if path.startswith("/api/") and self._active_factory_runtime() is not None:
+            if path.startswith("/api/") and self._factory_runtime_for_request(handler, query, {}) is not None:
                 payload = self._read_json(handler) if method == "POST" else {}
-                result = self._dispatch_factory_api(method, path, query, payload)
+                result = self._dispatch_factory_api(handler, method, path, query, payload)
                 if isinstance(result, _FilePayload):
                     self._send_file(handler, result.path, result.content_type)
                 else:
@@ -228,22 +258,131 @@ class LibraryWebRuntime:
 
     def _dispatch_factory_api(
         self,
+        handler: BaseHTTPRequestHandler,
         method: str,
         path: str,
         query: dict[str, list[str]],
         payload: dict[str, Any],
     ) -> Any:
-        runtime = self._active_factory_runtime()
+        runtime = self._factory_runtime_for_request(handler, query, payload)
         if runtime is None:
             raise FileNotFoundError(f"Ruta API no encontrada: {method} {path}")
         return runtime._dispatch_api(method, path, query, payload)
 
+    def _dispatch_factory_file(self, path: str, query: dict[str, list[str]]) -> _FilePayload:
+        token = urllib.parse.unquote(path.rsplit("/", 1)[-1])
+        runtimes = self._all_factory_runtimes()
+        preferred: list[Any] = []
+        raw_instance_id = self._first(query, "instance_id", "")
+        if raw_instance_id:
+            try:
+                instance_id = int(raw_instance_id)
+            except Exception:
+                instance_id = 0
+            if instance_id > 0:
+                preferred = [
+                    runtime
+                    for runtime in runtimes
+                    if int(getattr(runtime, "_library_instance_id", 0) or 0) == instance_id
+                ]
+        token_owners = [
+            runtime
+            for runtime in runtimes
+            if token in dict(getattr(runtime, "_file_tokens", {}) or {})
+        ]
+        candidates: list[Any] = []
+        for runtime in [*preferred, *token_owners, *reversed(runtimes)]:
+            if runtime not in candidates:
+                candidates.append(runtime)
+        for runtime in candidates:
+            try:
+                result = runtime._dispatch_api("GET", path, query, {})
+            except FileNotFoundError:
+                continue
+            if isinstance(result, _FilePayload):
+                return result
+        raise FileNotFoundError("Archivo no registrado en ninguna instancia abierta.")
+
+    def _all_factory_runtimes(self) -> list[Any]:
+        result: list[Any] = []
+        seen: set[int] = set()
+        for runtime in [*list(getattr(self.library_api, "_factory_runtimes", [])), *list(self._factory_runtimes)]:
+            key = id(runtime)
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(runtime)
+        return result
+
+    def _factory_runtime_for_request(
+        self,
+        handler: BaseHTTPRequestHandler,
+        query: dict[str, list[str]],
+        payload: dict[str, Any],
+    ) -> Any | None:
+        raw_instance_id = (
+            handler.headers.get("X-Pdf-Factory-Instance-Id")
+            or self._first(query, "instance_id", "")
+            or str(payload.get("instance_id") or "")
+        ).strip()
+        instance_id = 0
+        if raw_instance_id:
+            try:
+                instance_id = int(raw_instance_id)
+            except Exception:
+                instance_id = 0
+        if instance_id > 0:
+            for runtime in self._all_factory_runtimes():
+                try:
+                    if int(getattr(runtime, "_library_instance_id", 0) or 0) == instance_id:
+                        return runtime
+                except Exception:
+                    continue
+            runtime = self._create_factory_runtime_from_request(instance_id, query, payload)
+            if runtime is not None:
+                return runtime
+            return None
+        return self._active_factory_runtime()
+
+    def _create_factory_runtime_from_request(
+        self,
+        instance_id: int,
+        query: dict[str, list[str]],
+        payload: dict[str, Any],
+    ) -> Any | None:
+        db_name = str(
+            self._first(query, "db_name", "")
+            or payload.get("db_name")
+            or self.default_db_name
+            or ""
+        ).strip()
+        raw_book_id = self._first(query, "book_id", "") or str(payload.get("book_id") or "")
+        if not db_name or not raw_book_id:
+            return None
+        try:
+            book_id = int(raw_book_id)
+        except Exception:
+            return None
+        book = self.controller.obtener_libro(db_name, book_id)
+        if not book:
+            return None
+        instance = self._instance_by_id(db_name, book_id, instance_id)
+        if instance is None:
+            return None
+        context = InstancePipelineContext.from_library_instance(book, instance, db_name=db_name)
+        runtime = self._create_factory_runtime(context)
+        setattr(runtime, "_library_db_name", db_name)
+        setattr(runtime, "_library_book_id", int(book_id))
+        setattr(runtime, "_library_instance_id", int(instance_id))
+        api_runtimes = getattr(self.library_api, "_factory_runtimes", None)
+        if isinstance(api_runtimes, list) and runtime not in api_runtimes:
+            api_runtimes.append(runtime)
+        return runtime
+
     def _active_factory_runtime(self) -> Any | None:
-        api_runtimes = getattr(self.library_api, "_factory_runtimes", [])
-        if api_runtimes:
-            return api_runtimes[-1]
-        if self._factory_runtimes:
-            return self._factory_runtimes[-1]
+        runtimes = self._all_factory_runtimes()
+        if runtimes:
+            return runtimes[-1]
         return None
 
     def _snapshot(self, db_name: str = "") -> dict[str, Any]:
@@ -263,6 +402,7 @@ class LibraryWebRuntime:
                 "factory_target": "staging_only",
                 "never_insert_directly_into_problemas": True,
                 "promotion_enabled": False,
+                "explicit_manual_upload_enabled": True,
             },
         }
 
@@ -293,9 +433,8 @@ class LibraryWebRuntime:
         if not resolved_pdf.exists():
             raise FileNotFoundError(f"No se encontro el PDF del libro: {resolved_pdf}")
         context = InstancePipelineContext.from_library_instance(book, instance, db_name=db_name)
-        runtime = FactoryWebRuntime(context)
+        runtime = self._create_factory_runtime(context)
         url = runtime.start()
-        self._factory_runtimes.append(runtime)
         return {
             "schema_version": "library_factory_opened_v1",
             "url": url,
@@ -304,6 +443,7 @@ class LibraryWebRuntime:
                 "target": "staging_only",
                 "never_insert_directly_into_problemas": True,
                 "promotion_enabled": False,
+                "explicit_manual_upload_enabled": True,
             },
         }
 
@@ -384,6 +524,82 @@ class LibraryWebRuntime:
             "activo": bool(data.get("activo", True)),
         }
 
+    def _save_pasted_cover(self, payload: dict[str, Any]) -> dict[str, Any]:
+        book = self._cover_book_payload(payload)
+        upload_payload = {**book, **dict(payload or {})} if book else dict(payload or {})
+        data_url = str(payload.get("data_url") or payload.get("dataUrl") or "").strip()
+        mime = str(payload.get("mime") or "").strip().lower()
+        raw_b64 = str(payload.get("base64") or "").strip()
+        if data_url:
+            if not data_url.startswith("data:") or "," not in data_url:
+                raise ValueError("La imagen pegada no tiene formato data URL valido.")
+            header, raw_b64 = data_url.split(",", 1)
+            if ";base64" not in header.lower():
+                raise ValueError("La imagen pegada debe venir codificada en base64.")
+            mime = header[5:].split(";", 1)[0].strip().lower()
+        allowed = {
+            "image/png": ".png",
+            "image/jpeg": ".jpg",
+            "image/jpg": ".jpg",
+            "image/webp": ".webp",
+            "image/gif": ".gif",
+            "image/bmp": ".bmp",
+        }
+        suffix = allowed.get(mime)
+        if not suffix:
+            raise ValueError("Solo se aceptan portadas PNG, JPG, WEBP, GIF o BMP.")
+        try:
+            raw = base64.b64decode(raw_b64, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError("No se pudo leer la imagen pegada.") from exc
+        max_bytes = 12 * 1024 * 1024
+        if not raw:
+            raise ValueError("La imagen pegada esta vacia.")
+        if len(raw) > max_bytes:
+            raise ValueError("La portada pegada supera 12 MB.")
+
+        file_path = save_cover_bytes(raw, suffix, upload_payload, db_name=str(payload.get("db_name") or ""))
+        cover_path = str(file_path)
+        attached = False
+        if self._bool(payload.get("attach"), default=False):
+            self._attach_cover_to_book(payload, cover_path, book=book)
+            attached = True
+        return {
+            "schema_version": "library_cover_pasted_v1",
+            "cover_path": cover_path,
+            "cover_url": self._register_library_file(cover_path),
+            "bytes": len(raw),
+            "attached": attached,
+        }
+
+    def _cover_book_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            book_id = int(payload.get("book_id") or 0)
+        except Exception:
+            book_id = 0
+        db_name = str(payload.get("db_name") or "").strip()
+        if not book_id or not db_name:
+            return {}
+        book = self.controller.obtener_libro(db_name, book_id)
+        return dict(book or {})
+
+    def _attach_cover_to_book(self, payload: dict[str, Any], cover_path: str, *, book: dict[str, Any] | None = None) -> None:
+        db_name = str(payload.get("db_name") or "").strip()
+        try:
+            book_id = int(payload.get("book_id") or 0)
+        except Exception:
+            book_id = 0
+        if not db_name or not book_id:
+            raise ValueError("db_name y book_id son requeridos para asociar portada.")
+        current = dict(book or self.controller.obtener_libro(db_name, book_id) or {})
+        if not current:
+            raise FileNotFoundError("Libro no encontrado.")
+        merged = {**current, "cover_path": cover_path}
+        self.controller.actualizar_libro(db_name, book_id, BookUpdateInput(**self._book_payload(merged)))
+
+    def _cover_upload_dir(self, payload: dict[str, Any]) -> Path:
+        return library_cover_dir(payload, db_name=str(payload.get("db_name") or ""))
+
     @staticmethod
     def _instance_payload(data: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -395,6 +611,12 @@ class LibraryWebRuntime:
             "notas": str(data.get("notas") or ""),
             "activo": bool(data.get("activo", True)),
         }
+
+    def _instance_by_id(self, db_name: str, book_id: int, instance_id: int) -> dict[str, Any] | None:
+        for row in self.controller.listar_instancias_libro(db_name, int(book_id)):
+            if int(dict(row).get("id") or 0) == int(instance_id):
+                return dict(row)
+        return None
 
     def _send_static(self, handler: BaseHTTPRequestHandler, path: str) -> None:
         name = "index.html" if path in {"", "/", "/library"} else path.lstrip("/")
@@ -411,21 +633,27 @@ class LibraryWebRuntime:
 
     def _send_library_index(self, handler: BaseHTTPRequestHandler, path: Path) -> None:
         text = Path(path).read_text(encoding="utf-8")
+        parsed = urllib.parse.urlparse(handler.path)
+        params = urllib.parse.parse_qs(parsed.query)
+        mode = "factory" if self._first(params, "factory", "") or self._first(params, "instance_id", "") else "library"
         text = text.replace(
             "<h1 id=\"title\">Cargando interfaz...</h1>",
-            "<h1 id=\"title\">Biblioteca</h1>",
+            "<h1 id=\"title\">Biblioteca</h1>" if mode == "library" else "<h1 id=\"title\">Cargando instancia...</h1>",
         ).replace(
             "<p id=\"subtitle\" class=\"context-line\">Preparando contexto de trabajo.</p>",
-            "<p id=\"subtitle\" class=\"context-line\">Cargando libros, portadas e instancias.</p>",
+            "<p id=\"subtitle\" class=\"context-line\">Cargando libros, portadas e instancias.</p>"
+            if mode == "library"
+            else "<p id=\"subtitle\" class=\"context-line\">Preparando contexto de libro, instancia y PDF.</p>",
         ).replace(
             "<script src=\"/app.js\"></script>",
-            "<script>window.__PDF_APP_MODE__ = \"library\";</script>\n  <script src=\"/app.js\"></script>",
+            f"<script>window.__PDF_APP_MODE__ = \"{mode}\";</script>\n  <script src=\"/app.js\"></script>",
         )
         raw = text.encode("utf-8")
         handler.send_response(200)
         handler.send_header("Content-Type", "text/html; charset=utf-8")
         handler.send_header("Content-Length", str(len(raw)))
         handler.send_header("Cache-Control", "no-store")
+        self._send_cors_headers(handler)
         handler.end_headers()
         handler.wfile.write(raw)
 
@@ -456,12 +684,26 @@ class LibraryWebRuntime:
         self._send_file(handler, file_path, mimetypes.guess_type(str(file_path))[0] or "application/octet-stream")
 
     @staticmethod
+    def _send_cors_headers(handler: BaseHTTPRequestHandler) -> None:
+        handler.send_header("Access-Control-Allow-Origin", "*")
+        handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        handler.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+    @staticmethod
+    def _send_options(handler: BaseHTTPRequestHandler) -> None:
+        handler.send_response(204)
+        LibraryWebRuntime._send_cors_headers(handler)
+        handler.send_header("Cache-Control", "no-store")
+        handler.end_headers()
+
+    @staticmethod
     def _send_json(handler: BaseHTTPRequestHandler, payload: Any, *, status: int = 200) -> None:
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         handler.send_response(status)
         handler.send_header("Content-Type", "application/json; charset=utf-8")
         handler.send_header("Content-Length", str(len(raw)))
         handler.send_header("Cache-Control", "no-store")
+        LibraryWebRuntime._send_cors_headers(handler)
         handler.end_headers()
         handler.wfile.write(raw)
 
@@ -476,6 +718,7 @@ class LibraryWebRuntime:
         handler.send_header("Content-Type", content_type)
         handler.send_header("Content-Length", str(len(raw)))
         handler.send_header("Cache-Control", "no-store")
+        LibraryWebRuntime._send_cors_headers(handler)
         handler.end_headers()
         handler.wfile.write(raw)
 
@@ -502,14 +745,14 @@ class LibraryWebRuntime:
         LibraryWebRuntime._send_json(handler, payload, status=status)
 
     @staticmethod
-    def _read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
+    def _read_json(handler: BaseHTTPRequestHandler, *, max_bytes: int = 1_000_000) -> dict[str, Any]:
         try:
             length = int(handler.headers.get("Content-Length") or 0)
         except ValueError as exc:
             raise ValueError("Content-Length invalido.") from exc
         if length <= 0:
             return {}
-        if length > 1_000_000:
+        if length > int(max_bytes):
             raise WebApiError("Payload JSON demasiado grande.", status=413, code="payload_too_large")
         payload = json.loads(handler.rfile.read(length).decode("utf-8") or "{}")
         if not isinstance(payload, dict):
@@ -546,11 +789,20 @@ class LibraryWebRuntime:
         return number
 
     @staticmethod
+    def _bool(value: Any, *, default: bool = False) -> bool:
+        if value is None or value == "":
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "si", "sí", "yes", "on"}
+
+    @staticmethod
     def _allowed_api_methods(path: str) -> set[str]:
         exact = {
             "/api/library/bootstrap": {"GET"},
             "/api/library/book": {"GET"},
             "/api/library/book/create": {"POST"},
+            "/api/library/cover/paste": {"POST"},
             "/api/library/instance/create": {"POST"},
             "/api/library/instance/factory": {"POST"},
         }

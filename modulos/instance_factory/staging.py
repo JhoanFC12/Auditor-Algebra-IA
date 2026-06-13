@@ -39,16 +39,24 @@ def _build_model_inventory_manifest() -> dict[str, Any]:
 
 MAX_ARTIFACT_RECORD_DIR_LEN = 48
 MAX_ARTIFACT_PATH_LEN_SOFT_LIMIT = 240
+MIN_COMPACT_RECORD_FILE_STEM_LEN = 24
+MIN_COMPACT_ARTIFACT_DIR_STEM_LEN = 12
 
 
 def compact_artifact_dir_name(record_id: str, *, max_len: int = MAX_ARTIFACT_RECORD_DIR_LEN) -> str:
+    max_len = max(1, int(max_len))
     raw = str(record_id or "").strip()
     clean = re.sub(r"[^A-Za-z0-9._-]+", "_", raw).strip("._-") or "record"
-    if len(clean) <= int(max_len):
+    if len(clean) <= max_len:
         return clean
-    digest = hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:16]
-    keep = max(1, int(max_len) - len(digest) - 1)
-    return f"{clean[:keep].rstrip('._-')}_{digest}"
+    digest = hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()
+    if max_len <= 10:
+        return digest[:max_len]
+    digest_len = 16 if max_len >= 18 else max(8, max_len - 3)
+    digest_len = min(digest_len, max_len - 2)
+    keep = max_len - digest_len - 1
+    prefix = clean[:keep].rstrip("._-") or "r"
+    return f"{prefix}_{digest[:digest_len]}"
 
 
 class InstanceStagingStore:
@@ -82,7 +90,48 @@ class InstanceStagingStore:
         clean = str(record_id or "").strip()
         if not clean or not self.safe_record_id_re.match(clean):
             raise ValueError(f"record_id invalido para staging: {record_id!r}")
+        return self.records_dir / f"{self._record_file_stem(clean)}.json"
+
+    def _legacy_record_path(self, record_id: str) -> Path:
+        clean = str(record_id or "").strip()
+        if not clean or not self.safe_record_id_re.match(clean):
+            raise ValueError(f"record_id invalido para staging: {record_id!r}")
         return self.records_dir / f"{clean}.json"
+
+    def _record_file_stem(self, record_id: str) -> str:
+        return self._file_stem_for_dir(self.records_dir, record_id)
+
+    def _file_stem_for_dir(self, directory: Path, record_id: str) -> str:
+        clean = str(record_id or "").strip()
+        if not clean or not self.safe_record_id_re.match(clean):
+            raise ValueError(f"record_id invalido para staging: {record_id!r}")
+        directory = Path(directory)
+        legacy = directory / f"{clean}.json"
+        if len(str(legacy)) < MAX_ARTIFACT_PATH_LEN_SOFT_LIMIT:
+            return clean
+        available = MAX_ARTIFACT_PATH_LEN_SOFT_LIMIT - len(str(directory)) - len(".json") - 1
+        max_len = max(MIN_COMPACT_RECORD_FILE_STEM_LEN, min(MAX_ARTIFACT_RECORD_DIR_LEN, available))
+        return compact_artifact_dir_name(clean, max_len=max_len)
+
+    def _record_path_candidates(self, record_id: str) -> list[Path]:
+        primary = self._record_path(record_id)
+        legacy = self._legacy_record_path(record_id)
+        if primary == legacy:
+            return [primary]
+        return [primary, legacy]
+
+    def _write_record_file(self, record: StagingProblemRecord) -> Path:
+        path = self._record_path(record.record_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+        for candidate in self._record_path_candidates(record.record_id)[1:]:
+            if candidate == path or not candidate.exists():
+                continue
+            try:
+                candidate.unlink()
+            except OSError:
+                pass
+        return path
 
     def artifact_dir(self, kind: str, record_id: str, *, probe_file: str = "latest.json") -> Path:
         clean_kind = re.sub(r"[^A-Za-z0-9._-]+", "_", str(kind or "").strip()).strip("._-")
@@ -95,7 +144,9 @@ class InstanceStagingStore:
         legacy = root / clean_record_id
         if len(clean_record_id) <= MAX_ARTIFACT_RECORD_DIR_LEN and len(str(legacy / probe_file)) < MAX_ARTIFACT_PATH_LEN_SOFT_LIMIT:
             return legacy
-        return root / compact_artifact_dir_name(clean_record_id)
+        available = MAX_ARTIFACT_PATH_LEN_SOFT_LIMIT - len(str(root)) - len(str(probe_file or "latest.json")) - 2
+        max_len = max(MIN_COMPACT_ARTIFACT_DIR_STEM_LEN, min(MAX_ARTIFACT_RECORD_DIR_LEN, available))
+        return root / compact_artifact_dir_name(clean_record_id, max_len=max_len)
 
     def _source_identity_key(self, record: StagingProblemRecord) -> str:
         source = dict(record.source or {})
@@ -393,11 +444,7 @@ class InstanceStagingStore:
             canonical_output_paths: set[Path] = set()
             for record in canonical_by_path.values():
                 prepared = self._prepare_record_for_write(record)
-                output_path = self._record_path(prepared.record_id)
-                output_path.write_text(
-                    json.dumps(prepared.to_dict(), ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
+                output_path = self._write_record_file(prepared)
                 canonical_output_paths.add(output_path.resolve())
             for path in duplicate_paths:
                 try:
@@ -434,7 +481,7 @@ class InstanceStagingStore:
         for row in rows:
             if row.crop_path and Path(row.crop_path).exists():
                 summary["crops_found"] += 1
-            if row.raw_ocr or row.structured_ocr:
+            if row.raw_ocr:
                 summary["ocr_done"] += 1
             if row.figure_segmentation:
                 summary["segments_done"] += 1
@@ -454,16 +501,27 @@ class InstanceStagingStore:
 
     def get_record(self, record_id: str) -> StagingProblemRecord | None:
         try:
-            path = self._record_path(record_id)
+            candidates = self._record_path_candidates(record_id)
         except ValueError:
             return None
-        if not path.exists():
-            return None
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return None
-        return StagingProblemRecord.from_dict(payload) if isinstance(payload, dict) else None
+        for path in candidates:
+            if not path.exists():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                record = StagingProblemRecord.from_dict(payload)
+                if str(record.record_id or "") == str(record_id or ""):
+                    return record
+                if str(record.crop_id or "") == str(record_id or ""):
+                    return record
+        wanted = str(record_id or "")
+        for _path, record in self._load_record_entries():
+            if str(record.record_id or "") == wanted or str(record.crop_id or "") == wanted:
+                return record
+        return None
 
     def upsert_record(self, record: StagingProblemRecord) -> None:
         existing_by_identity = {
@@ -474,8 +532,7 @@ class InstanceStagingStore:
         record = self._prepare_record_for_write(record)
         record = self._coalesce_duplicate_identity(record, existing_by_identity)
         record = self._prepare_record_for_write(record)
-        path = self._record_path(record.record_id)
-        path.write_text(json.dumps(record.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+        self._write_record_file(record)
         self.rewrite_manifest()
 
     def upsert_many(self, records: list[StagingProblemRecord]) -> None:
@@ -491,8 +548,7 @@ class InstanceStagingStore:
             record = self._prepare_record_for_write(record)
             prepared_by_id[record.record_id] = record
         for record in prepared_by_id.values():
-            path = self._record_path(record.record_id)
-            path.write_text(json.dumps(record.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+            self._write_record_file(record)
         self.rewrite_manifest()
 
     def rewrite_manifest(self) -> None:
@@ -541,6 +597,7 @@ class InstanceStagingStore:
                 "promotion_boundary": {
                     "prepared": True,
                     "enabled": False,
+                    "explicit_manual_upload_enabled": True,
                     "target_table": "problemas",
                     "candidate_builder": "InstanceStagingStore.build_promotion_candidate",
                     "requires_ready_review": True,
@@ -687,6 +744,11 @@ class InstanceStagingStore:
         continuation = normalized.get("continuacion") if isinstance(normalized.get("continuacion"), dict) else {}
         if not normalized:
             blocking_issues.append("missing:normalized")
+        final_latex = str(normalized.get("latex_rendered_item") or "").strip()
+        if normalized and not final_latex:
+            blocking_issues.append("missing:final_latex")
+        if final_latex and not re.match(r"^\s*\\item\s*\[\s*\\textbf\s*\{\s*\d+\s*\.?\s*\}\s*\]", final_latex):
+            blocking_issues.append("invalid:final_latex_item")
         if bool(continuation.get("es_continuacion") or continuation.get("fusionar_con_anterior")):
             blocking_issues.append("continuacion:fusionada_con_anterior")
         if StageStatus.normalize(record.status) != StageStatus.READY:
@@ -695,6 +757,7 @@ class InstanceStagingStore:
             "schema_version": self.candidate_schema_version,
             "created_at": utc_now_text(),
             "promotion_enabled": False,
+            "explicit_upload_enabled": not blocking_issues,
             "target_table": "problemas",
             "ready_for_future_promotion": not blocking_issues,
             "blocking_issues": blocking_issues,
@@ -716,6 +779,8 @@ class InstanceStagingStore:
                 "staging_only": True,
                 "never_insert_directly_into_problemas": True,
                 "requires_explicit_future_promotion_flow": True,
+                "automatic_insert": False,
+                "explicit_upload_endpoint": "/api/promotion/upload",
             },
         }
 
@@ -869,7 +934,7 @@ class InstanceStagingStore:
                 "ocr_normalization_golden_live",
             ],
         }
-        path = contracts_dir / f"{record.record_id}.json"
+        path = contracts_dir / f"{self._file_stem_for_dir(contracts_dir, record.record_id)}.json"
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return path
 

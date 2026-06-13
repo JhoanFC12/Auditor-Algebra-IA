@@ -74,6 +74,15 @@ ITEM_BLOCK_RE = re.compile(
 ITEM_NUM_RE = re.compile(r"\\item\s*\[\s*\\textbf\{\s*(\d+)\.?\s*\}\s*\]", re.IGNORECASE)
 IMAGE_TAG_RE = re.compile(r"\[\[\s*Imagen\s*=\s*(img-\d+)\s*\]\]", re.IGNORECASE)
 CLAVE_TAG_RE = re.compile(r"\[\[\s*Clave\s*=\s*([A-Ea-e])\s*\]\]", re.IGNORECASE)
+MAX_TOKENS_CONTEXT_RE = re.compile(
+    r"maximum context length is\s+(\d+)\s+tokens\s+and your request has\s+(\d+)\s+input tokens",
+    re.IGNORECASE,
+)
+CONTEXT_LENGTH_HINT_RE = re.compile(
+    r"(maximum context length|context length|input tokens|prompt is too long|input is too long|"
+    r"too many tokens|exceeds.*context|reduce the length)",
+    re.IGNORECASE,
+)
 
 STRUCTURED_RE = re.compile(
     r"(?is)\bITEM\s*:\s*(?P<num>\d+)\s*"
@@ -134,6 +143,29 @@ def _extract_chat_text(content: Any) -> str:
                 out.append(chunk)
         return "\n".join(out)
     return str(content or "")
+
+
+def _available_completion_tokens_from_error(exc: Exception) -> int | None:
+    text = str(exc or "")
+    lowered = text.lower()
+    if "max_tokens" not in lowered and "max_completion_tokens" not in lowered:
+        return None
+    match = MAX_TOKENS_CONTEXT_RE.search(text)
+    if not match:
+        return None
+    try:
+        context_limit = int(match.group(1))
+        input_tokens = int(match.group(2))
+    except Exception:
+        return None
+    return max(0, context_limit - input_tokens)
+
+
+def _is_context_length_error(exc: Exception) -> bool:
+    text = str(exc or "")
+    if _available_completion_tokens_from_error(exc) is not None:
+        return True
+    return bool(CONTEXT_LENGTH_HINT_RE.search(text))
 
 
 def _repair_mojibake_text(text: str) -> str:
@@ -629,7 +661,7 @@ def _extract_option_label_sequence(text: str) -> List[str]:
         return []
     labels: List[str] = []
     seen: set[str] = set()
-    for match in OPTION_TOKEN_RE.finditer(raw):
+    for match in OPTION_TOKEN_LOOSE_RE.finditer(raw):
         label = str(match.group(1) or "").upper()
         if label and label not in seen:
             seen.add(label)
@@ -756,11 +788,14 @@ def _build_local_structured_payload(
     tema: str,
     start_n: int,
 ) -> Dict[str, Any]:
-    if re.match(r"(?is)^\s*(?:\[\s*cont(?:inuacion)?\.?\s*\]|<\s*cont(?:inuacion)?\.?\s*>|cont(?:inuacion)?\s*:)", str(raw_output or "")):
-        return _build_continuation_only_payload(raw_output)
-
     leading_raw, suffix_raw = _split_prefix_before_first_numbered_header(raw_output)
+    starts_with_continuation = re.match(
+        r"(?is)^\s*(?:\[\s*cont(?:inuacion)?\.?\s*\]|<\s*cont(?:inuacion)?\.?\s*>|cont(?:inuacion)?\s*:)",
+        str(raw_output or ""),
+    )
     if not suffix_raw:
+        if starts_with_continuation:
+            return _build_continuation_only_payload(raw_output)
         structured_items = parse_items_from_text(
             raw_output,
             curso=curso,
@@ -978,7 +1013,7 @@ def _split_options(body: str) -> tuple[str, Dict[str, str]]:
     if not opt_src:
         return (re.sub(r"\s+", " ", enu_src).strip(), {label: "..." for label in OPTION_LABELS})
 
-    label_re = OPTION_TOKEN_RE
+    label_re = OPTION_TOKEN_LOOSE_RE
     matches = list(label_re.finditer(opt_src))
     options: Dict[str, str] = {label: "..." for label in OPTION_LABELS}
     for idx, m in enumerate(matches):
@@ -1485,9 +1520,9 @@ class ScanExtractor:
         requested = max(256, int(self.max_tokens or 0))
         if self.provider == "hf" and str(model or "").strip() == TRAINED_OCR_VISION_MODEL:
             try:
-                cap = int(str(os.getenv("HF_TRAINED_OCR_MAX_TOKENS", "1500") or "1500").strip())
+                cap = int(str(os.getenv("HF_TRAINED_OCR_MAX_TOKENS", "700") or "700").strip())
             except Exception:
-                cap = 1500
+                cap = 700
             return max(256, min(requested, cap))
         return requested
 
@@ -1495,10 +1530,30 @@ class ScanExtractor:
         if self.provider != "hf" or str(model or "").strip() != TRAINED_OCR_VISION_MODEL:
             return None
         try:
-            max_side = int(str(os.getenv("HF_TRAINED_OCR_IMAGE_MAX_SIDE", "960") or "960").strip())
+            max_side = int(str(os.getenv("HF_TRAINED_OCR_IMAGE_MAX_SIDE", "560") or "560").strip())
         except Exception:
-            max_side = 960
+            max_side = 560
         return max(480, min(1600, max_side))
+
+    def _context_fallback_image_side(self, base_side: int | None) -> int | None:
+        try:
+            configured = int(str(os.getenv("HF_TRAINED_OCR_CONTEXT_FALLBACK_IMAGE_MAX_SIDE", "384") or "384").strip())
+        except Exception:
+            configured = 384
+        fallback = max(320, min(640, configured))
+        if base_side is not None and int(base_side) <= fallback:
+            return 320 if int(base_side) > 320 else None
+        return fallback
+
+    def _context_safe_max_tokens(self, exc: Exception, *, requested: int) -> int | None:
+        available = _available_completion_tokens_from_error(exc)
+        if available is None or available <= 0:
+            return None
+        safe = max(1, available - 8 if available > 16 else available)
+        safe = min(int(requested), int(safe))
+        if safe >= int(requested):
+            return None
+        return safe
 
     def _call_vision_chat(self, client: OpenAI, payload: Dict[str, Any]) -> str:
         resp = client.chat.completions.create(**payload)
@@ -1512,14 +1567,25 @@ class ScanExtractor:
         image_path: Path,
         strict_json: bool | None = None,
         system_prompt: str | None = None,
+        image_max_side_px: int | None = None,
+        max_tokens_override: int | None = None,
+        allow_context_token_retry: bool = True,
     ) -> str:
         model = self._resolve_model()
         client = self._get_openai_client() if self.provider == "openai" else self._get_hf_client(model)
+        resolved_image_max_side = (
+            int(image_max_side_px)
+            if image_max_side_px is not None
+            else self._resolve_image_max_side_for_model(model)
+        )
         img_url = self._encode_image(
             image_path,
-            max_side_px=self._resolve_image_max_side_for_model(model),
+            max_side_px=resolved_image_max_side,
         )
         use_json = self.strict_json if strict_json is None else bool(strict_json)
+        resolved_max_tokens = self._resolve_max_tokens_for_model(model)
+        if max_tokens_override is not None:
+            resolved_max_tokens = max(1, min(resolved_max_tokens, int(max_tokens_override)))
         payload: Dict[str, Any] = {
             "model": model,
             "messages": [
@@ -1534,7 +1600,7 @@ class ScanExtractor:
             ],
             "temperature": self.temperature,
             "top_p": self.top_p,
-            "max_tokens": self._resolve_max_tokens_for_model(model),
+            "max_tokens": resolved_max_tokens,
         }
         if self.seed is not None:
             payload["seed"] = self.seed
@@ -1562,10 +1628,25 @@ class ScanExtractor:
                 try:
                     return self._call_vision_chat(client, fallback)
                 except Exception as retry_exc:
+                    if allow_context_token_retry:
+                        reduced = self._context_safe_max_tokens(
+                            retry_exc,
+                            requested=int(fallback.get("max_tokens") or 0),
+                        )
+                        if reduced is not None:
+                            reduced_payload = dict(fallback)
+                            reduced_payload["max_tokens"] = reduced
+                            return self._call_vision_chat(client, reduced_payload)
                     friendly = self._friendly_hf_runtime_error(retry_exc, model=model)
                     if friendly:
                         raise RuntimeError(friendly) from retry_exc
                     raise
+            if allow_context_token_retry:
+                reduced = self._context_safe_max_tokens(exc, requested=int(payload.get("max_tokens") or 0))
+                if reduced is not None:
+                    reduced_payload = dict(payload)
+                    reduced_payload["max_tokens"] = reduced
+                    return self._call_vision_chat(client, reduced_payload)
             friendly = self._friendly_hf_runtime_error(exc, model=model)
             if friendly:
                 raise RuntimeError(friendly) from exc
@@ -1672,6 +1753,54 @@ class ScanExtractor:
         except Exception:
             items = []
         return (items, raw)
+
+    def extract_raw_from_image(
+        self,
+        *,
+        image_path: Path,
+        curso: str,
+        tema: str,
+        start_n: int,
+    ) -> tuple[List[Dict[str, Any]], str]:
+        if self.provider == "ocr":
+            raw = self._ocr_local(image_path)
+            return (
+                parse_items_from_text(raw, curso=curso, tema=tema, start_n=start_n),
+                raw,
+            )
+
+        model = self._resolve_model()
+        base_side = self._resolve_image_max_side_for_model(model)
+        attempts: list[int | None] = [None]
+        fallback_side = self._context_fallback_image_side(base_side)
+        if fallback_side is not None:
+            attempts.append(fallback_side)
+
+        last_exc: Exception | None = None
+        prompt = build_faithful_ocr_prompt(curso=curso, tema=tema)
+        for side in attempts:
+            try:
+                raw = self._vision_chat(
+                    prompt=prompt,
+                    image_path=image_path,
+                    strict_json=False,
+                    system_prompt=SYSTEM_PROMPT_RAW_OCR,
+                    image_max_side_px=side,
+                    allow_context_token_retry=False,
+                )
+                return (
+                    parse_items_from_text(raw, curso=curso, tema=tema, start_n=start_n),
+                    raw,
+                )
+            except Exception as exc:
+                last_exc = exc
+                if not _is_context_length_error(exc):
+                    raise
+                continue
+
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("No se pudo ejecutar OCR crudo.")
 
     def structure_raw_output(
         self,

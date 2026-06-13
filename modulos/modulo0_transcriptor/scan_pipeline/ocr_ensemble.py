@@ -35,9 +35,15 @@ def _sqrt_is_expected_for_topic(tema: str) -> bool:
 
 DEFAULT_HF_OCR_ENSEMBLE_MODELS: tuple[str, ...] = (
     "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-rules-merged-v4",
+    "zai-org/GLM-4.5V",
+    "Qwen/Qwen2.5-VL-72B-Instruct",
+    "Qwen/Qwen2.5-VL-7B-Instruct",
 )
 MODEL_PREFERENCE: dict[str, int] = {
     "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-rules-merged-v4": 4,
+    "zai-org/GLM-4.5V": 3,
+    "Qwen/Qwen2.5-VL-72B-Instruct": 2,
+    "Qwen/Qwen2.5-VL-7B-Instruct": 1,
 }
 
 _MOJIBAKE_TOKENS = ("Ã", "â", "Ë", "�")

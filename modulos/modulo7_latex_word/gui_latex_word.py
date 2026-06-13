@@ -2814,7 +2814,7 @@ class LatexWordBridgeWindow(tk.Toplevel):
 
     def _resolve_db_preview_structured_images(self, problem: dict[str, object]) -> list[tuple[str, Path]]:
         entries: list[tuple[str, Path]] = []
-        seen_markers: set[str] = set()
+        marker_counts: dict[str, int] = {}
         ruta_carpeta = str(problem.get("ruta_carpeta") or "").strip()
         base_dir = self._normalize_path_lexically(Path(ruta_carpeta)) if ruta_carpeta else None
         candidate_dirs = self._iter_db_preview_image_dirs(problem)
@@ -2850,13 +2850,14 @@ class LatexWordBridgeWindow(tk.Toplevel):
                     except Exception:
                         continue
 
-            marker_name = Path(raw_path).stem.strip()
+            raw_marker_name = Path(raw_path).stem.strip()
+            marker_name = raw_marker_name
             if resolved is None or not marker_name:
                 continue
-            marker_key = marker_name.lower()
-            if marker_key in seen_markers:
-                continue
-            seen_markers.add(marker_key)
+            marker_key = raw_marker_name.lower()
+            marker_counts[marker_key] = marker_counts.get(marker_key, 0) + 1
+            if marker_counts[marker_key] > 1:
+                marker_name = f"{raw_marker_name}_{marker_counts[marker_key]}"
             entries.append((marker_name, resolved))
         return entries
 
@@ -4686,7 +4687,11 @@ class LatexWordBridgeWindow(tk.Toplevel):
                 self._log(f"BD: algunas etiquetas no pudieron resolverse: {', '.join(sorted(missing_markers))}")
             self.images_dir_var.set(str(images_dir))
             return images_dir
-        if any(self._marker_output_exists(images_dir, str(marker or "").strip()) for problema in problemas for marker in self._resolve_db_preview_problem_markers(problema)):
+        if any(
+            self._marker_output_exists(images_dir, str(marker or "").strip())
+            for problema in problemas
+            for marker in self._resolve_db_preview_problem_markers(problema)
+        ):
             self.images_dir_var.set(str(images_dir))
             return images_dir
         return None

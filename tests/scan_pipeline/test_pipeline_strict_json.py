@@ -37,6 +37,68 @@ from modulos.modulo0_transcriptor.scan_pipeline.statement_cleanup import merge_s
 
 
 class StrictJsonPipelineTests(unittest.TestCase):
+    def test_vision_chat_retries_with_context_safe_max_tokens(self) -> None:
+        extractor = ScanExtractor(provider="hf", model="demo", max_tokens=900, strict_json=False)
+        extractor._get_hf_client = lambda _model="": object()  # type: ignore[assignment]
+        extractor._encode_image = lambda *_args, **_kwargs: "data:image/jpeg;base64,AA=="  # type: ignore[assignment]
+        calls = []
+
+        def _call(_client: object, payload: dict) -> str:
+            calls.append(dict(payload))
+            if len(calls) == 1:
+                raise RuntimeError(
+                    "'max_tokens' or 'max_completion_tokens' is too large: 900. "
+                    "This model's maximum context length is 4096 tokens and your request has "
+                    "4045 input tokens (900 > 4096 - 4045)."
+                )
+            return "<1.> Halle x."
+
+        extractor._call_vision_chat = _call  # type: ignore[assignment]
+        raw = extractor._vision_chat(
+            prompt="Transcribe.",
+            image_path=Path("dummy.png"),
+            strict_json=False,
+            allow_context_token_retry=True,
+        )
+        self.assertEqual(raw, "<1.> Halle x.")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1]["max_tokens"], 43)
+
+    def test_extract_raw_from_image_retries_by_reducing_image_only(self) -> None:
+        extractor = ScanExtractor(provider="hf", model="demo", max_tokens=900, strict_json=False)
+        calls = []
+
+        def _vision_chat(**kwargs: object) -> str:
+            calls.append(dict(kwargs))
+            if len(calls) == 1:
+                raise RuntimeError(
+                    "'max_tokens' or 'max_completion_tokens' is too large: 900. "
+                    "This model's maximum context length is 4096 tokens and your request has "
+                    "4045 input tokens (900 > 4096 - 4045)."
+                )
+            return "<1.> Halle x.\nA) $1$\nB) $2$"
+
+        def _no_structure(**_kwargs: object) -> tuple[list[dict], str]:
+            raise AssertionError("extract_raw_from_image must not call structure_raw_output")
+
+        extractor._vision_chat = _vision_chat  # type: ignore[assignment]
+        extractor.structure_raw_output = _no_structure  # type: ignore[assignment]
+
+        items, raw = extractor.extract_raw_from_image(
+            image_path=Path("dummy.png"),
+            curso="SIN_CURSO",
+            tema="SIN_TEMA",
+            start_n=1,
+        )
+
+        self.assertIn("<1.>", raw)
+        self.assertTrue(items)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["prompt"], calls[1]["prompt"])
+        self.assertEqual(calls[0]["system_prompt"], calls[1]["system_prompt"])
+        self.assertNotIn("max_tokens_override", calls[1])
+        self.assertEqual(int(calls[1]["image_max_side_px"]), 384)
+
     def test_extractor_strict_json_repairs_invalid_escape_sequences(self) -> None:
         extractor = ScanExtractor(provider="hf", strict_json=True)
         raw = (

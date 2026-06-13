@@ -5,6 +5,7 @@ import re
 from typing import Any, Dict
 
 from ..domain.image_binding import (
+    IMAGE_BINDING_STATUS_CONFIRMED,
     IMAGE_BINDING_STATUS_NEEDS_REVIEW,
     ImageBinding,
 )
@@ -125,12 +126,22 @@ class ScanItem:
         if not image_binding.marker_name and figure_tag:
             image_binding.marker_name = figure_tag
             image_binding.marker_names = [figure_tag]
+        if has_figure_hint:
+            if not figure_tag:
+                figure_tag = f"img-{max(1, base_n)}"
+            if not image_binding.marker_name:
+                image_binding.marker_name = figure_tag
+            if figure_tag and figure_tag not in image_binding.marker_names:
+                image_binding.marker_names.insert(0, figure_tag)
+            if image_binding.status in {"", "none"}:
+                image_binding.status = IMAGE_BINDING_STATUS_CONFIRMED
+                image_binding.needs_review = False
         if not image_binding.is_confirmed and has_figure_hint:
             image_binding.status = IMAGE_BINDING_STATUS_NEEDS_REVIEW
             image_binding.needs_review = True
             if figure_tag and figure_tag not in image_binding.marker_names:
                 image_binding.marker_names.insert(0, figure_tag)
-        has_figure = image_binding.is_confirmed
+        has_figure = image_binding.is_confirmed or has_figure_hint
         if has_figure and not figure_tag:
             figure_tag = image_binding.marker_name or f"img-{max(1, base_n)}"
         if not has_figure:

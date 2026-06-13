@@ -4,7 +4,7 @@ const STAGES = [
   { id: "crops", title: "Staging", action: "Revisar crops trazables" },
   { id: "ocr", title: "OCR", action: "Leer texto y graficos" },
   { id: "review", title: "Revision", action: "Preparar revision desde OCR" },
-  { id: "candidate", title: "Candidato", action: "Verificar bloqueo de BD" },
+  { id: "candidate", title: "BD final", action: "Subir problemas revisados" },
 ];
 
 const state = {
@@ -25,6 +25,12 @@ const state = {
     loading: false,
     showBookForm: false,
     showInstanceForm: false,
+    editingBookId: "",
+    editingInstanceId: "",
+    coverUploadingBookId: "",
+    coverPasteBusyUntil: 0,
+    pendingBookCoverFile: null,
+    pendingBookCoverPreviewUrl: "",
   },
   stage: "pages",
   pdfPage: 1,
@@ -58,14 +64,19 @@ const state = {
   ocrJobPolling: false,
   normalizerTraining: null,
   taskProgress: null,
+  promotionUploadReport: null,
 };
 
 const $ = (id) => document.getElementById(id);
 const THEME_STORAGE_KEY = "pdfFactoryTheme";
 const FACTORY_UI_STORAGE_PREFIX = "pdfFactoryUiState:v1";
+const STABLE_LIBRARY_URL = "http://127.0.0.1:8765/";
 const BOX_ZOOM_MIN = 0.35;
 const BOX_ZOOM_MAX = 8;
 const BOX_SCALE_MAX = 2;
+const COVER_UPLOAD_TARGET_BYTES = 900000;
+const COVER_UPLOAD_MAX_EDGE = 1200;
+const COVER_UPLOAD_JPEG_QUALITY = 0.86;
 
 const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
 
@@ -96,17 +107,28 @@ function syncThemeToggle() {
 }
 
 async function api(path, options = {}) {
-  const init = { ...options };
+  const { allowRecover = true, ...requestOptions } = options;
+  const init = { ...requestOptions };
+  const method = String(init.method || "GET").toUpperCase();
   const isFormData = typeof FormData !== "undefined" && init.body instanceof FormData;
   if (init.body && typeof init.body !== "string" && !isFormData) {
     init.body = JSON.stringify(init.body);
     init.headers = { "Content-Type": "application/json", ...(init.headers || {}) };
   }
+  const factoryId = currentFactoryInstanceId();
+  if (factoryId && String(path || "").startsWith("/api/") && !String(path || "").startsWith("/api/library/")) {
+    init.headers = { ...(init.headers || {}), "X-Pdf-Factory-Instance-Id": String(factoryId) };
+  }
   let response;
   try {
     response = await fetch(path, init);
   } catch (err) {
-    throw new Error("No se pudo conectar con el servidor local de Fabrica. Cierra esta ventana y vuelve a abrir el acceso directo para reiniciar la Fabrica.");
+    if (allowRecover && method === "GET" && await recoverStableLibraryServer({ forceRedirect: true })) {
+      throw new Error("Reconectando con la Biblioteca activa...");
+    }
+    throw new Error(method === "GET"
+      ? "No pude conectar con esta pestana."
+      : "No pude completar la solicitud. La pantalla se mantiene sin recargar para que puedas intentar otra vez.");
   }
   const text = await response.text();
   let payload = {};
@@ -117,9 +139,80 @@ async function api(path, options = {}) {
   return payload;
 }
 
+async function recoverStableLibraryServer({ forceRedirect = false } = {}) {
+  try {
+    const current = new URL(window.location.href);
+    const stable = new URL(STABLE_LIBRARY_URL);
+    const alreadyStable = current.origin === stable.origin;
+    if (alreadyStable) return false;
+    const response = await fetch(`${STABLE_LIBRARY_URL}api/app/version?t=${Date.now()}`, {
+      cache: "no-store",
+      credentials: "omit",
+      mode: "cors",
+    });
+    if (!response.ok) return false;
+    const payload = await response.json().catch(() => ({}));
+    if (payload?.schema_version !== "pdf_factory_web_app_version_v1") return false;
+    setStatus("Reconectando con la Biblioteca activa...");
+    window.setTimeout(() => {
+      window.location.replace(STABLE_LIBRARY_URL);
+    }, 150);
+    return true;
+  } catch (_) {
+    if (forceRedirect) {
+      try {
+        const current = new URL(window.location.href);
+        const stable = new URL(STABLE_LIBRARY_URL);
+        if (current.origin !== stable.origin) {
+          setStatus("Intentando volver a la Biblioteca activa...");
+          window.setTimeout(() => window.location.replace(STABLE_LIBRARY_URL), 150);
+          return true;
+        }
+      } catch (_) {}
+    }
+    return false;
+  }
+}
+
+function currentFactoryInstanceId() {
+  if (state.view !== "factory" && state.view !== "boot") return "";
+  const instance = state.currentInstance || {};
+  return String(instance.id || instance.instance_id || "").trim();
+}
+
+function factoryInstanceFromUrl() {
+  const params = new URLSearchParams(window.location.search || "");
+  const instanceId = String(params.get("instance_id") || "").trim();
+  if (!instanceId) return null;
+  const bookId = String(params.get("book_id") || "").trim();
+  const dbName = String(params.get("db_name") || "").trim();
+  const title = String(params.get("title") || params.get("instance_title") || "").trim();
+  return {
+    id: instanceId,
+    instance_id: instanceId,
+    title: title || instanceId,
+    db_name: dbName,
+    book_id: bookId,
+    book: bookId ? { id: bookId } : null,
+  };
+}
+
+function stableFactoryUrl(instance, result = {}) {
+  const url = new URL(STABLE_LIBRARY_URL);
+  url.searchParams.set("factory", "1");
+  url.searchParams.set("instance_id", String(instance.id || instance.instance_id || ""));
+  const bookId = instance.book?.id || instance.book_id || result.book_id || "";
+  if (bookId) url.searchParams.set("book_id", String(bookId));
+  const dbName = state.library.selectedDb || result.db_name || instance.db_name || "";
+  if (dbName) url.searchParams.set("db_name", String(dbName));
+  const title = instance.title || result.context?.instance_type || "";
+  if (title) url.searchParams.set("title", title);
+  return url.toString();
+}
+
 function appVersionKey(payload) {
   if (!payload || typeof payload !== "object") return "";
-  return `${String(payload.asset_version || "")}|${String(payload.reload_token || "")}`;
+  return String(payload.asset_version || "");
 }
 
 async function fetchAppVersion() {
@@ -146,39 +239,64 @@ async function checkAppVersionChanged() {
   if (state.appReloading) return;
   try {
     const next = await fetchAppVersion();
+    if (next?.backend_restart_required) {
+      state.appVersion = next;
+      syncAppReloadButton();
+      setStatus("El backend cambio. Reinicia Biblioteca/Fabrica para cargar el codigo Python nuevo.");
+      scheduleAppVersionPoll();
+      return;
+    }
     const previousKey = appVersionKey(state.appVersion);
     const nextKey = appVersionKey(next);
     if (previousKey && nextKey && previousKey !== nextKey) {
-      state.appReloading = true;
-      setStatus("Actualizando interfaz en esta pestaña...");
-      window.setTimeout(() => window.location.reload(), 300);
+      state.appVersion = next;
+      syncAppReloadButton();
+      setStatus("Hay cambios nuevos en la interfaz. Usa Actualizar app cuando quieras recargar esta pestana.");
+      scheduleAppVersionPoll();
       return;
     }
     state.appVersion = next;
   } catch (_) {
-    // No interrumpimos el trabajo si una pestaña pierde conexion unos segundos.
+    // Si una pestana de fabrica vieja pierde su puerto, volvemos a la Biblioteca viva.
+    await recoverStableLibraryServer({ forceRedirect: true });
   }
   scheduleAppVersionPoll();
+}
+
+function markCoverPasteBusy(extraMs = 15000) {
+  state.library.coverPasteBusyUntil = Date.now() + Math.max(0, Number(extraMs || 0));
+}
+
+function isCoverPasteBusy() {
+  return Date.now() < Number(state.library.coverPasteBusyUntil || 0);
 }
 
 function syncAppReloadButton() {
   const btn = $("appReloadBtn");
   if (!btn) return;
   btn.disabled = Boolean(state.appReloading);
-  btn.title = "Recarga la interfaz y avisa a las otras pestañas abiertas.";
+  const restartRequired = Boolean(state.appVersion?.backend_restart_required);
+  btn.textContent = restartRequired ? "Reiniciar servidor" : "Actualizar app";
+  btn.title = restartRequired
+    ? "El codigo Python cambio. Cierra y vuelve a abrir Biblioteca/Fabrica."
+    : "Recarga la interfaz y avisa a las otras pestaÃ±as abiertas.";
 }
 
 async function requestAppReloadAcrossTabs() {
   if (state.appReloading) return;
+  if (state.appVersion?.backend_restart_required) {
+    setStatus("Cierra el servidor de Biblioteca/Fabrica y vuelve a abrirlo para cargar el backend nuevo.");
+    return;
+  }
   state.appReloading = true;
   syncAppReloadButton();
-  setBusy("Actualizando app en todas las pestañas...");
+  setBusy("Actualizando app en todas las pestaÃ±as...");
   try {
     await api("/api/app/reload-signal", { method: "POST", body: {} });
   } catch (err) {
     state.appReloading = false;
     syncAppReloadButton();
-    setStatus(`No pude avisar a las otras pestañas: ${err.message}. Recargando esta pestaña.`);
+    setStatus(`No pude avisar a las otras pestaÃ±as: ${err.message}. Recargando esta pestaÃ±a.`);
   }
   window.setTimeout(() => window.location.reload(), 300);
 }
@@ -341,13 +459,14 @@ async function loadFactorySnapshot() {
   const instance = state.currentInstance || {};
   const id = instance.id || instance.instance_id || instance.code || "";
   if (id) {
+    const query = new URLSearchParams();
+    query.set("instance_id", String(id));
+    const bookId = instance.book?.id || instance.book_id || "";
+    const dbName = state.library.selectedDb || instance.db_name || "";
+    if (bookId) query.set("book_id", String(bookId));
+    if (dbName) query.set("db_name", String(dbName));
     try {
-      return await api(`/api/library/instances/${encodeURIComponent(id)}/bootstrap`);
-    } catch (err) {
-      setStatus(`No encontre bootstrap de biblioteca para la instancia; probando Fabrica directa. ${err.message}`);
-    }
-    try {
-      return await api(`/api/bootstrap?instance_id=${encodeURIComponent(id)}`);
+      return await api(`/api/bootstrap?${query.toString()}`);
     } catch (_) {
       return api("/api/bootstrap");
     }
@@ -408,11 +527,13 @@ function restoreFactoryUiState({ preserveCurrentStage = false } = {}) {
   state.ocrJobId = String(persisted.ocrJobId || state.ocrJobId || "").trim();
   const detectedPages = detectedPageNumbers(pages);
   const persistedPages = sortedPageNumbers(persisted.selectedPages || []).filter((page) => !pageCount || page <= pageCount);
-  const selectedPages = persistedPages.length ? persistedPages : detectedPages;
+  const legacyDefaultPageOne = persistedPages.length === 1
+    && persistedPages[0] === 1
+    && !detectedPages.length
+    && !pages.length
+    && !records.length;
+  const selectedPages = legacyDefaultPageOne ? [] : (persistedPages.length ? persistedPages : detectedPages);
   state.selectedPages = new Set(selectedPages);
-  if (!state.selectedPages.size && pageCount) {
-    state.selectedPages.add(boundPageNumber(persisted.pdfPage || state.pdfPage || 1, pageCount));
-  }
 
   const firstSelectedPage = [...state.selectedPages].sort((a, b) => a - b)[0] || 1;
   state.pdfPage = boundPageNumber(persisted.pdfPage || firstSelectedPage, pageCount || Math.max(1, firstSelectedPage));
@@ -451,7 +572,7 @@ function inferStageFromSnapshot() {
   const ocrDone = Number(summary.ocr_done || 0);
   const segmentsDone = Number(summary.segments_done || 0);
   if (normalizedDone > 0 || records.some((record) => hasObjectData(record.normalized))) return "review";
-  if (ocrDone > 0 || segmentsDone > 0 || records.some((record) => hasObjectData(record.structured_ocr) || hasText(record.raw_ocr) || hasObjectData(record.figure_segmentation))) return "ocr";
+  if (ocrDone > 0 || segmentsDone > 0 || records.some((record) => hasText(record.raw_ocr) || hasObjectData(record.figure_segmentation))) return "ocr";
   if (recordsTotal > 0) return "crops";
   if (pages.length || Number(summary.pages_total || 0) > 0) return "boxes";
   return "pages";
@@ -503,7 +624,7 @@ function shouldPreferOcrOverReview(stage) {
   const ocrDone = Number(summary.ocr_done || 0);
   const ready = Number(summary.ready || 0);
   const errors = Number(summary.errors || 0);
-  const hasOcrData = ocrDone > 0 || records.some((record) => hasText(record.raw_ocr) || hasObjectData(record.structured_ocr));
+  const hasOcrData = ocrDone > 0 || records.some((record) => hasText(record.raw_ocr));
   if (!hasOcrData) return false;
   return errors > 0 || ready === 0 || ocrDone < recordsTotal;
 }
@@ -537,7 +658,6 @@ function recordCanRunOcr(record) {
 function recordHasOcrOutput(record) {
   return Boolean(record && (
     hasText(record.raw_ocr)
-    || hasObjectData(record.structured_ocr)
     || hasObjectData(record.figure_segmentation)
   ));
 }
@@ -804,23 +924,35 @@ function normalizeLibraryBooks(payload) {
   const rawBooks = Array.isArray(payload) ? payload : (payload.books || payload.items || []);
   return rawBooks.map((book, index) => {
     const id = String(book.id || book.book_id || book.code || book.book_code || `book_${index + 1}`);
-    const instances = naturalSortInstances((book.instances || book.instance_list || []).map((instance, instanceIndex) => ({
-      ...instance,
-      id: String(instance.id || instance.instance_id || instance.code || `${id}_instance_${instanceIndex + 1}`),
-      title: instance.title || instance.name || instance.tipo || instance.instance_type || `Instancia ${instanceIndex + 1}`,
-      status: normalizeStatus(instance.status || instance.review_status || inferInstanceStatus(instance)),
-      summary: instance.summary || instance.metrics || instance.indicators || {},
-    })));
+    const instances = naturalSortInstances((book.instances || book.instance_list || []).map((instance, instanceIndex) => {
+      const normalized = {
+        ...instance,
+        id: String(instance.id || instance.instance_id || instance.code || `${id}_instance_${instanceIndex + 1}`),
+        title: instance.title || instance.name || instance.tipo || instance.instance_type || `Instancia ${instanceIndex + 1}`,
+        summary: instance.summary || instance.metrics || instance.indicators || {},
+      };
+      normalized.status = instanceWorkflowStatus(normalized);
+      return normalized;
+    }));
+    const normalizedBook = { ...book, id, instances };
     return {
-      ...book,
+      ...normalizedBook,
       id,
       title: book.title || book.titulo || book.name || book.nombre || id,
       code: book.code || book.codigo || book.book_code || id,
       author: book.author || book.autor || "",
+      editorial: book.editorial || "",
+      edition: book.edition || book.edicion || "",
       subject: book.subject || book.curso || "",
       pdfName: book.pdf_name || book.pdfName || book.filename || "",
+      pdfPath: book.pdf_path || book.pdfPath || "",
+      workspaceDir: book.workspace_dir || book.workspaceDir || "",
       coverPath: book.cover_path || book.coverPath || "",
       coverUrl: book.cover_url || book.coverUrl || "",
+      notes: book.notes || book.notas || "",
+      status: normalizeStatus(book.status || book.estado || "pendiente"),
+      active: book.active ?? book.activo ?? true,
+      indicators: normalizeBookIndicators(normalizedBook),
       instances,
     };
   });
@@ -846,6 +978,7 @@ async function loadBookDetail(bookId) {
     const normalized = normalizeLibraryBooks({ books: [{ ...book, instances: detail.instances || [] }] })[0];
     book.instances = normalized.instances || [];
     book.dashboard = detail.dashboard || {};
+    book.indicators = normalizeBookIndicators({ ...book, dashboard: detail.dashboard || {}, instances: book.instances });
   }
   if (state.view === "library") {
     ensureLibrarySelection();
@@ -903,10 +1036,9 @@ function renderLibraryFilters() {
       <div class="filter-stack" aria-label="Filtros por estado">
         ${[
           ["all", "Todos", counts.instances],
-          ["pendiente", "Pendientes", counts.pendiente],
+          ["vacia", "Vacias", counts.vacia],
           ["procesando", "En progreso", counts.procesando],
-          ["requiere_revision", "Por revisar", counts.requiere_revision],
-          ["listo", "Revisadas", counts.listo],
+          ["llena", "Llenas", counts.llena],
         ].map(([value, label, total]) => `
           <button class="filter-chip ${state.library.status === value ? "active" : ""}" data-library-status="${value}" type="button">
             <span>${label}</span><strong>${total}</strong>
@@ -935,7 +1067,7 @@ function renderLibraryBooksStage() {
       </div>
       <button id="showBookFormBtn" class="secondary" type="button">Registrar libro</button>
     </div>
-    ${state.library.showBookForm ? renderBookForm() : ""}
+    ${state.library.showBookForm ? renderBookForm(libraryEditingBook()) : ""}
     <div class="library-books-page">
       <section class="library-books library-books-grid" aria-label="Libros disponibles">
         ${books.length ? books.map(bookCardHtml).join("") : renderLibraryEmptyState()}
@@ -957,71 +1089,104 @@ function renderLibraryBookStage() {
         <h2>Instancias del libro</h2>
         <p class="muted">Revisa el avance por tramo y abre la Fabrica PDF solo para la instancia que quieras trabajar.</p>
       </div>
-      <button id="createInstanceBtn" class="secondary" type="button">Crear instancia</button>
+      <div class="stage-actions">
+        <button id="editSelectedBookBtn" type="button">Editar libro</button>
+        <button id="createInstanceBtn" class="secondary" type="button">Crear instancia</button>
+      </div>
     </div>
-    ${state.library.showInstanceForm ? renderInstanceForm(selected) : ""}
+    ${state.library.showBookForm ? renderBookForm(libraryEditingBook() || selected) : ""}
+    ${state.library.showInstanceForm ? renderInstanceForm(selected, libraryEditingInstance(selected)) : ""}
     <section class="library-detail library-detail-page" aria-label="Detalle de instancias">
       ${renderBookDetail(selected)}
     </section>
   `;
 }
 
-function renderBookForm() {
+function renderBookForm(book = null) {
+  const editing = Boolean(book?.id);
+  const status = normalizeStatus(book?.status || book?.estado || "pendiente");
   return `
-    <form id="bookForm" class="panel form-grid library-form">
-      ${field("bookCode", "Codigo", "")}
-      ${field("bookTitle", "Titulo", "")}
-      ${field("bookAuthor", "Autor", "")}
-      ${field("bookEditorial", "Editorial", "")}
-      ${field("bookEdition", "Edicion", "")}
-      ${field("bookSubject", "Curso/area", "")}
-      <label class="wide"><span class="muted">Ruta del PDF</span><input id="bookPdfPath" placeholder="E:\\Libros\\algebra.pdf" /></label>
-      <label class="wide"><span class="muted">Carpeta de trabajo</span><input id="bookWorkspace" placeholder="Opcional; si queda vacia se genera automaticamente" /></label>
-      <label class="wide"><span class="muted">Portada o imagen</span><input id="bookCover" placeholder="Opcional" /></label>
+    <form id="bookForm" class="panel form-grid library-form" onsubmit="if (window.submitBookForm) window.submitBookForm(event); return false;">
+      <div class="form-heading wide">
+        <strong>${editing ? "Editar informacion del libro" : "Registrar libro"}</strong>
+        <span class="muted">${editing ? "Actualiza metadata, rutas y portada sin tocar sus instancias." : "Agrega un libro nuevo a la Biblioteca local."}</span>
+      </div>
+      ${field("bookCode", "Codigo", book?.code || book?.codigo || "")}
+      ${field("bookTitle", "Titulo", book?.title || book?.titulo || "")}
+      ${field("bookAuthor", "Autor", book?.author || book?.autor || "")}
+      ${field("bookEditorial", "Editorial", book?.editorial || "")}
+      ${field("bookEdition", "Edicion", book?.edition || book?.edicion || "")}
+      ${field("bookSubject", "Curso/area", book?.subject || book?.curso || "")}
+      <label><span class="muted">Estado</span><select id="bookStatus">
+        <option value="pendiente" ${status === "pendiente" ? "selected" : ""}>Pendiente</option>
+        <option value="en_progreso" ${status === "procesando" || status === "en_progreso" ? "selected" : ""}>En progreso</option>
+        <option value="completo" ${status === "listo" || status === "completo" ? "selected" : ""}>Completo</option>
+      </select></label>
+      <label class="check-field"><input id="bookActive" type="checkbox" ${(book?.active ?? book?.activo ?? true) ? "checked" : ""} /><span>Activo</span></label>
+      <label class="wide"><span class="muted">Ruta del PDF</span><input id="bookPdfPath" value="${escapeAttr(book?.pdfPath || book?.pdf_path || "")}" placeholder="E:\\Libros\\algebra.pdf" /></label>
+      <label class="wide"><span class="muted">Carpeta de trabajo</span><input id="bookWorkspace" value="${escapeAttr(book?.workspaceDir || book?.workspace_dir || "")}" placeholder="Opcional; si queda vacia se genera automaticamente" /></label>
+      <label class="wide cover-paste-field">
+        <span class="muted">Portada o imagen</span>
+        <input id="bookCover" value="${escapeAttr(book?.coverPath || book?.cover_path || "")}" placeholder="Se guardara una copia interna" readonly />
+        <input id="bookCoverFile" class="cover-file-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" />
+        <small id="bookCoverHint" class="muted">Elige una imagen y al guardar se copiara al almacen central de portadas.</small>
+        <span id="bookCoverPreview" class="cover-paste-preview" aria-live="polite">${book?.coverUrl ? `<img src="${escapeAttr(book.coverUrl)}" alt="" /><span>Portada actual</span>` : ""}</span>
+      </label>
+      <label class="wide"><span class="muted">Notas</span><textarea id="bookNotes" rows="3" placeholder="Observaciones del libro">${escapeHtml(book?.notes || book?.notas || "")}</textarea></label>
       <div class="form-actions wide">
         <button type="button" id="cancelBookForm">Cancelar</button>
-        <button type="submit" class="primary">Guardar libro</button>
+        <button type="submit" class="primary">${editing ? "Guardar cambios" : "Guardar libro"}</button>
       </div>
     </form>
   `;
 }
 
-function renderInstanceForm(book) {
+function renderInstanceForm(book, instance = null) {
+  const editing = Boolean(instance?.id);
+  const defaultName = book ? `${book.code} - instancia ${(book.instances || []).length + 1}` : "";
+  const name = instance?.title || instance?.name || instance?.tipo || instance?.instance_type || defaultName;
+  const expected = instance?.total_esperado || instance?.expected_total || instance?.summary?.total_esperado || "";
+  const notes = instance?.notes || instance?.notas || "";
+  const active = instance?.active ?? instance?.activo ?? true;
   return `
-    <form id="instanceForm" class="panel form-grid library-form">
-      <label><span class="muted">Tipo</span><select id="instanceType">
-        <option value="capitulo">Capitulo</option>
-        <option value="rango">Rango de paginas</option>
-        <option value="evaluacion">Evaluacion</option>
-        <option value="personalizada">Personalizada</option>
-      </select></label>
-      ${field("instanceName", "Nombre", book ? `${book.code} - instancia ${(book.instances || []).length + 1}` : "")}
-      ${field("instancePages", "Paginas", "")}
-      ${field("instanceNotes", "Notas", "")}
+    <form id="instanceForm" class="panel form-grid library-form" onsubmit="if (window.submitInstanceForm) window.submitInstanceForm(event); return false;">
+      <div class="form-heading wide">
+        <strong>${editing ? "Editar instancia" : "Crear instancia"}</strong>
+        <span class="muted">${editing ? "Cambia el nombre visible de la instancia sin tocar los problemas ya guardados." : "Crea un tramo de trabajo para este libro."}</span>
+      </div>
+      ${field("instanceName", "Nombre", name)}
+      ${field("instanceExpected", "Meta opcional", expected)}
+      <label class="check-field"><input id="instanceActive" type="checkbox" ${active ? "checked" : ""} /><span>Activa</span></label>
+      <label class="wide"><span class="muted">Notas</span><textarea id="instanceNotes" rows="3">${escapeHtml(notes)}</textarea></label>
       <div class="form-actions wide">
         <button type="button" id="cancelInstanceForm">Cancelar</button>
-        <button type="submit" class="primary">Crear instancia</button>
+        <button type="submit" class="primary">${editing ? "Guardar instancia" : "Crear instancia"}</button>
       </div>
     </form>
   `;
 }
 
 function bookCardHtml(book) {
-  const counts = statusCounts(book.instances || []);
+  const progress = bookProgressIndicators(book);
+  const visual = bookVisualStatus(book);
   const isActive = book.id === state.library.selectedBookId;
+  const isUploadingCover = String(book.id || "") === String(state.library.coverUploadingBookId || "");
   return `
-    <button class="book-card ${isActive ? "active" : ""}" data-book="${book.id}" type="button">
+    <button class="book-card book-state-${visual} ${isActive ? "active" : ""} ${isUploadingCover ? "cover-uploading" : ""}" data-book="${book.id}" type="button">
       ${bookCoverHtml(book)}
       <span class="book-main">
         <strong>${escapeHtml(book.title)}</strong>
         <span>${escapeHtml([book.code, book.author, book.subject].filter(Boolean).join(" | ") || "Sin metadatos")}</span>
       </span>
       <span class="book-stats">
-        ${miniStat("Pend.", counts.pendiente)}
-        ${miniStat("Prog.", counts.procesando)}
-        ${miniStat("Rev.", counts.listo)}
+        ${miniStat("Inst.", progress.total)}
+        ${miniStat("En BD", progress.inDb)}
+        ${miniStat("Faltan", progress.missing)}
       </span>
-      <span class="book-card-action">Ver instancias</span>
+      <span class="book-card-footer">
+        <span class="book-state-label">${escapeHtml(displayBookVisualStatus(visual))}</span>
+        <span class="book-card-action">Ver instancias</span>
+      </span>
     </button>
   `;
 }
@@ -1030,7 +1195,7 @@ function bookCoverHtml(book, variant = "") {
   const url = String(book.coverUrl || "").trim();
   const label = bookCoverLabel(book);
   return `
-    <span class="book-cover ${variant ? `book-cover-${variant}` : ""} ${url ? "has-image" : ""}">
+    <span class="book-cover ${variant ? `book-cover-${variant}` : ""} ${url ? "has-image" : ""}" data-book-cover="${escapeAttr(book.id || "")}">
       ${url ? `<img src="${escapeAttr(url)}" alt="" loading="lazy" decoding="async" />` : `<span>${escapeHtml(label)}</span>`}
     </span>
   `;
@@ -1068,11 +1233,11 @@ function renderBookDetail(book) {
 }
 
 function instanceCardHtml(instance) {
-  const status = normalizeStatus(instance.status || "pendiente");
+  const status = instanceWorkflowStatus(instance);
+  const info = instanceWorkflowInfo(instance);
   const isActive = instance.id === state.library.selectedInstanceId;
-  const totals = instance.summary || instance.metrics || {};
   return `
-    <article class="instance-card ${isActive ? "active" : ""}" data-instance="${instance.id}">
+    <article class="instance-card instance-state-${status} ${isActive ? "active" : ""}" data-instance="${instance.id}">
       <button class="instance-select" data-instance-select="${instance.id}" type="button">
         <span>
           <strong>${escapeHtml(instance.title)}</strong>
@@ -1080,20 +1245,16 @@ function instanceCardHtml(instance) {
         </span>
         <span class="status-pill status-${status}">${displayStatus(status)}</span>
       </button>
-      <div class="instance-progress" aria-label="Indicadores de avance">
-        ${progressMetric("Escaneados", totals.escaneados_sesion || totals.total || totals.pages_total || totals.pages || 0)}
-        ${progressMetric("Meta", totals.total_esperado || totals.boxes_total || totals.boxes || 0)}
-        ${progressMetric("Revisadas", totals.consistentes || totals.ready || totals.reviewed || 0)}
+      <div class="instance-state-summary">
+        <strong>${escapeHtml(info.title)}</strong>
+        <span>${escapeHtml(info.detail)}</span>
       </div>
       <div class="instance-actions">
+        <button data-edit-instance="${escapeAttr(instance.id)}" type="button">Editar</button>
         <button data-open-factory="${instance.id}" class="primary" type="button">Abrir Fabrica</button>
       </div>
     </article>
   `;
-}
-
-function progressMetric(label, value) {
-  return `<span><b>${Number(value || 0)}</b>${label}</span>`;
 }
 
 function renderLibraryInspector() {
@@ -1106,8 +1267,8 @@ function renderLibraryInspector() {
       <div class="metrics">
         <div class="metric"><span class="metric-label">Libros</span><strong>${counts.books}</strong></div>
         <div class="metric"><span class="metric-label">Instancias</span><strong>${counts.instances}</strong></div>
-        <div class="metric"><span class="metric-label">Pendientes</span><strong>${counts.pendiente}</strong></div>
-        <div class="metric"><span class="metric-label">Revisadas</span><strong>${counts.listo}</strong></div>
+        <div class="metric"><span class="metric-label">Vacias</span><strong>${counts.vacia}</strong></div>
+        <div class="metric"><span class="metric-label">Llenas</span><strong>${counts.llena}</strong></div>
       </div>
     </div>
     <div class="panel">
@@ -1119,7 +1280,8 @@ function renderLibraryInspector() {
           <div class="inspector-line"><strong>Vista</strong><span>${state.library.screen === "book" ? "Instancias" : "Libros"}</span></div>
           ${state.library.screen === "book" ? `
             <div class="inspector-line"><strong>Instancia</strong><span>${escapeHtml(instance?.title || "Sin instancia seleccionada")}</span></div>
-            <div class="inspector-line"><strong>Estado</strong><span>${escapeHtml(instance ? displayStatus(normalizeStatus(instance.status)) : "-")}</span></div>
+            <div class="inspector-line"><strong>Estado</strong><span>${escapeHtml(instance ? displayStatus(instanceWorkflowStatus(instance)) : "-")}</span></div>
+            ${instance ? `<div class="inspector-line"><strong>Detalle</strong><span>${escapeHtml(instanceWorkflowInfo(instance).detail)}</span></div>` : ""}
           ` : ""}
         ` : `<span class="muted">Sin libro seleccionado.</span>`}
       </div>
@@ -1165,23 +1327,29 @@ function bindLibrarySidebarEvents() {
       renderLibrary();
     };
   });
-  $("newBookBtn").onclick = () => {
+  if ($("newBookBtn")) $("newBookBtn").onclick = () => {
+    clearPendingBookCoverFile();
     state.library.screen = "books";
     state.library.showBookForm = true;
     state.library.showInstanceForm = false;
+    state.library.editingBookId = "";
     renderLibraryContent();
   };
-  $("openFactoryDirectBtn").onclick = () => openFactoryForInstance("");
+  if ($("openFactoryDirectBtn")) $("openFactoryDirectBtn").onclick = () => openFactoryForInstance("");
 }
 
 function bindLibraryContentEvents() {
   document.querySelectorAll("[data-book]").forEach((btn) => {
     btn.onclick = () => {
+      clearPendingBookCoverFile();
       state.library.selectedBookId = btn.dataset.book;
       const nextBook = selectedLibraryBook();
       state.library.selectedInstanceId = filteredInstances(nextBook?.instances || [])[0]?.id || nextBook?.instances?.[0]?.id || "";
       state.library.screen = "book";
       state.library.showBookForm = false;
+      state.library.showInstanceForm = false;
+      state.library.editingBookId = "";
+      state.library.editingInstanceId = "";
       renderLibraryContent();
       queueBookDetailLoad(state.library.selectedBookId);
     };
@@ -1195,27 +1363,66 @@ function bindLibraryContentEvents() {
   document.querySelectorAll("[data-open-factory]").forEach((btn) => {
     btn.onclick = () => openFactoryForInstance(btn.dataset.openFactory);
   });
+  document.querySelectorAll("[data-edit-instance]").forEach((btn) => {
+    btn.onclick = () => {
+      const id = String(btn.dataset.editInstance || "");
+      if (!id) return;
+      state.library.selectedInstanceId = id;
+      state.library.showInstanceForm = true;
+      state.library.showBookForm = false;
+      state.library.editingBookId = "";
+      state.library.editingInstanceId = id;
+      renderLibraryContent();
+    };
+  });
   if ($("showBookFormBtn")) $("showBookFormBtn").onclick = () => {
+    clearPendingBookCoverFile();
     state.library.screen = "books";
     state.library.showBookForm = true;
     state.library.showInstanceForm = false;
+    state.library.editingBookId = "";
+    state.library.editingInstanceId = "";
     renderLibraryContent();
   };
   if ($("backToBooksBtn")) $("backToBooksBtn").onclick = () => {
     state.library.screen = "books";
+    state.library.showBookForm = false;
     state.library.showInstanceForm = false;
+    state.library.editingBookId = "";
+    state.library.editingInstanceId = "";
     renderLibraryContent();
   };
   if ($("createInstanceBtn")) $("createInstanceBtn").onclick = () => {
     state.library.screen = "book";
     state.library.showInstanceForm = true;
     state.library.showBookForm = false;
+    state.library.editingBookId = "";
+    state.library.editingInstanceId = "";
     renderLibraryContent();
   };
-  $("bookForm")?.addEventListener("submit", submitBookForm);
-  $("instanceForm")?.addEventListener("submit", submitInstanceForm);
-  if ($("cancelBookForm")) $("cancelBookForm").onclick = () => { state.library.showBookForm = false; renderLibraryContent(); };
-  if ($("cancelInstanceForm")) $("cancelInstanceForm").onclick = () => { state.library.showInstanceForm = false; renderLibraryContent(); };
+  if ($("editSelectedBookBtn")) $("editSelectedBookBtn").onclick = () => {
+    const book = selectedLibraryBook();
+    if (!book) return setStatus("Selecciona un libro para editar.");
+    clearPendingBookCoverFile();
+    state.library.screen = "book";
+    state.library.showBookForm = true;
+    state.library.showInstanceForm = false;
+    state.library.editingBookId = String(book.id || "");
+    state.library.editingInstanceId = "";
+    renderLibraryContent();
+  };
+  bindBookCoverFilePicker();
+  if ($("cancelBookForm")) $("cancelBookForm").onclick = () => {
+    clearPendingBookCoverFile();
+    state.library.showBookForm = false;
+    state.library.editingBookId = "";
+    renderLibraryContent();
+  };
+  if ($("cancelInstanceForm")) $("cancelInstanceForm").onclick = () => {
+    state.library.showInstanceForm = false;
+    state.library.editingInstanceId = "";
+    renderLibraryContent();
+  };
 }
 
 function syncLibraryBottomAction() {
@@ -1230,59 +1437,348 @@ function syncLibraryBottomAction() {
     else if (book) {
       state.library.screen = "book";
       state.library.showBookForm = false;
+      state.library.editingBookId = "";
       renderLibraryContent();
       queueBookDetailLoad(book.id);
     }
     else {
       state.library.showBookForm = true;
+      state.library.editingBookId = "";
       renderLibraryContent();
     }
   };
 }
 
+function bindBookCoverFilePicker() {
+  const formInput = $("bookCoverFile");
+  if (formInput) {
+    formInput.onchange = (event) => {
+      const file = selectedImageFile(event.target.files);
+      event.target.value = "";
+      if (!file) return setStatus("Selecciona una imagen valida para la portada.");
+      stageBookCoverFile(file);
+    };
+  }
+}
+
+function selectedImageFile(files) {
+  return Array.from(files || []).find(isImageLikeFile) || null;
+}
+
+function isImageLikeFile(file) {
+  if (!file) return false;
+  if (String(file.type || "").startsWith("image/")) return true;
+  return /\.(png|jpe?g|webp|gif|bmp)$/i.test(String(file.name || ""));
+}
+
+function stageBookCoverFile(file) {
+  const hint = $("bookCoverHint");
+  const preview = $("bookCoverPreview");
+  clearPendingBookCoverFile();
+  state.library.pendingBookCoverFile = file;
+  state.library.pendingBookCoverPreviewUrl = URL.createObjectURL(file);
+  if (preview) {
+    preview.innerHTML = `
+      <img src="${escapeAttr(state.library.pendingBookCoverPreviewUrl)}" alt="" />
+      <span>Portada lista para guardar</span>
+    `;
+  }
+  if (hint) hint.textContent = "Portada preparada. Presiona Guardar cambios para asociarla al libro.";
+  setStatus("Portada preparada; aun no se recargo ni guardo la biblioteca.");
+}
+
+function clearPendingBookCoverFile() {
+  if (state.library.pendingBookCoverPreviewUrl) {
+    try { URL.revokeObjectURL(state.library.pendingBookCoverPreviewUrl); } catch (_) {}
+  }
+  state.library.pendingBookCoverFile = null;
+  state.library.pendingBookCoverPreviewUrl = "";
+}
+
+async function uploadBookCoverFile(file, formPayload) {
+  markCoverPasteBusy(30000);
+  setStatus("Guardando archivo de portada...");
+  const prepared = await prepareCoverUpload(file);
+  return api("/api/library/cover/paste", {
+    method: "POST",
+    allowRecover: false,
+    body: {
+      db_name: formPayload.db_name || state.library.selectedDb || "",
+      data_url: prepared.dataUrl,
+      mime: prepared.mime || file.type || "",
+      file_name: file.name || "",
+      book_id: state.library.editingBookId || "",
+      attach: false,
+      code: formPayload.code || "",
+      title: formPayload.title || "",
+      pdf_path: formPayload.pdf_path || "",
+      workspace_dir: formPayload.workspace_dir || "",
+    },
+  });
+}
+
+function updateLibraryBookCoverDom(bookId, coverUrl, fallbackLabel = "LB") {
+  const id = String(bookId || "");
+  if (!id) return;
+  document.querySelectorAll("[data-book-cover]").forEach((node) => {
+    if (String(node.dataset.bookCover || "") !== id) return;
+    const url = String(coverUrl || "").trim();
+    node.classList.toggle("has-image", Boolean(url));
+    node.innerHTML = url
+      ? `<img src="${escapeAttr(url)}" alt="" loading="lazy" decoding="async" />`
+      : `<span>${escapeHtml(fallbackLabel)}</span>`;
+  });
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("No se pudo leer la imagen seleccionada."));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function prepareCoverUpload(file) {
+  const original = await readFileAsDataUrl(file);
+  const originalMime = dataUrlMime(original) || file.type || "";
+  if (original.length <= COVER_UPLOAD_TARGET_BYTES && !shouldRasterizeCover(file)) {
+    return { dataUrl: original, mime: originalMime };
+  }
+  try {
+    const compact = await compactCoverDataUrl(original);
+    return { dataUrl: compact, mime: dataUrlMime(compact) || "image/jpeg" };
+  } catch (_) {
+    return { dataUrl: original, mime: originalMime };
+  }
+}
+
+function shouldRasterizeCover(file) {
+  const name = String(file?.name || "");
+  const type = String(file?.type || "").toLowerCase();
+  return /\.(bmp|gif)$/i.test(name) || ["image/bmp", "image/gif"].includes(type);
+}
+
+function dataUrlMime(dataUrl) {
+  const match = /^data:([^;,]+)[;,]/i.exec(String(dataUrl || ""));
+  return match ? match[1].toLowerCase() : "";
+}
+
+function loadImageFromDataUrl(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("No se pudo preparar la portada."));
+    image.src = dataUrl;
+  });
+}
+
+async function compactCoverDataUrl(dataUrl) {
+  const image = await loadImageFromDataUrl(dataUrl);
+  const width = Math.max(1, Number(image.naturalWidth || image.width || 1));
+  const height = Math.max(1, Number(image.naturalHeight || image.height || 1));
+  let best = String(dataUrl || "");
+  for (const maxEdge of [COVER_UPLOAD_MAX_EDGE, 1000, 820, 680]) {
+    const scale = Math.min(1, maxEdge / Math.max(width, height));
+    const targetWidth = Math.max(1, Math.round(width * scale));
+    const targetHeight = Math.max(1, Math.round(height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("No se pudo preparar la portada.");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, targetWidth, targetHeight);
+    ctx.drawImage(image, 0, 0, targetWidth, targetHeight);
+    for (const quality of [COVER_UPLOAD_JPEG_QUALITY, 0.76, 0.66]) {
+      const candidate = canvas.toDataURL("image/jpeg", quality);
+      if (!best || candidate.length < best.length) best = candidate;
+      if (candidate.length <= COVER_UPLOAD_TARGET_BYTES) return candidate;
+    }
+  }
+  return best;
+}
+
+function upsertLibraryBook(bookPayload, { dashboard = null, instances = null } = {}) {
+  const raw = bookPayload && typeof bookPayload === "object" ? bookPayload : {};
+  const id = String(raw.id || raw.book_id || raw.libro_id || "");
+  if (!id) return null;
+  const index = (state.library.books || []).findIndex((row) => String(row.id) === id);
+  const previous = index >= 0 ? state.library.books[index] : {};
+  const detail = state.library.details[id] || {};
+  const nextInstances = Array.isArray(instances)
+    ? instances
+    : (Array.isArray(raw.instances) ? raw.instances : (previous.instances || detail.instances || []));
+  const normalized = normalizeLibraryBooks({ books: [{ ...previous, ...raw, instances: nextInstances }] })[0];
+  const nextDashboard = dashboard || raw.dashboard || previous.dashboard || detail.dashboard || {};
+  const nextBook = {
+    ...previous,
+    ...normalized,
+    dashboard: nextDashboard,
+  };
+  nextBook.indicators = normalizeBookIndicators({ ...nextBook, dashboard: nextDashboard, instances: nextBook.instances || [] });
+  if (index >= 0) state.library.books.splice(index, 1, nextBook);
+  else state.library.books.unshift(nextBook);
+  if (detail.loaded) {
+    state.library.details[id] = {
+      ...detail,
+      book: { ...(detail.book || {}), ...raw, ...nextBook },
+      instances: nextBook.instances || [],
+      dashboard: nextDashboard,
+      loaded: true,
+      loading: false,
+    };
+  }
+  return nextBook;
+}
+
+function applyBookMutationToLibrary(result, { editing = false } = {}) {
+  const bookPayload = result?.book || result;
+  const book = upsertLibraryBook(bookPayload, { dashboard: result?.dashboard, instances: result?.instances });
+  if (!book) return null;
+  state.library.selectedBookId = String(book.id || "");
+  if (!editing) state.library.selectedInstanceId = book.instances?.[0]?.id || "";
+  updateLibraryBookCoverDom(book.id, book.coverUrl || book.cover_url || "", bookCoverLabel(book));
+  return book;
+}
+
+function syncBookFormAfterSave(book) {
+  const coverPath = String(book?.coverPath || book?.cover_path || "");
+  const coverUrl = String(book?.coverUrl || book?.cover_url || "");
+  const coverInput = $("bookCover");
+  const preview = $("bookCoverPreview");
+  const hint = $("bookCoverHint");
+  if (coverInput) coverInput.value = coverPath;
+  if (preview) {
+    preview.innerHTML = coverUrl
+      ? `<img src="${escapeAttr(coverUrl)}" alt="" /><span>Portada guardada</span>`
+      : (coverPath ? `<span>Portada guardada</span>` : "");
+  }
+  if (hint) hint.textContent = "Cambios guardados. Puedes seguir editando sin recargar la Biblioteca.";
+}
+
+function upsertLibraryInstance(book, instancePayload) {
+  if (!book || !instancePayload) return [];
+  const id = String(instancePayload.id || instancePayload.instance_id || "");
+  const rows = [...(book.instances || [])];
+  const index = rows.findIndex((row) => String(row.id) === id);
+  const previous = index >= 0 ? rows[index] : {};
+  const merged = { ...previous, ...instancePayload };
+  if (index >= 0) rows.splice(index, 1, merged);
+  else rows.push(merged);
+  return naturalSortInstances(rows);
+}
+
+function applyInstanceMutationToLibrary(result, { bookId = "", editing = false } = {}) {
+  const id = String(result?.book_id || result?.book?.id || bookId || "");
+  const previous = (state.library.books || []).find((row) => String(row.id) === id);
+  if (!previous) return;
+  const instances = Array.isArray(result?.instances)
+    ? result.instances
+    : upsertLibraryInstance(previous, result?.instance);
+  const book = upsertLibraryBook(result?.book || previous, {
+    dashboard: result?.dashboard || previous.dashboard || {},
+    instances,
+  });
+  if (!book) return;
+  state.library.selectedBookId = String(book.id || "");
+  state.library.selectedInstanceId = String(result?.instance_id || result?.instance?.id || state.library.selectedInstanceId || "");
+  if (!state.library.selectedInstanceId && book.instances?.length) {
+    state.library.selectedInstanceId = String(book.instances[0].id || "");
+  }
+  if (editing && !book.instances.some((row) => String(row.id) === String(state.library.selectedInstanceId))) {
+    state.library.selectedInstanceId = String(book.instances[0]?.id || "");
+  }
+}
+
 async function submitBookForm(event) {
   event.preventDefault();
-  await runAction("Registrando libro...", async () => {
-    await api("/api/library/books", {
+  const editingId = String(state.library.editingBookId || "").trim();
+  const editing = Boolean(editingId);
+  await runAction(editing ? "Guardando cambios del libro..." : "Registrando libro...", async () => {
+    const payload = bookFormPayload();
+    if (state.library.pendingBookCoverFile) {
+      const upload = await uploadBookCoverFile(state.library.pendingBookCoverFile, payload);
+      payload.cover_path = upload.cover_path || payload.cover_path || "";
+    }
+    const endpoint = editing ? `/api/library/books/${encodeURIComponent(editingId)}` : "/api/library/books";
+    const result = await api(endpoint, {
       method: "POST",
-      body: {
-        db_name: state.library.selectedDb || "",
-        title: $("bookTitle").value.trim(),
-        code: $("bookCode").value.trim(),
-        author: $("bookAuthor").value.trim(),
-        editorial: $("bookEditorial").value.trim(),
-        edition: $("bookEdition").value.trim(),
-        subject: $("bookSubject").value.trim(),
-        pdf_path: $("bookPdfPath").value.trim(),
-        workspace_dir: $("bookWorkspace").value.trim(),
-        cover_path: $("bookCover").value.trim(),
-      },
+      body: payload,
     });
+    const book = applyBookMutationToLibrary(result, { editing });
+    clearPendingBookCoverFile();
+    if (editing) {
+      state.library.showBookForm = true;
+      state.library.editingBookId = String(book?.id || editingId);
+      syncBookFormAfterSave(book);
+      return "Libro actualizado sin recargar Biblioteca.";
+    }
     state.library.showBookForm = false;
+    state.library.editingBookId = "";
     state.library.screen = "books";
-    await loadLibrary("Libro registrado.");
-  }, "Libro registrado.");
+    ensureLibrarySelection();
+    renderLibraryContent();
+    queueBookDetailLoad(state.library.selectedBookId);
+  }, editing ? "Libro actualizado." : "Libro registrado.");
+}
+
+function bookFormPayload() {
+  return {
+    db_name: state.library.selectedDb || "",
+    title: $("bookTitle").value.trim(),
+    code: $("bookCode").value.trim(),
+    author: $("bookAuthor").value.trim(),
+    editorial: $("bookEditorial").value.trim(),
+    edition: $("bookEdition").value.trim(),
+    subject: $("bookSubject").value.trim(),
+    estado: $("bookStatus")?.value || "pendiente",
+    activo: Boolean($("bookActive")?.checked ?? true),
+    pdf_path: $("bookPdfPath").value.trim(),
+    workspace_dir: $("bookWorkspace").value.trim(),
+    cover_path: $("bookCover").value.trim(),
+    notes: $("bookNotes")?.value.trim() || "",
+  };
 }
 
 async function submitInstanceForm(event) {
   event.preventDefault();
   const book = selectedLibraryBook();
   if (!book) return setStatus("Selecciona un libro antes de crear una instancia.");
-  await runAction("Creando instancia...", async () => {
-    await api(`/api/library/books/${encodeURIComponent(book.id)}/instances`, {
+  const editingId = String(state.library.editingInstanceId || "").trim();
+  const editing = Boolean(editingId);
+  const name = $("instanceName").value.trim();
+  if (!name) return setStatus("Escribe un nombre para la instancia.");
+  await runAction(editing ? "Guardando instancia..." : "Creando instancia...", async () => {
+    const payload = instanceFormPayload(book);
+    const endpoint = editing
+      ? `/api/library/instances/${encodeURIComponent(editingId)}/state`
+      : `/api/library/books/${encodeURIComponent(book.id)}/instances`;
+    const result = await api(endpoint, {
       method: "POST",
-      body: {
-        db_name: state.library.selectedDb || "",
-        type: $("instanceType").value,
-        name: $("instanceName").value.trim(),
-        pages: $("instancePages").value.trim(),
-        notes: $("instanceNotes").value.trim(),
-      },
+      body: payload,
     });
+    applyInstanceMutationToLibrary(result, { bookId: book.id, editing });
     state.library.showInstanceForm = false;
+    state.library.editingInstanceId = "";
     state.library.screen = "book";
-    await loadLibrary("Instancia creada.");
-  }, "Instancia creada.");
+    ensureLibrarySelection();
+    renderLibraryContent();
+  }, editing ? "Instancia actualizada." : "Instancia creada.");
+}
+
+function instanceFormPayload(book) {
+  const expected = Number.parseInt(String($("instanceExpected")?.value || "").trim(), 10);
+  return {
+    db_name: state.library.selectedDb || "",
+    book_id: Number(book?.id || 0),
+    tipo: $("instanceName").value.trim(),
+    name: $("instanceName").value.trim(),
+    total_esperado: Number.isFinite(expected) && expected > 0 ? expected : 0,
+    notas: $("instanceNotes")?.value.trim() || "",
+    notes: $("instanceNotes")?.value.trim() || "",
+    activo: Boolean($("instanceActive")?.checked ?? true),
+  };
 }
 
 async function openFactoryForInstance(instanceId) {
@@ -1320,18 +1816,20 @@ async function openFactoryForInstance(instanceId) {
           db_name: state.library.selectedDb || "",
           book_id: instance.book.id,
           open: false,
+          embedded: true,
         },
       });
     } catch (err) {
       try { if (popup && !popup.closed) popup.close(); } catch (_) {}
       throw err;
     }
-    if (result.url) {
+    const targetUrl = stableFactoryUrl(instance, result);
+    if (targetUrl) {
       if (popup && !popup.closed) {
-        popup.location.href = result.url;
+        popup.location.href = targetUrl;
       } else {
         renderLibraryContent();
-        return `Popup bloqueado. Abre la Fabrica en una nueva ventana: ${result.url}`;
+        return `Popup bloqueado. Abre la Fabrica en una nueva ventana: ${targetUrl}`;
       }
     }
     renderLibraryContent();
@@ -1749,11 +2247,6 @@ function syncWorkspaceMode() {
 function renderPagesStage() {
   const pdf = state.snapshot.pdf || {};
   const pageCount = Number(pdf.page_count || 0);
-  if (!state.selectedPages.size && pageCount) {
-    const detected = detectedPageNumbers();
-    state.selectedPages = new Set(detected.length ? detected : [state.pdfPage]);
-    persistFactoryUiState();
-  }
   $("stageHost").innerHTML = `
     <div class="stage-header">
       <div>
@@ -1768,7 +2261,7 @@ function renderPagesStage() {
       <div class="field"><input id="pageInput" value="${state.pdfPage}" /></div>
       <button id="goPdf">Ir</button>
       <button id="togglePdf" class="secondary">${state.selectedPages.has(state.pdfPage) ? "Quitar pagina" : "Seleccionar pagina"}</button>
-      <div class="field"><input id="rangeInput" value="${selectedRangeText() || (pageCount ? "1-" + pageCount : "")}" /></div>
+      <div class="field"><input id="rangeInput" value="${selectedRangeText()}" placeholder="22-50 o 1,3,7-10" /></div>
       <button id="applyRange">Usar rango</button>
       <button id="selectAllPages">Todas</button>
       <button id="clearPages">Limpiar</button>
@@ -1790,26 +2283,32 @@ function renderPagesStage() {
   $("prevPdf").onclick = () => setPdfPage(Math.max(1, state.pdfPage - 1));
   $("nextPdf").onclick = () => setPdfPage(Math.min(pageCount || 1, state.pdfPage + 1));
   $("goPdf").onclick = () => setPdfPage(Number($("pageInput").value || 1));
+  $("pageInput").onkeydown = (event) => {
+    if (event.key === "Enter") setPdfPage(Number($("pageInput").value || 1));
+  };
   $("togglePdf").onclick = () => {
     if (state.selectedPages.has(state.pdfPage)) state.selectedPages.delete(state.pdfPage);
     else state.selectedPages.add(state.pdfPage);
     persistFactoryUiState();
-    renderPagesStage();
+    updatePagesStageSelectionUi();
   };
   $("applyRange").onclick = () => {
     state.selectedPages = parseRange($("rangeInput").value, pageCount);
     persistFactoryUiState();
-    renderPagesStage();
+    updatePagesStageSelectionUi();
+  };
+  $("rangeInput").onkeydown = (event) => {
+    if (event.key === "Enter") $("applyRange").click();
   };
   $("selectAllPages").onclick = () => {
     state.selectedPages = new Set(Array.from({ length: pageCount }, (_, index) => index + 1));
     persistFactoryUiState();
-    renderPagesStage();
+    updatePagesStageSelectionUi();
   };
   $("clearPages").onclick = () => {
     state.selectedPages = new Set();
     persistFactoryUiState();
-    renderPagesStage();
+    updatePagesStageSelectionUi();
   };
   renderPagePicker(pageCount);
   renderSelectedPagesList();
@@ -1842,13 +2341,43 @@ function renderPagePicker(pageCount) {
       else state.selectedPages.add(page);
       state.pdfPage = page;
       persistFactoryUiState();
-      renderPagesStage();
+      drawImageOnCanvas($("pdfCanvas"), `/api/pdf/page?page=${state.pdfPage}&dpi=150`);
+      updatePagesStageSelectionUi();
     };
+  });
+}
+
+function updatePagesStageSelectionUi() {
+  const selected = state.selectedPages.has(state.pdfPage);
+  const toggle = $("togglePdf");
+  if (toggle) toggle.textContent = selected ? "Quitar pagina" : "Seleccionar pagina";
+  const count = document.querySelector(".selection-count");
+  if (count) count.textContent = `${state.selectedPages.size} seleccionada(s)`;
+  const pageInput = $("pageInput");
+  if (pageInput && document.activeElement !== pageInput) pageInput.value = String(state.pdfPage);
+  const rangeInput = $("rangeInput");
+  if (rangeInput && document.activeElement !== rangeInput) rangeInput.value = selectedRangeText();
+  const canvasWrap = document.querySelector(".page-canvas");
+  if (canvasWrap) canvasWrap.classList.toggle("is-selected", selected);
+  const badge = document.querySelector(".canvas-badge");
+  if (badge) badge.textContent = selected ? "Pagina seleccionada" : "Pagina no seleccionada";
+  document.querySelectorAll("#pagePicker [data-page]").forEach((item) => {
+    const page = Number(item.dataset.page || 0);
+    item.classList.toggle("current", page === state.pdfPage);
+    item.classList.toggle("selected", state.selectedPages.has(page));
+  });
+  renderSelectedPagesList();
+  const pdf = state.snapshot?.pdf || {};
+  setInspector({
+    "PDF": pdf.path || "-",
+    "Pagina actual": state.pdfPage,
+    "Paginas elegidas": selectedRangeText() || "-",
   });
 }
 
 function renderSelectedPagesList() {
   const list = $("selectedPagesList");
+  if (!list) return;
   const pages = [...state.selectedPages].sort((a, b) => a - b);
   list.innerHTML = pages.length ? pages.map((page) => `
     <div class="row-card page-row ${page === state.pdfPage ? "active" : ""}" data-page="${page}">
@@ -1870,7 +2399,7 @@ function renderSelectedPagesList() {
       event.stopPropagation();
       state.selectedPages.delete(Number(btn.dataset.removePage));
       persistFactoryUiState();
-      renderPagesStage();
+      updatePagesStageSelectionUi();
     };
   });
 }
@@ -1879,7 +2408,9 @@ function setPdfPage(page) {
   const count = Number(state.snapshot.pdf.page_count || 1);
   state.pdfPage = Math.max(1, Math.min(count, Number(page || 1)));
   persistFactoryUiState();
-  renderPagesStage();
+  const canvas = $("pdfCanvas");
+  if (canvas) drawImageOnCanvas(canvas, `/api/pdf/page?page=${state.pdfPage}&dpi=150`);
+  updatePagesStageSelectionUi();
 }
 
 function renderBoxesStage() {
@@ -3334,7 +3865,7 @@ function batchModeConfig(mode = state.batchMode) {
       description: "Pega el formato LaTeX final por imagen. Se guarda como salida final para futura BD y como ejemplo de entrenamiento.",
       action: "Guardar formato final",
       empty: "No hay registros de staging para guardar formato final.",
-      placeholder: "----imagen.png-----\n\\item[\\textbf{01.}] [[curso=Geometria]] [[tema=Triangulos]] [[Estado=sin_revisar]] [[Clave=C]] Enunciado... [[Imagen=img-01]] £A)...æB)...æC)...£D)...ææE)...£",
+      placeholder: "----imagen.png-----\n\\item[\\textbf{01.}] [[curso=Geometria]] [[tema=Triangulos]] [[Estado=sin_revisar]] [[Clave=C]] Enunciado... [[Imagen=img-01]] Â£A)...Ã¦B)...Ã¦C)...Â£D)...Ã¦Ã¦E)...Â£",
       saving: "Guardando formato final por lote...",
       done: "Formato final por lote terminado.",
     };
@@ -3349,6 +3880,19 @@ function batchModeConfig(mode = state.batchMode) {
       placeholder: "----imagen.png-----\n{\n  \"schema_version\": \"normalized_problem_staging_v1\",\n  \"numero\": \"01\",\n  \"respuesta_final\": \"\"\n}",
       saving: "Guardando normalizacion por lote...",
       done: "Normalizacion por lote terminada.",
+    };
+  }
+  if (mode === "normalizer_input") {
+    return {
+      mode: "normalizer_input",
+      title: "Entrada para normalizador",
+      description: "Copia el JSON construido desde OCR crudo, crop y segmentos graficos. La respuesta del modelo se pega despues en Formato final en bloque.",
+      action: "Solo copiar",
+      empty: "No hay registros de staging para preparar entrada de normalizador.",
+      placeholder: "----imagen.png-----\n{\n  \"schema_version\": \"normalizer_input_staging_v1\",\n  \"raw_ocr\": \"<01.> ...\",\n  \"figure_segmentation\": {}\n}",
+      saving: "Esta vista no guarda cambios.",
+      done: "Entrada preparada.",
+      readonly: true,
     };
   }
   return {
@@ -3406,10 +3950,10 @@ function renderBatchEditor() {
         <div class="batch-actions">
           <button id="copyBatchText" type="button" ${records.length ? "" : "disabled"}>Copiar lote</button>
           <button id="resetBatchText" type="button" ${records.length ? "" : "disabled"}>Regenerar desde staging</button>
-          <button id="saveBatchText" class="primary" type="button" ${records.length ? "" : "disabled"}>${escapeHtml(config.action)}</button>
+          ${config.readonly ? "" : `<button id="saveBatchText" class="primary" type="button" ${records.length ? "" : "disabled"}>${escapeHtml(config.action)}</button>`}
         </div>
       </div>
-      <textarea id="batchEditor" class="batch-editor" spellcheck="false" placeholder="${escapeAttr(config.placeholder || "")}">${escapeHtml(state.batchText || "")}</textarea>
+      <textarea id="batchEditor" class="batch-editor" spellcheck="false" ${config.readonly ? "readonly" : ""} placeholder="${escapeAttr(config.placeholder || "")}">${escapeHtml(state.batchText || "")}</textarea>
       <div id="batchProgressInline" class="batch-progress-inline muted">${records.length ? `0 de ${records.length}` : "Sin registros."}</div>
       ${renderBatchResults()}
     </section>
@@ -3461,10 +4005,89 @@ function buildBatchText(mode) {
   const records = state.snapshot?.records || [];
   return records.map((record, index) => {
     let body = String(record.raw_ocr || "").trim();
+    if (mode === "normalizer_input") body = normalizerInputJsonFromRecord(record, index);
     if (mode === "normalization") body = reviewJsonFromNormalized(normalizedForBatchRecord(record), record);
     if (mode === "final_latex") body = finalLatexFromRecord(record);
     return `----${batchRecordTitle(record, index)}-----\n${body}`.trimEnd();
   }).join("\n\n");
+}
+
+function normalizerInputJsonFromRecord(record, index = 0) {
+  return JSON.stringify(normalizerInputFromRecord(record, index), null, 2);
+}
+
+function normalizerInputFromRecord(record, index = 0) {
+  const source = record?.source && typeof record.source === "object" ? record.source : {};
+  const normalized = record?.normalized && typeof record.normalized === "object" ? record.normalized : {};
+  const figure = normalizerFigureSegmentationFromRecord(record, normalized);
+  return {
+    schema_version: "normalizer_input_staging_v1",
+    record_id: String(record?.record_id || ""),
+    crop_id: String(record?.crop_id || record?.record_id || ""),
+    crop_name: batchRecordTitle(record, index),
+    crop_path: String(record?.crop_path || ""),
+    raw_ocr: String(record?.raw_ocr || ""),
+    structured_ocr: {},
+    figure_segmentation: figure,
+    source: {
+      book_code: String(source.book_code || state.snapshot?.context?.book_code || ""),
+      instance_type: String(source.instance_type || state.snapshot?.context?.instance_type || ""),
+      page_number: source.page_number ?? source.source_page_number ?? null,
+      problem_number: source.problem_number ?? source.n ?? normalized.numero ?? "",
+      box_index: source.box_index ?? source.page_problem_index ?? source.problem_index ?? null,
+      bbox_px: Array.isArray(source.bbox_px) ? source.bbox_px : [],
+    },
+    hints: {
+      output_schema: "formato_final_latex",
+      output_is_json: false,
+      suggested_number: String(normalized.numero || source.problem_number || source.n || ""),
+      suggested_course: String(normalized.curso || "SIN_CURSO"),
+      suggested_topic: String(normalized.tema || "SIN_TEMA"),
+      continuation: Boolean(isReviewContinuationRecord(record) || isFinalLatexContinuation(record?.raw_ocr)),
+      final_format: "\\item[\\textbf{n.}] [[curso=...]] [[tema=...]] [[Estado=sin_revisar]] [[Clave=...]] Enunciado... [[Imagen=img-n]] Â£A)...Ã¦B)...Ã¦C)...Â£D)...Ã¦Ã¦E)...Â£",
+    },
+    policy: {
+      raw_ocr_is_primary: true,
+      do_not_invent_information: true,
+      do_not_describe_graphics: true,
+      add_image_tag_when_has_figure: Boolean(figure.has_figure),
+      output_only_final_latex: true,
+    },
+  };
+}
+
+function normalizerFigureSegmentationFromRecord(record, normalized = {}) {
+  const rawFigure = record?.figure_segmentation && typeof record.figure_segmentation === "object"
+    ? record.figure_segmentation
+    : {};
+  const webSegments = Array.isArray(record?.figure_segments_web) ? record.figure_segments_web : [];
+  const rawSegments = Array.isArray(rawFigure.segments) ? rawFigure.segments : [];
+  const segments = (webSegments.length ? webSegments : rawSegments).map((segment, index) => {
+    const imageName = String(segment.image_name || segment.file_name || segment.image_path || "").split(/[\\/]/).filter(Boolean).pop() || `seg_${index + 1}`;
+    return {
+      idx: Number(segment.idx || index + 1),
+      bbox_px: Array.isArray(segment.bbox_px) ? segment.bbox_px.map((value) => Number(value)) : [],
+      image_name: imageName,
+      reviewed: Boolean(segment.reviewed),
+    };
+  });
+  const hasFigure = Boolean(
+    normalized.tiene_grafico
+    || Number(rawFigure.segments_total || 0) > 0
+    || segments.length
+  );
+  return {
+    has_figure: hasFigure,
+    segments_total: hasFigure ? Math.max(segments.length, Number(rawFigure.segments_total || 0)) : 0,
+    figure_tag: String(normalized.figure_tag || ""),
+    segments,
+    detector: rawFigure.detector && typeof rawFigure.detector === "object" ? {
+      detector_source: String(rawFigure.detector.detector_source || ""),
+      review_status: String(rawFigure.detector.review_status || ""),
+      max_conf: rawFigure.detector.max_conf ?? null,
+      final_boxes: Array.isArray(rawFigure.detector.final_boxes) ? rawFigure.detector.final_boxes : [],
+    } : {},
+  };
 }
 
 function finalLatexFromRecord(record) {
@@ -3481,7 +4104,7 @@ function finalLatexFromRecord(record) {
     ? ` [[Imagen=${String(normalized.figure_tag || `img-${number || record.record_id}`).trim()}]]`
     : "";
   const alternatives = normalized.alternativas && typeof normalized.alternativas === "object" ? normalized.alternativas : {};
-  const optionText = `£A)${String(alternatives.A || "").trim()}æB)${String(alternatives.B || "").trim()}æC)${String(alternatives.C || "").trim()}£D)${String(alternatives.D || "").trim()}ææE)${String(alternatives.E || "").trim()}£`;
+  const optionText = `Â£A)${String(alternatives.A || "").trim()}Ã¦B)${String(alternatives.B || "").trim()}Ã¦C)${String(alternatives.C || "").trim()}Â£D)${String(alternatives.D || "").trim()}Ã¦Ã¦E)${String(alternatives.E || "").trim()}Â£`;
   return `\\item[\\textbf{${number || ""}.}] [[curso=${curso}]] [[tema=${tema}]] [[Estado=${estado}]] [[Clave=${clave}]] ${statement}${image} ${optionText}`.trim();
 }
 
@@ -3611,6 +4234,10 @@ function replaceRecordInSnapshot(updated) {
 }
 
 async function saveBatchEditor(mode = state.batchMode) {
+  if (batchModeConfig(mode).readonly) {
+    setStatus("Esta vista solo prepara la entrada del normalizador. Copiala y pega la respuesta en Formato final en bloque.");
+    return;
+  }
   const records = state.snapshot?.records || [];
   if (!records.length) return setStatus("No hay registros de staging para guardar.");
   const editor = $("batchEditor");
@@ -4075,7 +4702,7 @@ function renderReviewStage() {
         <p class="muted">Corrige el item LaTeX final, revisa el render matematico y guarda la salida que quedara lista para futura BD.</p>
       </div>
       <div class="stage-actions">
-        <button id="openReviewBatch" type="button">Normalizar en grupo</button>
+        <button id="openNormalizerInputBatch" type="button">Entrada normalizador</button>
         <button id="openFinalLatexBatch" type="button">Formato final en bloque</button>
       </div>
     </div>
@@ -4132,8 +4759,8 @@ function renderReviewStage() {
     ` : `<div class="panel muted">Selecciona un problema.</div>`}
   `;
   if (record) {
-    const reviewBatchBtn = $("openReviewBatch");
-    if (reviewBatchBtn) reviewBatchBtn.onclick = () => openBatchMode("normalization");
+    const normalizerInputBtn = $("openNormalizerInputBatch");
+    if (normalizerInputBtn) normalizerInputBtn.onclick = () => openBatchMode("normalizer_input");
     const finalLatexBatchBtn = $("openFinalLatexBatch");
     if (finalLatexBatchBtn) finalLatexBatchBtn.onclick = () => openBatchMode("final_latex");
     bindRecordNavigation(records);
@@ -4190,10 +4817,10 @@ function typesetMath(preview) {
 
 function normalizeFinalLatexForStorage(value) {
   return String(value || "")
-    .replaceAll("Â£", "£")
-    .replaceAll("Ã¦", "æ")
-    .replaceAll("Â¦", "æ")
-    .replaceAll("¦", "æ")
+    .replaceAll("Ã‚Â£", "Â£")
+    .replaceAll("ÃƒÂ¦", "Ã¦")
+    .replaceAll("Ã‚Â¦", "Ã¦")
+    .replaceAll("Â¦", "Ã¦")
     .trim();
 }
 
@@ -4226,7 +4853,7 @@ function renderFinalLatexPreviewHtml(value) {
     .replace(/\\item\s*\[\s*\\textbf\{\s*([^}.]+)\.?\s*\}\s*\]/i, "")
     .replace(/\[\[\s*([^=\]]+?)\s*=\s*([^\]]*?)\s*\]\]/g, "")
     .trim();
-  const optionsMatch = body.match(/£A\)([\s\S]*?)æB\)([\s\S]*?)æC\)([\s\S]*?)£D\)([\s\S]*?)ææE\)([\s\S]*?)£/);
+  const optionsMatch = body.match(/Â£A\)([\s\S]*?)Ã¦B\)([\s\S]*?)Ã¦C\)([\s\S]*?)Â£D\)([\s\S]*?)Ã¦Ã¦E\)([\s\S]*?)Â£/);
   let optionsHtml = "";
   if (optionsMatch) {
     const labels = ["A", "B", "C", "D", "E"];
@@ -4261,13 +4888,13 @@ function formatLatexPreviewText(value) {
   const raw = normalizeLatexPreviewValueSafe(String(value || "").trim());
   if (!raw) return "-";
   if (raw.includes("$")) return formatPreviewText(raw);
-  const mathOnly = /^[0-9A-Za-z\s\\^_{}()[\].,+\-*/=<>:;|°º]+$/.test(raw) && /[\\^_{}=<>°º]/.test(raw);
+  const mathOnly = /^[0-9A-Za-z\s\\^_{}()[\].,+\-*/=<>:;|Â°Âº]+$/.test(raw) && /[\\^_{}=<>Â°Âº]/.test(raw);
   return mathOnly ? `$${escapeHtml(raw)}$` : formatPreviewText(raw);
 }
 
 function normalizeLatexPreviewValue(value) {
   return decodeLatexTextAccents(value)
-    .replace(/(\d+(?:[.,]\d+)?)\s*(?:\^o|º|°)(?=\s|$|[.,;:)])/gi, "$1^\\circ")
+    .replace(/(\d+(?:[.,]\d+)?)\s*(?:\^o|Âº|Â°)(?=\s|$|[.,;:)])/gi, "$1^\\circ")
     .replace(/(\d+(?:[.,]\d+)?)\s*\\degree\b/gi, "$1^\\circ");
 }
 
@@ -4445,7 +5072,7 @@ function updateFinalLatexReviewStatus() {
     return;
   }
   const hasItem = /\\item\s*\[\s*\\textbf\{/i.test(text);
-  const hasOptions = /£A\)[\s\S]*?æB\)[\s\S]*?æC\)[\s\S]*?£D\)[\s\S]*?ææE\)[\s\S]*?£/.test(text);
+  const hasOptions = /Â£A\)[\s\S]*?Ã¦B\)[\s\S]*?Ã¦C\)[\s\S]*?Â£D\)[\s\S]*?Ã¦Ã¦E\)[\s\S]*?Â£/.test(text);
   if (hasItem && hasOptions) {
     host.textContent = "Formato listo";
     return;
@@ -4520,7 +5147,7 @@ function parsePlainReviewText(text, base, record) {
       currentOption = "";
       return;
     }
-    const labelMatch = line.match(/^(numero|n[uú]mero|curso|tema|enunciado|respuesta|clave|grafico|gr[aá]fico|tiene grafico|tiene gr[aá]fico|etiqueta grafico|etiqueta gr[aá]fico|listo|revision lista|revisi[oó]n lista)\s*:\s*(.*)$/i);
+    const labelMatch = line.match(/^(numero|n[uÃº]mero|curso|tema|enunciado|respuesta|clave|grafico|gr[aÃ¡]fico|tiene grafico|tiene gr[aÃ¡]fico|etiqueta grafico|etiqueta gr[aÃ¡]fico|listo|revision lista|revisi[oÃ³]n lista)\s*:\s*(.*)$/i);
     if (labelMatch) {
       const plainLabel = normalizePlainLabel(labelMatch[1]);
       explicitStatementLabel = explicitStatementLabel || plainLabel === "enunciado";
@@ -4585,27 +5212,41 @@ function normalizeAnswerValue(value) {
 
 function truthyText(value) {
   const raw = String(value || "").trim().toLowerCase();
-  return ["1", "si", "sí", "s", "true", "yes", "y", "listo", "ok"].includes(raw);
+  return ["1", "si", "sÃ­", "s", "true", "yes", "y", "listo", "ok"].includes(raw);
 }
 
 function renderCandidateStage() {
   const record = selectedRecord();
+  const readyRecords = promotableRecords();
   $("stageHost").innerHTML = `
     <div class="stage-header">
       <div>
-        <h2>Candidato futuro a BD</h2>
-        <p class="muted">Revisa si el registro esta completo. La escritura real en problemas permanece bloqueada.</p>
+        <h2>Subida final a BD</h2>
+        <p class="muted">Previsualiza y sube solo registros listos a la BD local usada por Biblioteca. No se borran problemas existentes.</p>
+      </div>
+      <div class="stage-actions">
+        <button id="previewPromotionUpload" type="button" ${readyRecords.length ? "" : "disabled"}>Previsualizar subida</button>
+        <button id="uploadPromotionReady" class="primary" type="button" ${readyRecords.length ? "" : "disabled"}>Subir listos a BD</button>
       </div>
     </div>
+    <div class="panel candidate-upload-summary">
+      <strong>${readyRecords.length} registro(s) listo(s) para subir.</strong>
+      <span class="muted">Destino local: ${escapeHtml(candidateDbName() || "BD no definida")} | Biblioteca</span>
+    </div>
+    <div id="promotionUploadReport" class="panel muted">${state.promotionUploadReport ? renderPromotionUploadReport(state.promotionUploadReport) : "Usa la previsualizacion antes de escribir en la base de datos."}</div>
     <div id="candidateHost" class="panel">${record ? "Cargando candidato..." : "Selecciona un registro."}</div>
   `;
+  const previewBtn = $("previewPromotionUpload");
+  if (previewBtn) previewBtn.onclick = () => uploadPromotionReady({ dryRun: true });
+  const uploadBtn = $("uploadPromotionReady");
+  if (uploadBtn) uploadBtn.onclick = () => uploadPromotionReady({ dryRun: false });
   if (record) {
     api(`/api/promotion?record_id=${encodeURIComponent(record.record_id)}`).then((candidate) => {
       $("candidateHost").innerHTML = `
-        <h3>${candidate.ready_for_future_promotion ? "Listo para promocion futura" : "Aun falta revisar"}</h3>
+        <h3>${candidate.ready_for_future_promotion ? "Registro listo para subida manual" : "Aun falta revisar"}</h3>
         <div class="candidate-grid">
-          <div class="candidate-cell"><span>Promocion habilitada</span><strong>${candidate.promotion_enabled ? "Si" : "No"}</strong></div>
-          <div class="candidate-cell"><span>SQL preparado</span><strong>${candidate.sql ? "Si" : "No"}</strong></div>
+          <div class="candidate-cell"><span>Subida manual</span><strong>${candidate.explicit_upload_enabled ? "Si" : "No"}</strong></div>
+          <div class="candidate-cell"><span>Automatica</span><strong>${candidate.promotion_enabled ? "Si" : "No"}</strong></div>
           <div class="candidate-cell"><span>Escrituras</span><strong>${(candidate.write_operations || []).length}</strong></div>
         </div>
         <h3>Bloqueos pendientes</h3>
@@ -4617,8 +5258,86 @@ function renderCandidateStage() {
   setInspector(record ? {
     "Registro": record.record_id,
     "Destino actual": "staging",
-    "Promocion real": "desactivada",
+    "Subida manual": readyRecords.some((row) => row.record_id === record.record_id) ? "lista" : "bloqueada",
   } : "");
+}
+
+function candidateDbName() {
+  return String(state.snapshot?.context?.db_name || state.library?.selectedDb || "").trim();
+}
+
+function promotableRecords() {
+  const records = reviewRecords(state.snapshot?.records || []);
+  return records.filter((record) => {
+    if (!record || isReviewContinuationRecord(record)) return false;
+    if (normalizeStatus(record.status || "") !== "listo") return false;
+    const normalized = record.normalized && typeof record.normalized === "object" ? record.normalized : {};
+    const finalLatex = String(normalized.latex_rendered_item || "").trim();
+    return /^\\item\s*\[\s*\\textbf\s*\{\s*\d+\s*\.?\s*\}\s*\]/.test(finalLatex);
+  });
+}
+
+async function uploadPromotionReady({ dryRun = false } = {}) {
+  const records = promotableRecords();
+  const host = $("promotionUploadReport");
+  if (!records.length) return setStatus("No hay registros listos con formato final para subir.");
+  const dbName = candidateDbName();
+  if (!dbName) return setStatus("No hay base de datos definida para esta instancia.");
+  if (!dryRun) {
+    const ok = window.confirm(`Se subiran ${records.length} problema(s) revisado(s) a la BD local de Biblioteca: ${dbName}. No se borraran problemas existentes. Continuar?`);
+    if (!ok) return;
+  }
+  setBusy(dryRun ? "Previsualizando subida a BD..." : "Subiendo problemas a BD...");
+  try {
+    const report = await api("/api/promotion/upload", {
+      method: "POST",
+      body: {
+        db_name: dbName,
+        db_profile: "biblioteca",
+        record_ids: records.map((row) => row.record_id),
+        dry_run: Boolean(dryRun),
+        confirm: !dryRun,
+      },
+    });
+    state.promotionUploadReport = report;
+    if (host) host.innerHTML = renderPromotionUploadReport(report);
+    if (!dryRun) {
+      state.snapshot = await loadFactorySnapshot();
+      setStatus(`Subida a BD terminada: ${Number(report.inserted || 0)} insertado(s), ${Number(report.updated || 0)} actualizado(s), ${Number(report.errors || 0)} error(es).`);
+      render();
+    } else {
+      setStatus(`Previsualizacion lista: ${Number(report.rows?.length || 0)} registro(s) evaluado(s).`);
+    }
+  } catch (err) {
+    if (host) host.innerHTML = `<strong>Error</strong><p>${escapeHtml(err.message)}</p>`;
+    setStatus(`Error: ${err.message}`);
+  } finally {
+    $("busyText").textContent = "";
+  }
+}
+
+function renderPromotionUploadReport(report) {
+  const rows = Array.isArray(report?.rows) ? report.rows : [];
+  const title = report?.dry_run ? "Previsualizacion de subida" : "Resultado de subida";
+  return `
+    <h3>${title}</h3>
+    <div class="candidate-grid">
+      <div class="candidate-cell"><span>Insertados</span><strong>${Number(report?.inserted || 0)}</strong></div>
+      <div class="candidate-cell"><span>Actualizados</span><strong>${Number(report?.updated || 0)}</strong></div>
+      <div class="candidate-cell"><span>Omitidos</span><strong>${Number(report?.skipped || 0)}</strong></div>
+      <div class="candidate-cell"><span>Errores</span><strong>${Number(report?.errors || 0)}</strong></div>
+    </div>
+    <div class="upload-result-list">
+      ${rows.slice(0, 80).map((row) => `
+        <div class="upload-result-row status-${escapeAttr(normalizeStatus(row.status || "pendiente"))}">
+          <strong>${escapeHtml(row.record_id || "-")}</strong>
+          <span>${escapeHtml(row.status || "-")}${row.numero_original ? ` | n. ${escapeHtml(row.numero_original)}` : ""}${row.problem_id ? ` | BD #${escapeHtml(row.problem_id)}` : ""}</span>
+          ${row.blocking_issues ? `<small>${escapeHtml((row.blocking_issues || []).join(", "))}</small>` : ""}
+          ${row.message ? `<small>${escapeHtml(row.message)}</small>` : ""}
+        </div>
+      `).join("") || `<p class="muted">Sin filas reportadas.</p>`}
+    </div>
+  `;
 }
 
 function blockingIssuesHtml(issues) {
@@ -4659,7 +5378,7 @@ function syncPrimaryAction() {
     ],
     ocr: ["Preparar revision completa", "Crea borradores editables para todos los problemas con OCR; no ejecuta normalizador IA final.", normalizeRecords],
     review: ["Guardar revision", "Persiste correcciones en staging como entrenamiento futuro.", () => $("reviewForm")?.requestSubmit()],
-    candidate: ["Actualizar candidato", "Recalcula bloqueos sin escribir en problemas.", renderCandidateStage],
+    candidate: ["Subir listos a BD", "Previsualiza y sube los problemas revisados; no borra registros existentes.", () => uploadPromotionReady({ dryRun: false })],
   };
   const [label, hint, handler] = actions[state.stage] || actions.pages;
   btn.textContent = label;
@@ -4949,7 +5668,7 @@ function normalizableRecords() {
   const records = state.snapshot?.records || [];
   const hasNormalizableData = (record) => !recordSourceStale(record)
     && !recordDownstreamInvalidated(record)
-    && (hasText(record.raw_ocr) || hasObjectData(record.structured_ocr));
+    && hasText(record.raw_ocr);
   return records.filter(hasNormalizableData);
 }
 
@@ -5012,7 +5731,7 @@ function filteredBooks(applyStatus = true) {
   return (state.library.books || []).filter((book) => {
     const haystack = [book.title, book.code, book.author, book.subject, book.pdfName].join(" ").toLowerCase();
     const matchesQuery = !query || haystack.includes(query);
-    const matchesStatus = !applyStatus || state.library.status === "all" || (book.instances || []).some((item) => normalizeStatus(item.status) === state.library.status);
+    const matchesStatus = !applyStatus || state.library.status === "all" || (book.instances || []).some((item) => instanceWorkflowStatus(item) === state.library.status);
     return matchesQuery && matchesStatus;
   });
 }
@@ -5020,7 +5739,7 @@ function filteredBooks(applyStatus = true) {
 function filteredInstances(instances) {
   const rows = naturalSortInstances(instances || []);
   if (state.library.status === "all") return rows;
-  return rows.filter((item) => normalizeStatus(item.status) === state.library.status);
+  return rows.filter((item) => instanceWorkflowStatus(item) === state.library.status);
 }
 
 function naturalSortInstances(instances) {
@@ -5043,7 +5762,7 @@ function naturalSortInstances(instances) {
 function instanceNaturalSortKey(instance) {
   const label = String(instance?.title || instance?.tipo || instance?.instance_type || instance?.code || instance?.id || "").toLowerCase();
   const tokens = [];
-  const pattern = /(\d+)|([a-záéíóúñ]+)|([^a-záéíóúñ\d]+)/gi;
+  const pattern = /(\d+)|([a-zÃ¡Ã©Ã­Ã³ÃºÃ±]+)|([^a-zÃ¡Ã©Ã­Ã³ÃºÃ±\d]+)/gi;
   let match;
   while ((match = pattern.exec(label)) !== null) {
     if (match[1]) tokens.push(Number(match[1]));
@@ -5067,15 +5786,29 @@ function selectedLibraryBook() {
   return book;
 }
 
+function libraryEditingBook() {
+  const id = String(state.library.editingBookId || "");
+  if (!id) return null;
+  if (String(state.library.selectedBookId || "") === id) return selectedLibraryBook();
+  return (state.library.books || []).find((row) => String(row.id) === id) || null;
+}
+
+function libraryEditingInstance(book = selectedLibraryBook()) {
+  const id = String(state.library.editingInstanceId || "");
+  if (!id || !book) return null;
+  return (book.instances || []).find((row) => String(row.id) === id) || null;
+}
+
 function selectedLibraryInstance() {
   const book = selectedLibraryBook();
   if (!book) return null;
-  return (book.instances || []).find((item) => item.id === state.library.selectedInstanceId) || filteredInstances(book.instances || [])[0] || null;
+  return (book.instances || []).find((item) => String(item.id) === String(state.library.selectedInstanceId)) || filteredInstances(book.instances || [])[0] || null;
 }
 
 function findLibraryInstance(id) {
+  const needle = String(id || "");
   for (const book of state.library.books || []) {
-    const instance = (book.instances || []).find((item) => item.id === id);
+    const instance = (book.instances || []).find((item) => String(item.id) === needle);
     if (instance) return { ...instance, book };
   }
   return null;
@@ -5094,19 +5827,129 @@ function libraryCounts() {
 
 function statusCounts(items) {
   return (items || []).reduce((acc, item) => {
-    const status = normalizeStatus(item.status || "pendiente");
+    const status = instanceWorkflowStatus(item);
     acc[status] = (acc[status] || 0) + 1;
     return acc;
-  }, { pendiente: 0, procesando: 0, requiere_revision: 0, listo: 0, error: 0 });
+  }, { vacia: 0, procesando: 0, llena: 0 });
 }
 
-function inferInstanceStatus(instance) {
-  const indicators = instance.indicators || instance.summary || instance.metrics || {};
-  if (Number(indicators.subidos_bd_sin_revisar || indicators.sin_revisar || 0) > 0) return "requiere_revision";
-  if (Number(indicators.subidos_bd_inconsistentes || indicators.inconsistentes || 0) > 0) return "error";
-  if (Number(indicators.faltantes || 0) <= 0 && Number(indicators.total_esperado || 0) > 0) return "listo";
-  if (Number(indicators.escaneados_sesion || indicators.pages_total || indicators.boxes_total || 0) > 0) return "procesando";
-  return "pendiente";
+function instanceWorkflowStatus(instance) {
+  return instanceWorkflowInfo(instance).status;
+}
+
+function instanceWorkflowInfo(instance) {
+  const indicators = {
+    ...(instance?.indicators && typeof instance.indicators === "object" ? instance.indicators : {}),
+    ...(instance?.summary && typeof instance.summary === "object" ? instance.summary : {}),
+    ...(instance?.metrics && typeof instance.metrics === "object" ? instance.metrics : {}),
+  };
+  const consistencyCount = Number(indicators.consistentes || 0)
+    + Number(indicators.inconsistentes || 0)
+    + Number(indicators.sin_revisar || 0);
+  const healthLike = ["consistentes", "inconsistentes", "sin_revisar", "status"]
+    .some((key) => Object.prototype.hasOwnProperty.call(indicators, key));
+  const dbCount = Math.max(
+    Number(indicators.subidos_bd || 0),
+    consistencyCount,
+    healthLike ? Number(indicators.total || 0) : 0,
+  );
+  if (dbCount > 0) {
+    return {
+      status: "llena",
+      title: "En base de datos",
+      detail: `${dbCount} problema(s) enviados a BD.`,
+      dbCount,
+    };
+  }
+  const localCount = Math.max(
+    Number(indicators.escaneados_sesion || 0),
+    Number(indicators.pages_total || indicators.pages || 0),
+    Number(indicators.boxes_total || indicators.boxes || 0),
+    Number(indicators.crops_total || indicators.crops || 0),
+    Number(indicators.ocr_done || indicators.ocr || 0),
+    Number(indicators.ready || indicators.reviewed || 0),
+    healthLike ? 0 : Number(indicators.total || 0),
+  );
+  const rawStatus = normalizeStatus(instance?.status || instance?.review_status || "");
+  const hasLocalPath = Boolean(String(instance?.session_path || instance?.workspace_dir || "").trim());
+  const hasWorkStatus = ["procesando", "requiere_revision", "error", "listo"].includes(rawStatus);
+  if (localCount > 0 || hasLocalPath || hasWorkStatus) {
+    return {
+      status: "procesando",
+      title: "Trabajo iniciado",
+      detail: "Tiene trabajo local pendiente de subir a BD.",
+      dbCount: 0,
+    };
+  }
+  return {
+    status: "vacia",
+    title: "Sin trabajo",
+    detail: "Aun no tiene staging ni problemas enviados a BD.",
+    dbCount: 0,
+  };
+}
+
+function normalizeBookIndicators(book) {
+  const rawIndicators = book?.indicators && typeof book.indicators === "object" ? book.indicators : {};
+  const health = Array.isArray(book?.instances_health) ? book.instances_health : [];
+  const dashboardInstances = Array.isArray(book?.dashboard?.instancias) ? book.dashboard.instancias : [];
+  const instances = Array.isArray(book?.instances) ? book.instances : [];
+  const total = Math.max(
+    Number(rawIndicators.total_instancias || 0),
+    Number(book?.instances_total || 0),
+    dashboardInstances.length,
+    instances.length,
+    health.length,
+  );
+  const inDbFromDashboard = dashboardInstances.filter((row) => Number(row.subidos_bd || 0) > 0).length;
+  const inDbFromHealth = health.filter((row) => Number(row.total || row.subidos_bd || 0) > 0).length;
+  const inDbFromInstances = instances.filter((row) => Number(row?.summary?.subidos_bd || row?.indicators?.subidos_bd || 0) > 0).length;
+  const inDb = Math.max(Number(rawIndicators.instancias_en_bd || 0), inDbFromDashboard, inDbFromHealth, inDbFromInstances);
+  const errors = Math.max(
+    Number(rawIndicators.errores_total || 0),
+    Number(rawIndicators.inconsistentes_total || 0),
+    Number(rawIndicators.subidos_bd_inconsistentes_total || 0),
+    dashboardInstances.filter((row) => Number(row.subidos_bd_inconsistentes || 0) > 0).length,
+    health.filter((row) => Number(row.inconsistentes || 0) > 0 || String(row.status || "") === "complete_with_inconsistencies").length,
+  );
+  const missing = Math.max(total - Math.min(inDb, total), 0);
+  return {
+    ...rawIndicators,
+    total_instancias: total,
+    instancias_en_bd: Math.min(inDb, total || inDb),
+    instancias_faltantes_bd: missing,
+    errores_total: errors,
+  };
+}
+
+function bookProgressIndicators(book) {
+  const indicators = normalizeBookIndicators(book);
+  const total = Number(indicators.total_instancias || 0);
+  const inDb = Number(indicators.instancias_en_bd || 0);
+  return {
+    total,
+    inDb,
+    missing: Math.max(Number(indicators.instancias_faltantes_bd ?? (total - inDb)), 0),
+    errors: Number(indicators.errores_total || 0),
+  };
+}
+
+function bookVisualStatus(book) {
+  const progress = bookProgressIndicators(book);
+  if (progress.errors > 0) return "error";
+  if (progress.total > 0 && progress.inDb >= progress.total) return "complete";
+  if (progress.inDb > 0) return "in-progress";
+  return "untouched";
+}
+
+function displayBookVisualStatus(status) {
+  const labels = {
+    error: "Con errores",
+    complete: "Completo",
+    "in-progress": "En proceso",
+    untouched: "Sin trabajar",
+  };
+  return labels[status] || "Sin trabajar";
 }
 
 function selectedOcrPayload(record, index) {
@@ -5193,9 +6036,11 @@ function normalizeStatus(value) {
 function displayStatus(status) {
   return {
     pendiente: "Pendiente",
-    procesando: "Procesando",
+    vacia: "Vacia",
+    procesando: "En progreso",
     en_progreso: "En progreso",
     listo: "Listo",
+    llena: "Llena",
     requiere_revision: "Requiere revision",
     error: "Error",
   }[status] || status.replaceAll("_", " ");
@@ -5230,25 +6075,43 @@ function drawImageOnCanvas(canvas, src) {
 
 function parseRange(raw, total) {
   const set = new Set();
+  const maxPage = Math.max(0, Number(total || 0));
   String(raw || "").split(",").forEach((token) => {
     const part = token.trim();
     if (!part) return;
-    if (part.includes("-")) {
-      let [a, b] = part.split("-", 2).map((v) => Number(v.trim()));
+    if (/[-â€“â€”]/.test(part)) {
+      let [a, b] = part.split(/[-â€“â€”]/, 2).map((v) => Number(v.trim()));
       if (Number.isFinite(a) && Number.isFinite(b)) {
         if (b < a) [a, b] = [b, a];
-        for (let page = a; page <= b; page += 1) if (page >= 1 && page <= total) set.add(page);
+        for (let page = a; page <= b; page += 1) {
+          if (page >= 1 && (!maxPage || page <= maxPage)) set.add(page);
+        }
       }
     } else {
       const page = Number(part);
-      if (Number.isFinite(page) && page >= 1 && page <= total) set.add(page);
+      if (Number.isFinite(page) && page >= 1 && (!maxPage || page <= maxPage)) set.add(page);
     }
   });
   return set;
 }
 
 function selectedRangeText() {
-  return [...state.selectedPages].sort((a, b) => a - b).join(",");
+  const pages = [...state.selectedPages].sort((a, b) => a - b);
+  if (!pages.length) return "";
+  const ranges = [];
+  let start = pages[0];
+  let prev = pages[0];
+  for (let index = 1; index <= pages.length; index += 1) {
+    const page = pages[index];
+    if (page === prev + 1) {
+      prev = page;
+      continue;
+    }
+    ranges.push(start === prev ? String(start) : `${start}-${prev}`);
+    start = page;
+    prev = page;
+  }
+  return ranges.join(",");
 }
 
 let boxCanvasResizeTimer = null;
@@ -5280,14 +6143,18 @@ function escapeAttr(value) {
 
 async function bootApp() {
   setBusy("Detectando contexto...");
-  if (window.__PDF_APP_MODE__ === "library") {
+  const urlInstance = factoryInstanceFromUrl();
+  if (window.__PDF_APP_MODE__ === "library" && !urlInstance) {
     state.view = "library";
     renderLibrary();
     await loadLibrary();
     return;
   }
+  if (urlInstance) {
+    state.currentInstance = urlInstance;
+  }
   try {
-    state.snapshot = await api("/api/bootstrap");
+    state.snapshot = await loadFactorySnapshot();
     state.view = "factory";
     await refreshNormalizerTrainingStatus({ silent: true });
     restoreFactoryUiState();
@@ -5304,7 +6171,8 @@ async function bootApp() {
 $("libraryBtn").onclick = () => {
   state.view = "library";
   renderLibrary();
-  loadLibrary("Biblioteca actualizada.").catch((err) => setStatus(`Error de biblioteca: ${err.message}`));
+  loadLibrary("Biblioteca actualizada.")
+    .catch((err) => setStatus(`Error de biblioteca: ${err.message}`));
 };
 $("refreshBtn").onclick = () => refresh("Actualizado.").catch((err) => setStatus(`Error: ${err.message}`));
 if ($("appReloadBtn")) {
@@ -5315,5 +6183,7 @@ if ($("themeToggle")) {
   $("themeToggle").onclick = () => toggleTheme();
   syncThemeToggle();
 }
+window.submitBookForm = submitBookForm;
+window.submitInstanceForm = submitInstanceForm;
 startAppVersionWatcher().catch(() => {});
 bootApp().catch((err) => setStatus(`Error inicial: ${err.message}`));

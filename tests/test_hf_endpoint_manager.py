@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -124,6 +126,71 @@ class HfEndpointManagerTests(unittest.TestCase):
         self.assertEqual(status["status"], "scaledToZero")
         self.assertTrue(endpoint.scale_to_zero_called)
         self.assertEqual(status["message"], "Endpoint OCR apagado para ahorro.")
+
+    def test_scale_to_zero_if_idle_skips_while_ocr_job_is_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            endpoint = FakeEndpoint(status="running")
+            api = FakeApi(endpoint)
+            lease_file = root / "leases.json"
+            with patch.dict(os.environ, {
+                "HF_TOKEN": "hf_test",
+                "HF_TRAINED_OCR_ENDPOINT_NAME": "math-ocr",
+                "HF_ENDPOINT_LEASE_FILE": str(lease_file),
+            }, clear=False):
+                manager = self.manager(api, root)
+                lease_id = manager.begin_job(kind="global_ocr", job_id="job-1", label="test")
+                try:
+                    skipped = manager.scale_to_zero_if_idle(delay_s=0)
+                    called_while_active = endpoint.scale_to_zero_called
+                finally:
+                    manager.end_job(lease_id)
+                scaled = manager.scale_to_zero_if_idle(delay_s=0)
+
+        self.assertEqual(skipped["status"], "skipped")
+        self.assertEqual(skipped["reason"], "active_ocr_jobs")
+        self.assertEqual(skipped["active_count"], 1)
+        self.assertFalse(called_while_active)
+        self.assertEqual(scaled["status"], "scaledToZero")
+        self.assertTrue(endpoint.scale_to_zero_called)
+
+    def test_scale_to_zero_if_idle_respects_shared_lease_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lease_file = root / "leases.json"
+            lease_file.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "hf_ocr_endpoint_leases_v1",
+                        "updated_at": time.time(),
+                        "leases": [
+                            {
+                                "lease_id": "other-process:job-2:abc",
+                                "kind": "global_ocr",
+                                "job_id": "job-2",
+                                "label": "otra ventana",
+                                "started_at": time.time(),
+                                "updated_at": time.time(),
+                                "pid": 999999,
+                                "process_id": "other-process",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            endpoint = FakeEndpoint(status="running")
+            api = FakeApi(endpoint)
+            with patch.dict(os.environ, {
+                "HF_TOKEN": "hf_test",
+                "HF_TRAINED_OCR_ENDPOINT_NAME": "math-ocr",
+                "HF_ENDPOINT_LEASE_FILE": str(lease_file),
+            }, clear=False):
+                status = self.manager(api, root).scale_to_zero_if_idle(delay_s=0)
+
+        self.assertEqual(status["status"], "skipped")
+        self.assertEqual(status["reason"], "active_ocr_jobs")
+        self.assertFalse(endpoint.scale_to_zero_called)
 
     def test_permission_error_returns_actionable_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

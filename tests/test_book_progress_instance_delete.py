@@ -1,4 +1,9 @@
-from modulos.modulo9_organizador_libros.controlador_organizador_libros import BookProgressController
+from pathlib import Path
+
+from modulos.modulo9_organizador_libros.controlador_organizador_libros import (
+    BookInstanceUpdateInput,
+    BookProgressController,
+)
 
 
 class _FakeCursor:
@@ -57,6 +62,11 @@ def _controller_with_conn(conn):
         "UPDATE libros_escaneo SET updated_at = NOW() WHERE id = %s",
         (int(libro_id),),
     )
+    controller._normalize_instance_type = lambda value: str(value or "").strip()
+    controller._normalize_resource_path_text = lambda value, prefer_existing=False: str(value or "").strip()
+    controller._prepare_instance_workspace = lambda _workspace_dir, _tipo: None
+    controller._default_session_path_for_instance = lambda workspace_dir, tipo: Path(workspace_dir) / "sessions" / f"{tipo}.session.json"
+    controller._default_solutions_dir_for_instance = lambda workspace_dir, tipo: Path(workspace_dir) / "solutions" / str(tipo)
     return controller
 
 
@@ -104,3 +114,36 @@ def test_eliminar_instancia_raises_when_not_found():
 
     assert conn.commits == 0
     assert conn.rollbacks == 1
+
+
+def test_actualizar_instancia_renames_problem_and_pending_references():
+    cursor = _FakeCursor(
+        fetches=[(17, "problemas_propuestos", "", "", "C:/workspace/libro", "impecus-book")],
+        rowcounts=[1, 4, 2, 1],
+    )
+    conn = _FakeConnection(cursor)
+    controller = _controller_with_conn(conn)
+    controller._pg_table_exists = lambda _conn, table: table in {"problemas", "problema_pending_changes"}
+    controller._pg_column_exists = lambda _conn, table, column: (
+        (table == "problema_pending_changes" and column in {"libro_codigo", "codigo_instancia"})
+        or (table == "problemas" and column == "codigo_instancia")
+    )
+
+    payload = BookInstanceUpdateInput(
+        libro_id=8,
+        tipo="problemas_resueltos",
+        total_esperado=0,
+        session_path="",
+        soluciones_dir="",
+        notas="",
+        activo=True,
+    )
+    controller.actualizar_instancia("demo_db", 17, payload)
+
+    assert conn.commits == 1
+    assert conn.rollbacks == 0
+    assert "UPDATE libro_instancias_escaneo" in cursor.executed[1][0]
+    assert "UPDATE problemas SET codigo_instancia = %s" in cursor.executed[2][0]
+    assert cursor.executed[2][1] == ("problemas_resueltos", "impecus-book", "problemas_propuestos")
+    assert "UPDATE problema_pending_changes SET codigo_instancia = %s" in cursor.executed[3][0]
+    assert cursor.executed[3][1] == ("problemas_resueltos", "impecus-book", "problemas_propuestos")

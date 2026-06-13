@@ -88,6 +88,7 @@ def build_pipeline_contract() -> dict[str, Any]:
             "automatic_results_target": "staging",
             "forbidden_automatic_targets": ["problemas"],
             "promotion_enabled": False,
+            "explicit_manual_upload_enabled": True,
         },
         "human_review_policy": {
             "corrections_are_training_data": True,

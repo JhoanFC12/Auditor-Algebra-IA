@@ -21,9 +21,25 @@ import uuid
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
-from openai import OpenAI
+try:
+    from openai import OpenAI
+except Exception:  # pragma: no cover - optional provider dependency
+    class OpenAI:  # type: ignore[no-redef]
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError("Falta instalar el paquete 'openai' para usar el proveedor OpenAI Vision.")
 
-from .controlador_transcriptor import TranscriptorController
+try:
+    from .controlador_transcriptor import TranscriptorController
+except ModuleNotFoundError as exc:  # pragma: no cover - optional DB dependency in test-only imports
+    if exc.name != "psycopg2":
+        raise
+    _TRANSCRIPTOR_CONTROLLER_IMPORT_ERROR = exc
+
+    class TranscriptorController:  # type: ignore[no-redef]
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError(
+                "No se puede iniciar el transcriptor sin instalar la dependencia 'psycopg2'."
+            ) from _TRANSCRIPTOR_CONTROLLER_IMPORT_ERROR
 from .domain.continuation_rules import (
     normalize_small_number_outlier,
     should_absorb_direct_item_into_pending,
@@ -75,7 +91,18 @@ from .scan_pipeline.statement_cleanup import merge_statement_fragments
 from .session_schema import enrich_session_payload_with_structure
 from .segmentador_v2 import SegmentadorProblemasV2, SegmentoProblemaV2
 from .state import TranscriptorSessionState
-from .workflow.transcriptor_workflow import TranscriptorWorkflow
+try:
+    from .workflow.transcriptor_workflow import TranscriptorWorkflow
+except ModuleNotFoundError as exc:  # pragma: no cover - optional DB dependency in test-only imports
+    if exc.name != "psycopg2":
+        raise
+    _TRANSCRIPTOR_WORKFLOW_IMPORT_ERROR = exc
+
+    class TranscriptorWorkflow:  # type: ignore[no-redef]
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError(
+                "No se puede iniciar el workflow del transcriptor sin instalar la dependencia 'psycopg2'."
+            ) from _TRANSCRIPTOR_WORKFLOW_IMPORT_ERROR
 from utils.env_validation import validate_scan_provider_env
 from utils.project_layout import infer_workspace_from_session_path, normalize_instance_name, project_dirs, remap_legacy_drive_path
 from utils.preview_window import PreviewWindow
@@ -7547,10 +7574,12 @@ class TranscriptorWindow(tk.Toplevel):
                 continue
         if labels:
             return labels
-        file_map_labels = [str(label) for label in self._file_map.keys()]
+        file_map = getattr(self, "_file_map", {}) or {}
+        file_map_labels = [str(label) for label in file_map.keys()]
         if file_map_labels:
             return file_map_labels
-        return sorted(str(key) for key in self._ocr_raw_first_by_label.keys())
+        raw_by_label = getattr(self, "_ocr_raw_first_by_label", {}) or {}
+        return sorted(str(key) for key in raw_by_label.keys())
 
     def _prior_loaded_labels(
         self,
@@ -7565,8 +7594,18 @@ class TranscriptorWindow(tk.Toplevel):
         if current_key and current_key in ordered_labels:
             prior_labels = ordered_labels[: ordered_labels.index(current_key)]
         else:
-            limit = max(0, int(fallback_idx or 1) - 1)
-            prior_labels = ordered_labels[:limit]
+            has_explicit_visual_order = False
+            try:
+                has_explicit_visual_order = int(self.list_files.size()) > 0
+            except Exception:
+                has_explicit_visual_order = False
+            if not has_explicit_visual_order:
+                has_explicit_visual_order = bool(getattr(self, "_file_map", {}) or {})
+            if not current_key and not has_explicit_visual_order:
+                prior_labels = ordered_labels
+            else:
+                limit = max(0, int(fallback_idx or 1) - 1)
+                prior_labels = ordered_labels[:limit]
         return [str(label) for label in prior_labels if str(label).strip()]
 
     def _advance_number_hint_from_label(self, *, label: str, current_hint: int) -> int:
@@ -7575,7 +7614,8 @@ class TranscriptorWindow(tk.Toplevel):
         if not key:
             return next_hint
 
-        structured_text = str(self._ocr_structured_by_label.get(key, "") or "").strip()
+        structured_by_label = getattr(self, "_ocr_structured_by_label", {}) or {}
+        structured_text = str(structured_by_label.get(key, "") or "").strip()
         if structured_text:
             try:
                 payload = json.loads(structured_text)
@@ -7597,7 +7637,8 @@ class TranscriptorWindow(tk.Toplevel):
                     if numbers:
                         return max(next_hint, max(numbers) + 1)
 
-        raw_text = str(self._ocr_raw_first_by_label.get(key, "") or "").strip()
+        raw_by_label = getattr(self, "_ocr_raw_first_by_label", {}) or {}
+        raw_text = str(raw_by_label.get(key, "") or "").strip()
         if not raw_text or raw_text.startswith("[ERROR"):
             return next_hint
         try:
@@ -17378,7 +17419,7 @@ class TranscriptorWindow(tk.Toplevel):
                 try:
                     pass_max_tokens = 3200
                     if (model or "").strip() == TRAINED_OCR_VISION_MODEL and pidx >= 2:
-                        pass_max_tokens = 900
+                        pass_max_tokens = 700
                     text = self._transcribir_huggingface_single_pass(
                         model=model,
                         timeout_s=timeout_s,
@@ -17515,47 +17556,43 @@ class TranscriptorWindow(tk.Toplevel):
 
         base_url = self._resolve_hf_base_url(model)
         client = OpenAI(base_url=base_url, api_key=token, timeout=timeout_s)
-        img_url = self._encode_image_data_url(
-            path,
-            max_side_px=self._resolve_hf_ocr_image_max_side(model=model),
-        )
+        initial_max_side = self._resolve_hf_ocr_image_max_side(model=model)
         safe_max_tokens = self._resolve_hf_ocr_max_tokens(model=model, requested=max_tokens)
 
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt_text},
-                    {"type": "image_url", "image_url": {"url": img_url}},
-                ],
-            }
-        ]
-        try:
+        def _request_with_image_side(max_side_px: Optional[int]):
+            img_url = self._encode_image_data_url(path, max_side_px=max_side_px)
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt_text},
+                        {"type": "image_url", "image_url": {"url": img_url}},
+                    ],
+                }
+            ]
             resp = client.chat.completions.create(
                 model=model,
                 messages=messages,
                 temperature=0,
                 max_tokens=int(safe_max_tokens),
             )
+            return resp
+
+        try:
+            resp = _request_with_image_side(initial_max_side)
         except Exception as exc:
-            reduced_max_tokens = self._reduced_hf_max_tokens_from_error(
-                exc,
-                requested=int(safe_max_tokens),
-            )
-            if reduced_max_tokens is None or reduced_max_tokens >= int(safe_max_tokens):
+            if not self._is_hf_context_length_error(exc):
+                raise
+            fallback_side = self._resolve_hf_ocr_context_fallback_image_max_side(model=model)
+            if fallback_side is None:
                 raise
             self.after(
                 0,
-                lambda l=label, old=int(safe_max_tokens), new=int(reduced_max_tokens): self._log(
-                    f"{l}: ajuste automatico max_tokens HF {old} -> {new} por limite de contexto."
+                lambda l=label, side=int(fallback_side): self._log(
+                    f"{l}: ajuste automatico imagen HF -> {side}px por limite de contexto."
                 ),
             )
-            resp = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=0,
-                max_tokens=int(reduced_max_tokens),
-            )
+            resp = _request_with_image_side(fallback_side)
         content = resp.choices[0].message.content if resp and resp.choices else ""
         candidate_raw = self._extract_chat_text(content)
         candidate = self._canonicalize_faithful_ocr_text(self._strip_instruction_echo(candidate_raw), start_n=start_n)
@@ -17579,9 +17616,9 @@ class TranscriptorWindow(tk.Toplevel):
         model_name = str(model or "").strip()
         if model_name == TRAINED_OCR_VISION_MODEL:
             try:
-                cap = int(str(os.getenv("HF_TRAINED_OCR_MAX_TOKENS", "1500") or "1500").strip())
+                cap = int(str(os.getenv("HF_TRAINED_OCR_MAX_TOKENS", "700") or "700").strip())
             except Exception:
-                cap = 1500
+                cap = 700
             return max(256, min(requested, cap))
         try:
             global_cap = int(str(os.getenv("HF_OCR_MAX_TOKENS", "") or "0").strip())
@@ -17596,10 +17633,32 @@ class TranscriptorWindow(tk.Toplevel):
         if model_name != TRAINED_OCR_VISION_MODEL:
             return None
         try:
-            max_side = int(str(os.getenv("HF_TRAINED_OCR_IMAGE_MAX_SIDE", "960") or "960").strip())
+            max_side = int(str(os.getenv("HF_TRAINED_OCR_IMAGE_MAX_SIDE", "560") or "560").strip())
         except Exception:
-            max_side = 960
+            max_side = 560
         return max(480, min(1600, max_side))
+
+    def _resolve_hf_ocr_context_fallback_image_max_side(self, *, model: str) -> Optional[int]:
+        model_name = str(model or "").strip()
+        if model_name != TRAINED_OCR_VISION_MODEL:
+            return None
+        try:
+            max_side = int(str(os.getenv("HF_TRAINED_OCR_CONTEXT_FALLBACK_IMAGE_MAX_SIDE", "384") or "384").strip())
+        except Exception:
+            max_side = 384
+        return max(320, min(640, max_side))
+
+    def _is_hf_context_length_error(self, exc: Exception) -> bool:
+        text = str(exc or "").lower()
+        return (
+            ("max_tokens" in text or "max_completion_tokens" in text)
+            and (
+                "maximum context length" in text
+                or "input tokens" in text
+                or "too large" in text
+                or "context length" in text
+            )
+        )
 
     def _reduced_hf_max_tokens_from_error(self, exc: Exception, *, requested: int) -> Optional[int]:
         text = str(exc or "")

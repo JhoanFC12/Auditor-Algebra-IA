@@ -685,7 +685,7 @@ class InstancePdfPipelineService:
                 "crop disponible en staging/live" if crop_path.exists() else "crop no encontrado",
                 crop_path=str(crop_path),
             )
-            if not record.raw_ocr and not record.structured_ocr:
+            if not record.raw_ocr:
                 record.set_step(PipelineStep.OCR, StageStatus.PENDING, "pendiente de OCR")
             if not record.figure_segmentation:
                 record.set_step(PipelineStep.SEGMENTATION, StageStatus.PENDING, "pendiente de segmentacion")
@@ -728,6 +728,7 @@ class InstancePdfPipelineService:
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         run_segmentation: bool = True,
         run_ocr: bool = True,
+        manage_endpoint: bool = True,
     ) -> list[StagingProblemRecord]:
         records = self.staging.load_records()
         selected_record_ids = [str(item or "").strip() for item in list(record_ids or []) if str(item or "").strip()]
@@ -775,6 +776,7 @@ class InstancePdfPipelineService:
                 progress_callback=progress_callback,
                 run_segmentation=True,
                 run_ocr=False,
+                manage_endpoint=manage_endpoint,
             )
             if progress_callback is not None:
                 try:
@@ -801,6 +803,7 @@ class InstancePdfPipelineService:
                 progress_callback=progress_callback,
                 run_segmentation=False,
                 run_ocr=True,
+                manage_endpoint=manage_endpoint,
             )
 
         if run_ocr:
@@ -821,16 +824,17 @@ class InstancePdfPipelineService:
         if run_ocr:
             resolved_ocr_model = active_ocr_model or str(os.getenv("HF_MODEL", TRAINED_OCR_VISION_MODEL) or TRAINED_OCR_VISION_MODEL).strip()
             self._validate_ocr_runtime(provider=provider, model=resolved_ocr_model, trained_model=TRAINED_OCR_VISION_MODEL)
-            endpoint_state = self._prepare_trained_ocr_endpoint(
-                provider=provider,
-                model=resolved_ocr_model,
-                trained_model=TRAINED_OCR_VISION_MODEL,
-            )
+            if manage_endpoint:
+                endpoint_state = self._prepare_trained_ocr_endpoint(
+                    provider=provider,
+                    model=resolved_ocr_model,
+                    trained_model=TRAINED_OCR_VISION_MODEL,
+                )
             pipeline = ScanPipeline(
                 provider=provider,
                 model=active_ocr_model,
                 debug_dir=str(self.staging.root / "ocr_debug"),
-                strict_json=True,
+                strict_json=False,
             )
         segmenter = None
         if run_segmentation:
@@ -1057,7 +1061,10 @@ class InstancePdfPipelineService:
         last_exc: Exception | None = None
         for attempt in range(retries + 1):
             try:
-                return pipeline.extractor.extract_from_image(
+                extractor = pipeline.extractor
+                extract_raw = getattr(extractor, "extract_raw_from_image", None)
+                extract_fn = extract_raw if callable(extract_raw) else extractor.extract_from_image
+                return extract_fn(
                     image_path=image_path,
                     curso=curso,
                     tema=tema,
@@ -1151,9 +1158,6 @@ class InstancePdfPipelineService:
                 if str(record.raw_ocr or "").strip():
                     record.set_step(PipelineStep.OCR, StageStatus.READY, "OCR crudo disponible para preparar revision")
                     record.normalized = self._draft_normalized_from_raw_ocr(record)
-                elif record.structured_ocr:
-                    record.set_step(PipelineStep.OCR, StageStatus.READY, "OCR historico disponible para preparar revision")
-                    record.normalized = self._normalize_from_pipeline_record(record, record.structured_ocr)
                 else:
                     record.normalized = {}
                 if record.normalized:
@@ -1179,9 +1183,8 @@ class InstancePdfPipelineService:
         if record is None:
             raise KeyError(record_id)
         record.raw_ocr = str(raw_ocr or "")
+        record.structured_ocr = {}
         record.errors = []
-        if not record.raw_ocr.strip():
-            record.structured_ocr = {}
         record.normalized = {}
         if record.raw_ocr.strip():
             ocr_status = StageStatus.READY
@@ -1264,6 +1267,11 @@ class InstancePdfPipelineService:
             **self._model_snapshot(confidence_overrides={"figure_segmenter": 1.0}),
         }
         record.confidence["figure_segmenter_reviewed"] = 1.0
+        record.errors = [
+            str(item)
+            for item in list(record.errors or [])
+            if not str(item).startswith("segmentacion_grafica:")
+        ]
         record.set_step(
             PipelineStep.SEGMENTATION,
             StageStatus.READY,

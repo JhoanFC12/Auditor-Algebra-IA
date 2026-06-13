@@ -218,6 +218,14 @@ img, canvas { max-width: 100%; }
 
 .muted { color: var(--muted); }
 .hidden { display: none !important; }
+
+.instance-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
 .top-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
 
 .workspace {
@@ -386,8 +394,10 @@ img, canvas { max-width: 100%; }
 }
 
 .status-pendiente { background: var(--surface-strong); color: var(--muted); }
+.status-vacia { background: var(--surface-strong); color: var(--muted); }
 .status-procesando { background: var(--amber-soft); color: var(--amber); }
 .status-listo { background: var(--green-soft); color: var(--green); }
+.status-llena { background: var(--green-soft); color: var(--green); }
 .status-requiere_revision { background: var(--blue-soft); color: var(--blue); }
 .status-error { background: var(--red-soft); color: var(--red); }
 
@@ -1548,6 +1558,26 @@ canvas {
 
 .form-grid .wide { grid-column: 1 / -1; }
 
+.form-heading {
+  display: grid;
+  gap: 4px;
+}
+
+.form-heading strong {
+  font-size: 18px;
+}
+
+.form-grid .check-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+}
+
+.form-grid .check-field input {
+  width: auto;
+}
+
 .plain-review-form,
 .json-review-form,
 .final-review-form {
@@ -1844,6 +1874,38 @@ details.raw-block summary {
   overflow-wrap: anywhere;
 }
 
+.candidate-upload-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.upload-result-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.upload-result-row {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.upload-result-row strong,
+.upload-result-row span,
+.upload-result-row small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .workspace.library-mode {
   grid-template-columns: minmax(230px, 260px) minmax(0, 1fr) minmax(240px, 280px);
 }
@@ -1945,13 +2007,85 @@ details.raw-block summary {
   white-space: normal;
 }
 
+.book-card::before {
+  content: "";
+  grid-column: 1 / -1;
+  height: 4px;
+  margin: -12px -12px 0;
+  border-radius: 8px 8px 0 0;
+  background: var(--border);
+}
+
+.book-card.book-state-untouched::before { background: #64748b; }
+.book-card.book-state-in-progress::before { background: #d97706; }
+.book-card.book-state-complete::before { background: #16a34a; }
+.book-card.book-state-error::before { background: #f97316; }
+
+.book-card.book-state-in-progress {
+  border-color: color-mix(in srgb, #d97706 45%, var(--border));
+}
+
+.book-card.book-state-complete {
+  border-color: color-mix(in srgb, #16a34a 45%, var(--border));
+}
+
+.book-card.book-state-error {
+  border-color: color-mix(in srgb, #f97316 50%, var(--border));
+}
+
 .book-card.active {
   border-color: var(--blue);
   background: var(--blue-soft);
 }
 
-.book-card-action {
+.book-card.cover-uploading {
+  opacity: .72;
+  pointer-events: none;
+}
+
+.book-card.cover-uploading .book-cover {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.book-card-footer {
   grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(86px, auto) minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+}
+
+.book-state-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-soft);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.book-state-in-progress .book-state-label {
+  border-color: color-mix(in srgb, #d97706 45%, var(--border));
+  background: rgba(217, 119, 6, .14);
+}
+
+.book-state-complete .book-state-label {
+  border-color: color-mix(in srgb, #16a34a 45%, var(--border));
+  background: rgba(22, 163, 74, .14);
+}
+
+.book-state-error .book-state-label {
+  border-color: color-mix(in srgb, #f97316 50%, var(--border));
+  background: rgba(249, 115, 22, .16);
+}
+
+.book-card-action {
   display: inline-flex;
   justify-content: center;
   align-items: center;
@@ -2022,7 +2156,52 @@ details.raw-block summary {
   flex: 0 0 auto;
 }
 
-.book-stats span, .instance-progress span {
+.cover-paste-field {
+  display: grid;
+  gap: 6px;
+}
+
+.cover-file-input {
+  width: 100%;
+  min-height: 38px;
+  padding: 7px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.cover-file-input::file-selector-button {
+  margin-right: 10px;
+  padding: 7px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--surface-soft);
+  color: var(--text);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.cover-paste-preview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.cover-paste-preview img {
+  width: 46px;
+  height: 62px;
+  object-fit: cover;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-soft);
+}
+
+.book-stats span {
   display: grid;
   gap: 1px;
   min-width: 54px;
@@ -2035,7 +2214,7 @@ details.raw-block summary {
   text-align: center;
 }
 
-.book-stats b, .instance-progress b {
+.book-stats b {
   color: var(--text);
   font-size: 16px;
   line-height: 1;
@@ -2132,10 +2311,38 @@ details.raw-block summary {
   line-height: 1.3;
 }
 
-.instance-progress {
-  display: flex;
-  gap: 8px;
-  flex-wrap: nowrap;
+.instance-state-summary {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-soft);
+}
+
+.instance-state-summary strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.instance-state-summary span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.instance-state-vacia .instance-state-summary {
+  border-color: var(--border);
+}
+
+.instance-state-procesando .instance-state-summary {
+  border-color: color-mix(in srgb, #d97706 38%, var(--border));
+  background: rgba(217, 119, 6, .10);
+}
+
+.instance-state-llena .instance-state-summary {
+  border-color: color-mix(in srgb, #16a34a 40%, var(--border));
+  background: rgba(22, 163, 74, .12);
 }
 
 .instance-actions {
@@ -2307,7 +2514,6 @@ details.raw-block summary {
   .inspector { grid-template-columns: 1fr; }
   .grid-two, .record-layout, .record-layout.ocr-layout, .review-columns, .candidate-grid, .crops-layout, .library-layout { grid-template-columns: 1fr; }
   .instance-card { grid-template-columns: 1fr; }
-  .instance-progress { flex-wrap: wrap; }
   .batch-result { grid-template-columns: 1fr; }
   .sticky-preview { position: static; }
   #stageHost {

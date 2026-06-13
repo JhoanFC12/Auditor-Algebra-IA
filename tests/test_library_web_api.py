@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import base64
 import json
+import os
 import tempfile
 import unittest
+import urllib.error
 import urllib.request
 from dataclasses import asdict
 from pathlib import Path
@@ -179,59 +182,112 @@ class _FakeController:
 
 class LibraryWebApiTests(unittest.TestCase):
     def test_library_api_lists_detail_mutates_and_prepares_factory(self) -> None:
-        controller = _FakeController()
-        runtimes = []
-        opened = []
+        with tempfile.TemporaryDirectory() as covers_tmp:
+            previous_cover_root = os.environ.get("PDF_LIBRARY_COVER_ROOT")
+            os.environ["PDF_LIBRARY_COVER_ROOT"] = covers_tmp
+            source_cover = Path(covers_tmp).parent / "external-cover.png"
+            source_cover.write_bytes(b"\x89PNG\r\n\x1a\nmanual")
+            self.addCleanup(lambda: source_cover.unlink(missing_ok=True))
+            try:
+                controller = _FakeController()
+                runtimes = []
+                opened = []
 
-        def runtime_factory(context):
-            runtime = _FakeRuntime(context)
-            runtimes.append(runtime)
-            return runtime
+                def runtime_factory(context):
+                    runtime = _FakeRuntime(context)
+                    runtimes.append(runtime)
+                    return runtime
 
-        api = LibraryWebApi(
-            controller=controller,
-            runtime_factory=runtime_factory,
-            open_url=lambda url, title: opened.append((url, title)),
-        )
+                api = LibraryWebApi(
+                    controller=controller,
+                    runtime_factory=runtime_factory,
+                    open_url=lambda url, title: opened.append((url, title)),
+                )
 
-        databases = api.dispatch("GET", "/api/library/databases", {}, {})
-        self.assertEqual(databases["databases"], ["demo_db"])
+                databases = api.dispatch("GET", "/api/library/databases", {}, {})
+                self.assertEqual(databases["databases"], ["demo_db"])
 
-        books = api.dispatch("GET", "/api/library/books", {"db_name": ["demo_db"]}, {})
-        self.assertEqual(books["schema_version"], "library_books_v1")
-        self.assertTrue(books["policy"]["never_insert_directly_into_problemas"])
-        self.assertEqual(books["books"][0]["indicators"]["total_instancias"], 1)
-        self.assertEqual(controller.dashboard_calls, [])
-        self.assertEqual(books["books"][0]["instances"][0]["tipo"], "S01")
+                books = api.dispatch("GET", "/api/library/books", {"db_name": ["demo_db"]}, {})
+                self.assertEqual(books["schema_version"], "library_books_v1")
+                self.assertTrue(books["policy"]["never_insert_directly_into_problemas"])
+                self.assertEqual(books["books"][0]["indicators"]["total_instancias"], 1)
+                self.assertEqual(controller.dashboard_calls, [])
+                self.assertEqual(books["books"][0]["instances"][0]["tipo"], "S01")
 
-        detail = api.dispatch("GET", "/api/library/books/1", {"db_name": ["demo_db"]}, {})
-        self.assertEqual(controller.dashboard_calls, [1])
-        self.assertEqual(detail["instances"][0]["indicators"]["escaneados_sesion"], 4)
-        self.assertEqual(detail["instances"][0]["factory_prepare_endpoint"], "/api/library/instances/11/factory")
+                detail = api.dispatch("GET", "/api/library/books/1", {"db_name": ["demo_db"]}, {})
+                self.assertEqual(controller.dashboard_calls, [1])
+                self.assertEqual(detail["instances"][0]["indicators"]["escaneados_sesion"], 4)
+                self.assertEqual(detail["instances"][0]["factory_prepare_endpoint"], "/api/library/instances/11/factory")
 
-        created = api.dispatch("POST", "/api/library/books", {}, {"db_name": "demo_db", "codigo": "GEO01", "titulo": "Geometria"})
-        self.assertEqual(created["book_id"], 2)
-        self.assertEqual(controller.created_books[0].codigo, "GEO01")
+                created = api.dispatch("POST", "/api/library/books", {}, {"db_name": "demo_db", "codigo": "GEO01", "titulo": "Geometria"})
+                self.assertEqual(created["book_id"], 2)
+                self.assertEqual(controller.created_books[0].codigo, "GEO01")
 
-        instance = api.dispatch("POST", "/api/library/books/1/instances", {}, {"db_name": "demo_db", "tipo": "S02", "total_esperado": 20})
-        self.assertEqual(instance["instance_id"], 12)
-        self.assertEqual(controller.created_instances[0].tipo, "S02")
+                edited = api.dispatch(
+                    "POST",
+                    "/api/library/books/1",
+                    {},
+                    {
+                        "db_name": "demo_db",
+                        "codigo": "ALG01-EDIT",
+                        "titulo": "Algebra editada",
+                        "autor": "Nuevo autor",
+                        "editorial": "Nueva editorial",
+                        "edicion": "2026",
+                        "curso": "Algebra",
+                        "cover_path": str(source_cover),
+                        "notas": "metadata revisada",
+                        "estado": "en_progreso",
+                    },
+                )
+                stored_cover = Path(controller.books[1]["cover_path"])
+                self.assertEqual(edited["schema_version"], "library_book_updated_v1")
+                self.assertEqual(edited["book"]["code"], "ALG01-EDIT")
+                self.assertEqual(controller.books[1]["titulo"], "Algebra editada")
+                self.assertEqual(controller.books[1]["notas"], "metadata revisada")
+                self.assertTrue(stored_cover.exists())
+                self.assertTrue(stored_cover.is_relative_to(Path(covers_tmp)))
+                self.assertEqual(stored_cover.read_bytes(), source_cover.read_bytes())
 
-        state = api.dispatch("POST", "/api/library/books/1/state", {}, {"db_name": "demo_db", "estado": "en_progreso"})
-        self.assertEqual(state["estado"], "en_progreso")
-        self.assertEqual(controller.books[1]["estado"], "en_progreso")
+                instance = api.dispatch("POST", "/api/library/books/1/instances", {}, {"db_name": "demo_db", "tipo": "S02", "total_esperado": 20})
+                self.assertEqual(instance["instance_id"], 12)
+                self.assertEqual(controller.created_instances[0].tipo, "S02")
 
-        updated = api.dispatch("POST", "/api/library/instances/11/state", {}, {"db_name": "demo_db", "book_id": 1, "activo": False, "notas": "pausada"})
-        self.assertFalse(updated["instance"]["activo"])
-        self.assertEqual(controller.updated_instances[0][0], 11)
+                state = api.dispatch("POST", "/api/library/books/1/state", {}, {"db_name": "demo_db", "estado": "en_progreso"})
+                self.assertEqual(state["estado"], "en_progreso")
+                self.assertEqual(controller.books[1]["estado"], "en_progreso")
 
-        factory = api.dispatch("POST", "/api/library/instances/11/factory", {}, {"db_name": "demo_db", "book_id": 1, "open": True})
-        self.assertEqual(factory["context"]["book_code"], "ALG01")
-        self.assertEqual(factory["context"]["instance_type"], "S01")
-        self.assertEqual(factory["url"], "http://127.0.0.1:9999/ALG01/S01/")
-        self.assertEqual(len(runtimes), 1)
-        self.assertTrue(runtimes[0].started)
-        self.assertEqual(opened[0][0], factory["url"])
+                updated = api.dispatch(
+                    "POST",
+                    "/api/library/instances/11/state",
+                    {},
+                    {
+                        "db_name": "demo_db",
+                        "book_id": 1,
+                        "tipo": "S01 editada",
+                        "total_esperado": 12,
+                        "activo": False,
+                        "notas": "pausada",
+                    },
+                )
+                self.assertFalse(updated["instance"]["activo"])
+                self.assertEqual(updated["instance"]["tipo"], "S01 editada")
+                self.assertEqual(controller.updated_instances[0][0], 11)
+                self.assertEqual(controller.updated_instances[0][1].tipo, "S01 editada")
+                self.assertEqual(controller.updated_instances[0][1].total_esperado, 12)
+
+                factory = api.dispatch("POST", "/api/library/instances/11/factory", {}, {"db_name": "demo_db", "book_id": 1, "open": True})
+                self.assertEqual(factory["context"]["book_code"], "ALG01-EDIT")
+                self.assertEqual(factory["context"]["instance_type"], "S01 editada")
+                self.assertEqual(factory["url"], "http://127.0.0.1:9999/ALG01-EDIT/S01 editada/")
+                self.assertEqual(len(runtimes), 1)
+                self.assertTrue(runtimes[0].started)
+                self.assertEqual(opened[0][0], factory["url"])
+            finally:
+                if previous_cover_root is None:
+                    os.environ.pop("PDF_LIBRARY_COVER_ROOT", None)
+                else:
+                    os.environ["PDF_LIBRARY_COVER_ROOT"] = previous_cover_root
 
     def test_library_api_resolves_book_cover_url(self) -> None:
         controller = _FakeController()
@@ -263,6 +319,138 @@ class LibraryWebApiTests(unittest.TestCase):
             finally:
                 runtime.stop()
 
+    def test_library_runtime_pastes_cover_into_central_store_and_attaches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cover_root = root / "central_covers"
+            previous_cover_root = os.environ.get("PDF_LIBRARY_COVER_ROOT")
+            os.environ["PDF_LIBRARY_COVER_ROOT"] = str(cover_root)
+            runtime = None
+            try:
+                controller = _FakeController()
+                controller.books[1]["workspace_dir"] = str(root)
+                controller.books[1]["pdf_path"] = str(root / "book.pdf")
+                runtime = LibraryWebRuntime(controller=controller)
+                base = runtime.start()
+                raw = b"\x89PNG\r\n\x1a\ncover"
+                payload = _post_json(
+                    base,
+                    "api/library/cover/paste",
+                    {
+                        "db_name": "demo_db",
+                        "book_id": 1,
+                        "attach": True,
+                        "data_url": "data:image/png;base64," + base64.b64encode(raw).decode("ascii"),
+                    },
+                )
+                cover_path = Path(payload["cover_path"])
+                self.assertEqual(payload["schema_version"], "library_cover_pasted_v1")
+                self.assertTrue(payload["attached"])
+                self.assertEqual(cover_path.name, "cover.png")
+                self.assertTrue(cover_path.is_relative_to(cover_root))
+                self.assertIn("demo-db", cover_path.parts)
+                self.assertEqual(cover_path.read_bytes(), raw)
+                self.assertEqual(controller.books[1]["cover_path"], str(cover_path))
+                self.assertEqual(controller.updated_books[-1][1].cover_path, str(cover_path))
+            finally:
+                if runtime is not None:
+                    runtime.stop()
+                if previous_cover_root is None:
+                    os.environ.pop("PDF_LIBRARY_COVER_ROOT", None)
+                else:
+                    os.environ["PDF_LIBRARY_COVER_ROOT"] = previous_cover_root
+
+    def test_library_runtime_accepts_large_cover_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cover_root = root / "central_covers"
+            previous_cover_root = os.environ.get("PDF_LIBRARY_COVER_ROOT")
+            os.environ["PDF_LIBRARY_COVER_ROOT"] = str(cover_root)
+            runtime = None
+            try:
+                controller = _FakeController()
+                controller.books[1]["workspace_dir"] = str(root)
+                controller.books[1]["pdf_path"] = str(root / "book.pdf")
+                runtime = LibraryWebRuntime(controller=controller)
+                base = runtime.start()
+                raw = b"\x89PNG\r\n\x1a\n" + (b"x" * 1_200_000)
+                payload = _post_json(
+                    base,
+                    "api/library/cover/paste",
+                    {
+                        "db_name": "demo_db",
+                        "book_id": 1,
+                        "attach": False,
+                        "data_url": "data:image/png;base64," + base64.b64encode(raw).decode("ascii"),
+                    },
+                )
+                cover_path = Path(payload["cover_path"])
+                self.assertEqual(payload["schema_version"], "library_cover_pasted_v1")
+                self.assertFalse(payload["attached"])
+                self.assertEqual(payload["bytes"], len(raw))
+                self.assertTrue(cover_path.is_relative_to(cover_root))
+                self.assertEqual(cover_path.read_bytes(), raw)
+            finally:
+                if runtime is not None:
+                    runtime.stop()
+                if previous_cover_root is None:
+                    os.environ.pop("PDF_LIBRARY_COVER_ROOT", None)
+                else:
+                    os.environ["PDF_LIBRARY_COVER_ROOT"] = previous_cover_root
+
+    def test_library_runtime_serves_factory_file_token_from_non_active_instance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            controller = _FakeController()
+            library = LibraryWebRuntime(controller=controller)
+
+            context_one = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(root / "book1.pdf"))
+            store_one = InstanceStagingStore(context_one, root=root / "staging_one")
+            crop_one = store_one.root / "crops" / "crop_one.png"
+            crop_one.parent.mkdir(parents=True, exist_ok=True)
+            crop_one.write_bytes(b"\x89PNG\r\n\x1a\none")
+            service_one = type(
+                "FakeService",
+                (),
+                {
+                    "staging": store_one,
+                    "models": type("FakeModels", (), {"to_dict": lambda _self: {}})(),
+                    "build_instance_summary": lambda _self: {},
+                    "build_stage_overview": lambda _self: [],
+                    "load_pages": lambda _self: [],
+                },
+            )()
+            runtime_one = FactoryWebRuntime(context_one, service=service_one)
+            setattr(runtime_one, "_library_instance_id", 11)
+            crop_url = runtime_one._register_file(crop_one)
+
+            context_two = InstancePipelineContext(book_code="ALG02", instance_type="S02", pdf_path=str(root / "book2.pdf"))
+            store_two = InstanceStagingStore(context_two, root=root / "staging_two")
+            service_two = type(
+                "FakeService",
+                (),
+                {
+                    "staging": store_two,
+                    "models": type("FakeModels", (), {"to_dict": lambda _self: {}})(),
+                    "build_instance_summary": lambda _self: {},
+                    "build_stage_overview": lambda _self: [],
+                    "load_pages": lambda _self: [],
+                },
+            )()
+            runtime_two = FactoryWebRuntime(context_two, service=service_two)
+            setattr(runtime_two, "_library_instance_id", 12)
+            library._factory_runtimes.extend([runtime_one, runtime_two])
+
+            try:
+                base = library.start()
+                self.assertIn("instance_id=11", crop_url)
+                legacy_url_without_instance = crop_url.split("?", 1)[0]
+                with urllib.request.urlopen(base + legacy_url_without_instance.lstrip("/"), timeout=5) as response:
+                    self.assertEqual(response.read(), b"\x89PNG\r\n\x1a\none")
+                    self.assertEqual(response.headers.get_content_type(), "image/png")
+            finally:
+                library.stop()
+
     def test_library_runtime_serves_library_boot_shell(self) -> None:
         runtime = LibraryWebRuntime(controller=_FakeController())
         try:
@@ -286,7 +474,27 @@ class LibraryWebApiTests(unittest.TestCase):
             self.assertEqual(after["schema_version"], "pdf_factory_web_app_version_v1")
             self.assertTrue(after["reload_requested"])
             self.assertEqual(before["asset_version"], after["asset_version"])
+            self.assertIn("backend_version", before)
+            self.assertIn("backend_boot_version", before)
+            self.assertFalse(before["backend_restart_required"])
             self.assertNotEqual(before.get("reload_token"), after.get("reload_token"))
+        finally:
+            runtime.stop()
+
+    def test_library_runtime_retires_global_ocr_cart_route(self) -> None:
+        runtime = LibraryWebRuntime(controller=_FakeController())
+        try:
+            base = runtime.start()
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                _post_json(
+                    base,
+                    "api/library/ocr-cart/start",
+                    {
+                        "db_name": "demo_db",
+                        "items": [{"book_id": 1, "instance_id": 11}],
+                    },
+                )
+            self.assertEqual(raised.exception.code, 404)
         finally:
             runtime.stop()
 

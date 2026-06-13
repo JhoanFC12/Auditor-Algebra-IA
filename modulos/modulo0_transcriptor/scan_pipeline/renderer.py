@@ -22,7 +22,7 @@ def render_item(item: ScanItem) -> str:
     answer_key = str(getattr(item, "answer_key", "") or "").strip().upper()
     answer_token = f" [[Clave={answer_key}]]" if answer_key in {"A", "B", "C", "D", "E"} else ""
     image_token = ""
-    if item.has_figure and item.image_binding.is_confirmed:
+    if item.has_figure:
         tag = _safe_text(item.figure_tag) or _safe_text(item.image_binding.marker_name) or f"img-{n}"
         image_token = f" [[Imagen={tag}]]"
 

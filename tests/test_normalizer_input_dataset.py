@@ -21,7 +21,7 @@ def _base_record(crop: Path, *, record_id: str = "r1", page: int = 1, box: int =
         "crop_path": str(crop),
         "status": StageStatus.NEEDS_REVIEW,
         "raw_ocr": f"<{box:02d}.> Texto",
-        "structured_ocr": {"items_total": 1, "items": [{"item": {"n": box}}]},
+        "structured_ocr": {},
         "figure_segmentation": {"segments_total": 0, "segments": []},
         "source": {
             "book_code": "ALG01",
@@ -64,6 +64,7 @@ class NormalizerInputDatasetTests(unittest.TestCase):
             self.assertEqual([row["record_id"] for row in result.rows], ["a_first", "z_last"])
             self.assertEqual(result.rows[0]["schema_version"], SCHEMA_VERSION)
             self.assertEqual(result.rows[0]["raw_ocr"], "<01.> Texto")
+            self.assertEqual(result.rows[0]["structured_ocr"], {})
             self.assertEqual(result.rows[0]["source"]["page_number"], 1)
             written = [
                 json.loads(line)
@@ -116,6 +117,41 @@ class NormalizerInputDatasetTests(unittest.TestCase):
             self.assertEqual(result.manifest["total"], 0)
             self.assertEqual(result.skipped[0]["reason"], "metadata_incomplete")
             self.assertIn("invalid:source.bbox_px", result.skipped[0]["issues"])
+
+    def test_requires_raw_ocr_even_if_legacy_structured_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            crop = root / "crop.png"
+            crop.write_bytes(b"png")
+            records = root / "staging" / "records"
+            payload = _base_record(crop)
+            payload["raw_ocr"] = ""
+            payload["structured_ocr"] = {"items_total": 1, "items": [{"item": {"n": 1}}]}
+            _write_record(records, "r1", payload)
+
+            result = export_normalizer_inputs(staging_roots=[root / "staging"], out_dir=root / "out")
+
+            self.assertEqual(result.manifest["total"], 0)
+            self.assertEqual(result.skipped[0]["reason"], "missing_raw_ocr")
+
+    def test_exports_graph_segmentation_as_normalizer_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            crop = root / "crop.png"
+            crop.write_bytes(b"png")
+            records = root / "staging" / "records"
+            payload = _base_record(crop)
+            payload["figure_segmentation"] = {
+                "segments_total": 1,
+                "segments": [{"idx": 1, "bbox_px": [10, 20, 100, 120], "image_path": "seg_01.png"}],
+            }
+            _write_record(records, "r1", payload)
+
+            result = export_normalizer_inputs(staging_roots=[root / "staging"], out_dir=root / "out")
+
+            self.assertEqual(result.manifest["total"], 1)
+            self.assertEqual(result.rows[0]["figure_segmentation"]["segments_total"], 1)
+            self.assertEqual(result.rows[0]["figure_segmentation"]["segments"][0]["bbox_px"], [10, 20, 100, 120])
 
     def test_exports_from_parent_staging_root_with_multiple_instances(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

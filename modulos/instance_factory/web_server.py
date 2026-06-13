@@ -22,25 +22,58 @@ from .library_api import LibraryApiError, LibraryWebApi
 from .runtime_env import load_factory_runtime_env
 from .hf_endpoint_manager import HfEndpointManager
 from .normalizer_training_bank import load_manifest as load_normalizer_training_manifest
+from .db_promotion import promote_staging_records_to_db
 
 
 WEB_APP_ASSET_NAMES = ("index.html", "app.js", "styles.css")
+WEB_BACKEND_SOURCE_NAMES = (
+    "web_server.py",
+    "library_web_server.py",
+    "library_api.py",
+    "pipeline.py",
+    "staging.py",
+    "db_promotion.py",
+    "../modulo9_organizador_libros/controlador_organizador_libros.py",
+)
 WEB_RELOAD_SIGNAL_PATH = Path(__file__).resolve().parents[2] / ".cache" / "instance_factory" / "web_reload_signal.json"
 
 
-def build_web_app_version(static_root: Path) -> dict[str, Any]:
+def _version_rows(paths: list[Path] | tuple[Path, ...]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    digest = hashlib.sha1()
-    root = Path(static_root)
-    for name in WEB_APP_ASSET_NAMES:
-        path = root / name
+    for path in paths:
         try:
             stat = path.stat()
-            row = {"name": name, "mtime_ns": int(stat.st_mtime_ns), "size": int(stat.st_size)}
+            row = {"name": path.name, "mtime_ns": int(stat.st_mtime_ns), "size": int(stat.st_size)}
         except Exception:
-            row = {"name": name, "mtime_ns": 0, "size": 0}
+            row = {"name": path.name, "mtime_ns": 0, "size": 0}
         rows.append(row)
+    return rows
+
+
+def _digest_rows(rows: list[dict[str, Any]]) -> str:
+    digest = hashlib.sha1()
+    for row in rows:
         digest.update(json.dumps(row, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _backend_source_version() -> dict[str, Any]:
+    root = Path(__file__).resolve().parent
+    rows = _version_rows(tuple((root / name).resolve() for name in WEB_BACKEND_SOURCE_NAMES))
+    return {
+        "backend_version": _digest_rows(rows),
+        "backend_sources": rows,
+    }
+
+
+WEB_BACKEND_BOOT_VERSION = str(_backend_source_version().get("backend_version") or "")
+
+
+def build_web_app_version(static_root: Path) -> dict[str, Any]:
+    root = Path(static_root)
+    rows = _version_rows(tuple(root / name for name in WEB_APP_ASSET_NAMES))
+    backend = _backend_source_version()
+    backend_version = str(backend.get("backend_version") or "")
     reload_token = ""
     try:
         payload = json.loads(WEB_RELOAD_SIGNAL_PATH.read_text(encoding="utf-8"))
@@ -50,9 +83,13 @@ def build_web_app_version(static_root: Path) -> dict[str, Any]:
         reload_token = ""
     return {
         "schema_version": "pdf_factory_web_app_version_v1",
-        "asset_version": digest.hexdigest(),
+        "asset_version": _digest_rows(rows),
         "reload_token": reload_token,
+        "backend_version": backend_version,
+        "backend_boot_version": WEB_BACKEND_BOOT_VERSION,
+        "backend_restart_required": bool(backend_version and backend_version != WEB_BACKEND_BOOT_VERSION),
         "assets": rows,
+        "backend_sources": backend.get("backend_sources") or [],
     }
 
 
@@ -122,6 +159,9 @@ class FactoryWebRuntime:
 
             def do_POST(self) -> None:  # noqa: N802
                 runtime._handle_request(self, method="POST")
+
+            def do_OPTIONS(self) -> None:  # noqa: N802
+                runtime._send_options(self)
 
             def log_message(self, _format: str, *_args: Any) -> None:
                 return
@@ -210,6 +250,23 @@ class FactoryWebRuntime:
             if method == "GET" and path == "/api/promotion":
                 record_id = self._first(query, "record_id", "")
                 return self.service.staging.build_promotion_candidate(record_id)
+            if method == "POST" and path == "/api/promotion/upload":
+                dry_run = self._bool(payload.get("dry_run"), default=False)
+                if not dry_run and not self._bool(payload.get("confirm"), default=False):
+                    raise WebApiError("confirm=true requerido para escribir en la base de datos.", status=400, code="missing_confirmation")
+                db_name = self._promotion_db_name(payload)
+                record_ids = self._record_ids_from_payload(payload)
+                explicit_record_id = str(payload.get("record_id") or "").strip()
+                if explicit_record_id and not record_ids:
+                    record_ids = [explicit_record_id]
+                return promote_staging_records_to_db(
+                    self.service.staging,
+                    self.context,
+                    db_name=db_name,
+                    db_profile=self._promotion_db_profile(payload),
+                    record_ids=record_ids,
+                    dry_run=dry_run,
+                )
             if method == "GET" and path == "/api/endpoint/ocr/status":
                 return self.endpoint_manager.status()
             if method == "GET" and path == "/api/training/normalizer/status":
@@ -221,7 +278,10 @@ class FactoryWebRuntime:
                     poll_s=self._bounded_int(payload.get("poll_s") or 8, "poll_s", minimum=1, maximum=120),
                 )
             if method == "POST" and path == "/api/endpoint/ocr/scale-to-zero":
-                return self.endpoint_manager.scale_to_zero()
+                return self._scale_endpoint_when_idle(
+                    force=self._bool(payload.get("force"), default=False),
+                    delay_s=0,
+                )
             if method == "POST" and path == "/api/pages/detect":
                 pages = self._required_str(payload, "pages")
                 dpi = self._bounded_int(payload.get("dpi") or 300, "dpi", minimum=72, maximum=600)
@@ -409,6 +469,64 @@ class FactoryWebRuntime:
                 return
             job.update(updates)
 
+    def _begin_endpoint_job(self, *, kind: str, job_id: str, label: str = "") -> str:
+        begin_job = getattr(self.endpoint_manager, "begin_job", None)
+        if callable(begin_job):
+            try:
+                return str(begin_job(kind=kind, job_id=job_id, label=label) or "")
+            except Exception:
+                return ""
+        return ""
+
+    def _end_endpoint_job(self, lease_id: str) -> None:
+        end_job = getattr(self.endpoint_manager, "end_job", None)
+        if callable(end_job):
+            try:
+                end_job(lease_id)
+            except Exception:
+                pass
+
+    def _scale_endpoint_when_idle(self, *, force: bool = False, delay_s: float | None = None) -> dict[str, Any]:
+        scale_if_idle = getattr(self.endpoint_manager, "scale_to_zero_if_idle", None)
+        if callable(scale_if_idle):
+            kwargs: dict[str, Any] = {"force": force}
+            if delay_s is not None:
+                kwargs["delay_s"] = delay_s
+            return scale_if_idle(**kwargs)
+        return self.endpoint_manager.scale_to_zero()
+
+    def _promotion_db_name(self, payload: dict[str, Any]) -> str:
+        library_db = str(getattr(self, "_library_db_name", "") or "").strip()
+        explicit_db = str(payload.get("db_name") or payload.get("db") or "").strip()
+        context_db = str(self.context.db_name or "").strip()
+        if library_db:
+            if explicit_db and explicit_db != library_db:
+                raise WebApiError(
+                    f"La instancia pertenece a la BD local de Biblioteca '{library_db}', no a '{explicit_db}'.",
+                    status=400,
+                    code="library_db_mismatch",
+                )
+            return library_db
+        target = explicit_db or context_db
+        if not target:
+            raise WebApiError(
+                "No hay BD local de Biblioteca definida para esta instancia.",
+                status=400,
+                code="missing_local_library_db",
+            )
+        return target
+
+    def _promotion_db_profile(self, payload: dict[str, Any]) -> str:
+        raw = str(payload.get("db_profile") or payload.get("profile") or "local_mirror").strip().lower()
+        aliases = {"", "local", "local_mirror", "internal", "interna", "biblioteca"}
+        if raw not in aliases:
+            raise WebApiError(
+                "La subida final solo puede escribir en la BD local/interna usada por Biblioteca.",
+                status=400,
+                code="non_local_db_profile_blocked",
+            )
+        return "local_mirror"
+
     def _run_ocr_job(self, job_id: str) -> None:
         with self._job_lock:
             job = self._ocr_jobs.get(job_id)
@@ -417,6 +535,7 @@ class FactoryWebRuntime:
             record_ids = list(job.get("record_ids") or [])
             options = dict(job.get("payload") or {})
         total = len(record_ids)
+        provider_key = str(options.get("provider") or "hf").strip().lower()
         self._update_ocr_job(job_id, status="running", message=f"Segmentando graficos 0 de {total}", phase="segmentation")
         for index, record_id in enumerate(record_ids):
             self._update_ocr_job(
@@ -448,57 +567,67 @@ class FactoryWebRuntime:
                     errors.append({"record_id": record_id, "phase": "segmentation", "message": str(exc)})
                     job["errors"] = errors[-50:]
                     job["message"] = f"Error de segmentacion en {index + 1} de {total}; se intentara OCR igual"
-        self._update_ocr_job(job_id, current=0, message=f"Ejecutando OCR remoto 0 de {total}", phase="ocr")
-        for index, record_id in enumerate(record_ids):
-            self._update_ocr_job(
-                job_id,
-                current=index,
-                active_id=record_id,
-                active_event={"phase": "ocr", "record_id": record_id},
-                message=f"OCR remoto {index + 1} de {total}",
+        endpoint_lease_id = ""
+        if provider_key == "hf":
+            endpoint_lease_id = self._begin_endpoint_job(
+                kind="factory_ocr",
+                job_id=job_id,
+                label=f"{self.context.instance_type} ({total} imagenes)",
             )
-            def _progress(event: dict[str, Any], *, _record_id: str = str(record_id)) -> None:
-                with self._job_lock:
-                    job = self._ocr_jobs.get(job_id)
-                    if not job:
-                        return
-                    clean_event = dict(event or {})
-                    job["active_id"] = _record_id
-                    job["active_event"] = clean_event
-                    message = str(clean_event.get("message") or "").strip()
-                    if message:
-                        job["message"] = message
-
-            try:
-                self.service.run_ocr_and_segmentation(
-                    provider=str(options.get("provider") or "hf"),
-                    curso=str(options.get("curso") or "SIN_CURSO"),
-                    tema=str(options.get("tema") or "SIN_TEMA"),
-                    start_n=int(options.get("start_n") or 1),
-                    limit=1,
-                    ocr_model=str(options.get("ocr_model") or ""),
-                    figure_model=str(options.get("figure_model") or ""),
-                    force_figure_model=bool(options.get("force_figure_model", True)),
-                    record_id=str(record_id),
-                    record_ids=[],
-                    progress_callback=_progress,
-                    run_segmentation=False,
-                    run_ocr=True,
+        self._update_ocr_job(job_id, current=0, message=f"Ejecutando OCR remoto 0 de {total}", phase="ocr")
+        try:
+            for index, record_id in enumerate(record_ids):
+                self._update_ocr_job(
+                    job_id,
+                    current=index,
+                    active_id=record_id,
+                    active_event={"phase": "ocr", "record_id": record_id},
+                    message=f"OCR remoto {index + 1} de {total}",
                 )
-                with self._job_lock:
-                    job = self._ocr_jobs.get(job_id) or {}
-                    job["ok"] = int(job.get("ok") or 0) + 1
-                    job["current"] = index + 1
-                    job["message"] = f"Guardado {index + 1} de {total}"
-            except Exception as exc:
-                with self._job_lock:
-                    job = self._ocr_jobs.get(job_id) or {}
-                    errors = list(job.get("errors") or [])
-                    errors.append({"record_id": record_id, "message": str(exc)})
-                    job["errors"] = errors[-50:]
-                    job["failed"] = int(job.get("failed") or 0) + 1
-                    job["current"] = index + 1
-                    job["message"] = f"Error en {index + 1} de {total}"
+                def _progress(event: dict[str, Any], *, _record_id: str = str(record_id)) -> None:
+                    with self._job_lock:
+                        job = self._ocr_jobs.get(job_id)
+                        if not job:
+                            return
+                        clean_event = dict(event or {})
+                        job["active_id"] = _record_id
+                        job["active_event"] = clean_event
+                        message = str(clean_event.get("message") or "").strip()
+                        if message:
+                            job["message"] = message
+
+                try:
+                    self.service.run_ocr_and_segmentation(
+                        provider=str(options.get("provider") or "hf"),
+                        curso=str(options.get("curso") or "SIN_CURSO"),
+                        tema=str(options.get("tema") or "SIN_TEMA"),
+                        start_n=int(options.get("start_n") or 1),
+                        limit=1,
+                        ocr_model=str(options.get("ocr_model") or ""),
+                        figure_model=str(options.get("figure_model") or ""),
+                        force_figure_model=bool(options.get("force_figure_model", True)),
+                        record_id=str(record_id),
+                        record_ids=[],
+                        progress_callback=_progress,
+                        run_segmentation=False,
+                        run_ocr=True,
+                    )
+                    with self._job_lock:
+                        job = self._ocr_jobs.get(job_id) or {}
+                        job["ok"] = int(job.get("ok") or 0) + 1
+                        job["current"] = index + 1
+                        job["message"] = f"Guardado {index + 1} de {total}"
+                except Exception as exc:
+                    with self._job_lock:
+                        job = self._ocr_jobs.get(job_id) or {}
+                        errors = list(job.get("errors") or [])
+                        errors.append({"record_id": record_id, "message": str(exc)})
+                        job["errors"] = errors[-50:]
+                        job["failed"] = int(job.get("failed") or 0) + 1
+                        job["current"] = index + 1
+                        job["message"] = f"Error en {index + 1} de {total}"
+        finally:
+            self._end_endpoint_job(endpoint_lease_id)
         should_shutdown = False
         endpoint_shutdown: dict[str, Any] = {}
         with self._job_lock:
@@ -523,7 +652,7 @@ class FactoryWebRuntime:
                     should_shutdown = self._active_ocr_job_count() == 0
                 if should_shutdown:
                     try:
-                        endpoint_shutdown = self.endpoint_manager.scale_to_zero()
+                        endpoint_shutdown = self._scale_endpoint_when_idle()
                     except Exception as exc:
                         endpoint_shutdown = {"error": str(exc)}
                 else:
@@ -568,6 +697,7 @@ class FactoryWebRuntime:
                 "target": "staging_only",
                 "never_insert_directly_into_problemas": True,
                 "promotion_enabled": False,
+                "explicit_manual_upload_enabled": True,
             },
         }
 
@@ -671,7 +801,14 @@ class FactoryWebRuntime:
             return ""
         token = hashlib.sha1(str(resolved).encode("utf-8")).hexdigest()
         self._file_tokens[token] = resolved
-        return f"/api/file/{token}"
+        instance_id = ""
+        try:
+            raw_instance_id = int(getattr(self, "_library_instance_id", 0) or 0)
+            if raw_instance_id > 0:
+                instance_id = f"?instance_id={raw_instance_id}"
+        except Exception:
+            instance_id = ""
+        return f"/api/file/{token}{instance_id}"
 
     def _trusted_file_roots(self) -> list[Path]:
         roots = [
@@ -727,12 +864,26 @@ class FactoryWebRuntime:
         self._send_file(handler, file_path, mimetypes.guess_type(str(file_path))[0] or "text/plain")
 
     @staticmethod
+    def _send_cors_headers(handler: BaseHTTPRequestHandler) -> None:
+        handler.send_header("Access-Control-Allow-Origin", "*")
+        handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        handler.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+    @staticmethod
+    def _send_options(handler: BaseHTTPRequestHandler) -> None:
+        handler.send_response(204)
+        FactoryWebRuntime._send_cors_headers(handler)
+        handler.send_header("Cache-Control", "no-store")
+        handler.end_headers()
+
+    @staticmethod
     def _send_json(handler: BaseHTTPRequestHandler, payload: Any, *, status: int = 200) -> None:
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         handler.send_response(status)
         handler.send_header("Content-Type", "application/json; charset=utf-8")
         handler.send_header("Content-Length", str(len(raw)))
         handler.send_header("Cache-Control", "no-store")
+        FactoryWebRuntime._send_cors_headers(handler)
         handler.end_headers()
         handler.wfile.write(raw)
 
@@ -747,6 +898,7 @@ class FactoryWebRuntime:
         handler.send_header("Content-Type", content_type)
         handler.send_header("Content-Length", str(len(raw)))
         handler.send_header("Cache-Control", "no-store")
+        FactoryWebRuntime._send_cors_headers(handler)
         handler.end_headers()
         handler.wfile.write(raw)
 
@@ -870,6 +1022,7 @@ class FactoryWebRuntime:
             "/api/pdf/page": {"GET"},
             "/api/record": {"GET"},
             "/api/promotion": {"GET"},
+            "/api/promotion/upload": {"POST"},
             "/api/endpoint/ocr/status": {"GET"},
             "/api/ocr/jobs/status": {"GET"},
             "/api/training/normalizer/status": {"GET"},

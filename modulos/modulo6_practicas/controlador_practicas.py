@@ -45,8 +45,9 @@ class PracticeBuilderController:
 
     def listar_cursos(self, db_name: str) -> List[str]:
         schema = self._schema_info(db_name)
+        values: list[str] = []
         if schema["has_temas_table"]:
-            return self._normalize_course_values(
+            values.extend(
                 self._query_distinct(
                 db_name,
                 """
@@ -58,7 +59,7 @@ class PracticeBuilderController:
                 )
             )
         if schema["course_column"]:
-            return self._normalize_course_values(
+            values.extend(
                 self._query_distinct(
                 db_name,
                 f"""
@@ -69,11 +70,25 @@ class PracticeBuilderController:
                 """,
                 )
             )
-        return []
+        return self._normalize_course_values(values)
 
     def listar_temas(self, db_name: str, *, curso: str = "") -> List[Dict[str, object]]:
         schema = self._schema_info(db_name)
         curso = self._canonical_course_value(curso)
+        result: list[dict[str, object]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def append_topic(topic_id: object, nombre: object, area: object = "") -> None:
+            clean_name = str(nombre or "").strip()
+            clean_area = self._canonical_course_value(area)
+            if not clean_name:
+                return
+            key = (self._normalized_text_key(clean_area), self._normalized_text_key(clean_name))
+            if key in seen:
+                return
+            seen.add(key)
+            result.append({"id": topic_id, "nombre": clean_name, "curso": clean_area})
+
         if schema["has_temas_table"]:
             if curso:
                 normalized_area_expr = self._sql_normalized_text("COALESCE(t.area,'')")
@@ -96,14 +111,12 @@ class PracticeBuilderController:
                     ORDER BY COALESCE(t.area,''), COALESCE(t.nombre,'') ASC;
                     """,
                 )
-            return [
-                {"id": int(r[0]), "nombre": str(r[1] or ""), "curso": self._canonical_course_value(r[2])}
-                for r in rows
-            ]
+            for r in rows:
+                append_topic(self._catalog_ref("topic", r[0], r[1]), r[1], r[2])
 
         topic_column = str(schema["topic_column"] or "")
         if not topic_column:
-            return []
+            return result
 
         clauses = [f"COALESCE(TRIM(CAST(p.{topic_column} AS text)), '') <> ''"]
         params: list[object] = []
@@ -123,38 +136,54 @@ class PracticeBuilderController:
             tuple(params),
         )
         names = [str(r[0] or "").strip() for r in rows if str(r[0] or "").strip()]
-        return [
-            {"id": name, "nombre": name, "curso": curso}
-            for name in self._normalize_text_values(names)
-        ]
+        for name in self._normalize_text_values(names):
+            append_topic(self._direct_ref("topic", name), name, curso)
+        return result
 
     def listar_subtemas(self, db_name: str, *, tema_id: Optional[object]) -> List[Dict[str, object]]:
         schema = self._schema_info(db_name)
+        result: list[dict[str, object]] = []
+        seen: set[str] = set()
+
+        def append_subtopic(subtopic_id: object, nombre: object) -> None:
+            clean_name = str(nombre or "").strip()
+            if not clean_name:
+                return
+            key = self._normalized_text_key(clean_name)
+            if key in seen:
+                return
+            seen.add(key)
+            result.append({"id": subtopic_id, "nombre": clean_name})
+
+        topic_ref = self._parse_meta_ref(tema_id)
         if schema["has_subtemas_table"]:
-            if not tema_id:
-                return []
-            rows = self._query_rows(
-                db_name,
-                """
-                SELECT s.id, COALESCE(s.nombre,'')
-                FROM subtemas s
-                WHERE s.tema_id = %s
-                ORDER BY COALESCE(s.nombre,'') ASC;
-                """,
-                (int(tema_id),),
-            )
-            return [{"id": int(r[0]), "nombre": str(r[1] or "")} for r in rows]
+            if topic_ref["id"] is not None:
+                rows = self._query_rows(
+                    db_name,
+                    """
+                    SELECT s.id, COALESCE(s.nombre,'')
+                    FROM subtemas s
+                    WHERE s.tema_id = %s
+                    ORDER BY COALESCE(s.nombre,'') ASC;
+                    """,
+                    (int(topic_ref["id"]),),
+                )
+                for r in rows:
+                    append_subtopic(self._catalog_ref("subtopic", r[0], r[1]), r[1])
 
         subtopic_column = str(schema["subtopic_column"] or "")
         if not subtopic_column:
-            return []
+            return result
         clauses = [f"COALESCE(TRIM(CAST(p.{subtopic_column} AS text)), '') <> ''"]
         params: list[object] = []
         topic_column = str(schema["topic_column"] or "")
-        if tema_id and topic_column:
+        if topic_ref["text"] and topic_column:
             normalized_topic_expr = self._sql_normalized_text(f"p.{topic_column}")
             clauses.append(f"{normalized_topic_expr} = %s")
-            params.append(self._normalized_text_key(str(tema_id)))
+            params.append(self._normalized_text_key(str(topic_ref["text"])))
+        elif topic_ref["id"] is not None and schema.get("tema_id_column"):
+            clauses.append("p.tema_id = %s")
+            params.append(int(topic_ref["id"]))
         rows = self._query_rows(
             db_name,
             f"""
@@ -166,7 +195,9 @@ class PracticeBuilderController:
             tuple(params),
         )
         names = [str(r[0] or "").strip() for r in rows if str(r[0] or "").strip()]
-        return [{"id": name, "nombre": name} for name in self._normalize_text_values(names)]
+        for name in self._normalize_text_values(names):
+            append_subtopic(self._direct_ref("subtopic", name), name)
+        return result
 
     def listar_autores(
         self,
@@ -807,6 +838,50 @@ class PracticeBuilderController:
         text = re.sub(r"\s+", " ", text)
         return text.casefold()
 
+    def _direct_ref(self, kind: str, text: object) -> str:
+        clean_kind = str(kind or "").strip()
+        clean_text = str(text or "").strip()
+        return f"direct:{clean_kind}:{clean_text}"
+
+    def _catalog_ref(self, kind: str, raw_id: object, text: object = "") -> str:
+        clean_kind = str(kind or "").strip()
+        clean_id = str(raw_id or "").strip()
+        clean_text = str(text or "").strip()
+        return f"catalog:{clean_kind}:{clean_id}:{clean_text}"
+
+    def _parse_meta_ref(self, value: object) -> dict[str, object]:
+        raw = str(value or "").strip()
+        parsed: dict[str, object] = {"source": "", "kind": "", "id": None, "text": ""}
+        if not raw or raw == "Todos":
+            return parsed
+
+        if raw.startswith("catalog:"):
+            parts = raw.split(":", 3)
+            parsed["source"] = "catalog"
+            parsed["kind"] = parts[1].strip() if len(parts) > 1 else ""
+            raw_id = parts[2].strip() if len(parts) > 2 else ""
+            parsed["text"] = parts[3].strip() if len(parts) > 3 else ""
+            try:
+                parsed["id"] = int(raw_id)
+            except Exception:
+                parsed["id"] = None
+            return parsed
+
+        if raw.startswith("direct:"):
+            parts = raw.split(":", 2)
+            parsed["source"] = "direct"
+            parsed["kind"] = parts[1].strip() if len(parts) > 1 else ""
+            parsed["text"] = parts[2].strip() if len(parts) > 2 else ""
+            return parsed
+
+        try:
+            parsed["source"] = "catalog"
+            parsed["id"] = int(raw)
+        except Exception:
+            parsed["source"] = "direct"
+            parsed["text"] = raw
+        return parsed
+
     def _canonical_course_value(self, value: object) -> str:
         text = str(value or "").strip()
         if not text:
@@ -879,6 +954,10 @@ class PracticeBuilderController:
     ) -> str:
         column = str(schema.get(key) or "")
         if column:
+            direct_expr = f"NULLIF(TRIM(CAST(p.{column} AS text)), '')"
+            should_fallback = (use_catalog and schema.get("uses_catalog")) or allow_fallback
+            if should_fallback and fallback_expr:
+                return f"COALESCE({direct_expr}, {fallback_expr}, '')"
             return f"COALESCE(p.{column},'')"
         if use_catalog and schema.get("uses_catalog"):
             return fallback_expr
@@ -1071,32 +1150,73 @@ class PracticeBuilderController:
         params: List[object] = []
         uses_catalog = bool(schema.get("uses_catalog"))
         join_sql = self._compose_join_sql(schema)
+        topic_ref = self._parse_meta_ref(tema_id)
+        subtopic_ref = self._parse_meta_ref(subtema_id)
         if uses_catalog:
             canonical_course = self._canonical_course_value(curso)
             if canonical_course:
+                course_clauses: list[str] = []
+                normalized_course = self._normalized_text_key(canonical_course)
                 normalized_area_expr = self._sql_normalized_text("COALESCE(t.area,'')")
-                clauses.append(f"{normalized_area_expr} = %s")
-                params.append(self._normalized_text_key(canonical_course))
-            if tema_id:
-                clauses.append("p.tema_id = %s")
-                params.append(int(tema_id))
-            if subtema_id:
-                clauses.append("p.subtema_id = %s")
-                params.append(int(subtema_id))
+                course_clauses.append(f"{normalized_area_expr} = %s")
+                params.append(normalized_course)
+                if schema.get("course_column"):
+                    normalized_course_expr = self._sql_normalized_text(f"p.{schema['course_column']}")
+                    course_clauses.append(f"{normalized_course_expr} = %s")
+                    params.append(normalized_course)
+                clauses.append("(" + " OR ".join(course_clauses) + ")")
+
+            topic_clauses: list[str] = []
+            topic_text = str(topic_ref.get("text") or "").strip()
+            if topic_ref.get("id") is not None and schema.get("tema_id_column"):
+                topic_clauses.append("p.tema_id = %s")
+                params.append(int(topic_ref["id"]))
+            if topic_text:
+                normalized_topic = self._normalized_text_key(topic_text)
+                if schema.get("topic_column"):
+                    normalized_topic_expr = self._sql_normalized_text(f"p.{schema['topic_column']}")
+                    topic_clauses.append(f"{normalized_topic_expr} = %s")
+                    params.append(normalized_topic)
+                if schema.get("has_temas_table"):
+                    normalized_catalog_topic_expr = self._sql_normalized_text("COALESCE(t.nombre,'')")
+                    topic_clauses.append(f"{normalized_catalog_topic_expr} = %s")
+                    params.append(normalized_topic)
+            if topic_clauses:
+                clauses.append("(" + " OR ".join(topic_clauses) + ")")
+
+            subtopic_clauses: list[str] = []
+            subtopic_text = str(subtopic_ref.get("text") or "").strip()
+            if subtopic_ref.get("id") is not None and schema.get("subtema_id_column"):
+                subtopic_clauses.append("p.subtema_id = %s")
+                params.append(int(subtopic_ref["id"]))
+            if subtopic_text:
+                normalized_subtopic = self._normalized_text_key(subtopic_text)
+                if schema.get("subtopic_column"):
+                    normalized_subtopic_expr = self._sql_normalized_text(f"p.{schema['subtopic_column']}")
+                    subtopic_clauses.append(f"{normalized_subtopic_expr} = %s")
+                    params.append(normalized_subtopic)
+                if schema.get("has_subtemas_table"):
+                    normalized_catalog_subtopic_expr = self._sql_normalized_text("COALESCE(s.nombre,'')")
+                    subtopic_clauses.append(f"{normalized_catalog_subtopic_expr} = %s")
+                    params.append(normalized_subtopic)
+            if subtopic_clauses:
+                clauses.append("(" + " OR ".join(subtopic_clauses) + ")")
         else:
             canonical_course = self._canonical_course_value(curso)
             if canonical_course and schema.get("course_column"):
                 normalized_course_expr = self._sql_normalized_text(f"p.{schema['course_column']}")
                 clauses.append(f"{normalized_course_expr} = %s")
                 params.append(self._normalized_text_key(canonical_course))
-            if tema_id and schema.get("topic_column"):
+            topic_text = str(topic_ref.get("text") or tema_id or "").strip()
+            if topic_text and schema.get("topic_column"):
                 normalized_topic_expr = self._sql_normalized_text(f"p.{schema['topic_column']}")
                 clauses.append(f"{normalized_topic_expr} = %s")
-                params.append(self._normalized_text_key(str(tema_id)))
-            if subtema_id and schema.get("subtopic_column"):
+                params.append(self._normalized_text_key(topic_text))
+            subtopic_text = str(subtopic_ref.get("text") or subtema_id or "").strip()
+            if subtopic_text and schema.get("subtopic_column"):
                 normalized_subtopic_expr = self._sql_normalized_text(f"p.{schema['subtopic_column']}")
                 clauses.append(f"{normalized_subtopic_expr} = %s")
-                params.append(self._normalized_text_key(str(subtema_id)))
+                params.append(self._normalized_text_key(subtopic_text))
 
         author_expr = self._filter_field_expr(schema, "author_column")
         editorial_expr = self._filter_field_expr(schema, "editorial_column")

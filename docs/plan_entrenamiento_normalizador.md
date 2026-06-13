@@ -181,7 +181,7 @@ Cada ejemplo de entrenamiento debe tener como minimo:
 }
 ```
 
-`raw_ocr` es la fuente principal. `structured_ocr` ayuda, pero no debe reemplazar la revision del texto original.
+`raw_ocr` es la fuente principal y ahora es requisito para entrar al normalizador. `structured_ocr` queda como campo historico/opcional y se exporta vacio en el contrato nuevo para no depender del parser anterior. La otra evidencia obligatoria para problemas con graficos es `figure_segmentation`, que indica si se debe usar `[[Imagen=img-n]]` sin describir el grafico.
 
 ## Contrato De Salida
 

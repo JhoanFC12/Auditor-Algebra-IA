@@ -50,7 +50,6 @@ SYSTEM_PROMPT_RAW_OCR = (
     "Si una palabra, numero, signo o formula no se lee con seguridad, escribe [ilegible] o conserva el fragmento dudoso sin completarlo."
 )
 
-
 SYSTEM_PROMPT_GRAPHIC_CONTINUATION = (
     "Eres un detector visual estricto de continuaciones graficas en ejercicios matematicos. "
     "Devuelves SOLO JSON valido. "

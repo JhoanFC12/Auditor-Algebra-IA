@@ -210,6 +210,9 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                 self.assertEqual(after["schema_version"], "pdf_factory_web_app_version_v1")
                 self.assertTrue(after["reload_requested"])
                 self.assertEqual(before["asset_version"], after["asset_version"])
+                self.assertIn("backend_version", before)
+                self.assertIn("backend_boot_version", before)
+                self.assertFalse(before["backend_restart_required"])
                 self.assertNotEqual(before.get("reload_token"), after.get("reload_token"))
             finally:
                 runtime.stop()
@@ -403,6 +406,77 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                 self.assertFalse(candidate["promotion_enabled"])
                 self.assertIsNone(candidate["sql"])
                 self.assertEqual(candidate["write_operations"], [])
+            finally:
+                runtime.stop()
+
+    def test_promotion_upload_uses_library_local_db_and_blocks_external_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            crop = root / "crop.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(
+                book_code="ALG01",
+                instance_type="S01",
+                pdf_path=str(root / "book.pdf"),
+                db_name="context_db_should_not_win",
+            )
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(crop),
+                    status=StageStatus.READY,
+                    normalized={
+                        "latex_rendered_item": r"\item[\textbf{1.}] [[curso=Algebra]] [[tema=Ecuaciones]] [[Estado=sin_revisar]] [[Clave=B]] Halle $x$. A)$1$ B)$2$"
+                    },
+                    models={"ocr": "test-ocr", "figure_segmentation": "test-figure"},
+                    source={"page_number": 1, "bbox_px": [1, 2, 3, 4]},
+                )
+            )
+            runtime = FactoryWebRuntime(context, service=_FakeService(context, store))
+            setattr(runtime, "_library_db_name", "library_local_db")
+            try:
+                base = runtime.start()
+                body = json.dumps(
+                    {
+                        "db_name": "library_local_db",
+                        "db_profile": "biblioteca",
+                        "record_ids": ["crop_001"],
+                        "dry_run": True,
+                    }
+                ).encode("utf-8")
+                request = urllib.request.Request(
+                    base + "api/promotion/upload",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    report = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(report["db_name"], "library_local_db")
+                self.assertEqual(report["db_profile"], "local_mirror")
+                self.assertEqual(report["rows"][0]["status"], "ready")
+
+                body = json.dumps(
+                    {
+                        "db_name": "library_local_db",
+                        "db_profile": "cloud",
+                        "record_ids": ["crop_001"],
+                        "dry_run": True,
+                    }
+                ).encode("utf-8")
+                request = urllib.request.Request(
+                    base + "api/promotion/upload",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    urllib.request.urlopen(request, timeout=5)
+                self.assertEqual(ctx.exception.code, 400)
+                payload = json.loads(ctx.exception.read().decode("utf-8"))
+                self.assertEqual(payload["code"], "non_local_db_profile_blocked")
             finally:
                 runtime.stop()
 

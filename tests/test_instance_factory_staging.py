@@ -12,7 +12,11 @@ from modulos.instance_factory.model_inventory import build_model_inventory_manif
 from modulos.instance_factory.models import InstancePipelineContext, PipelineStep, StageStatus, StagingProblemRecord
 from modulos.instance_factory.page_selection import parse_page_selection
 from modulos.instance_factory.pipeline import InstancePdfPipelineService
-from modulos.instance_factory.staging import InstanceStagingStore
+from modulos.instance_factory.staging import (
+    MAX_ARTIFACT_PATH_LEN_SOFT_LIMIT,
+    InstanceStagingStore,
+    compact_artifact_dir_name,
+)
 
 
 def structured_report(number: int, statement: str) -> dict:
@@ -227,7 +231,7 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertTrue(Path(rows[0]["images"][0]["bank_path"]).exists())
             self.assertEqual(updated.artifacts["normalizer_training_samples_total"], 1)
 
-    def test_normalize_existing_ocr_can_target_single_record(self) -> None:
+    def test_normalize_existing_ocr_requires_raw_ocr_when_targeting_single_record(self) -> None:
         try:
             from modulos.instance_factory.pipeline import InstancePdfPipelineService
         except Exception as exc:  # pragma: no cover - optional detector/OCR dependencies.
@@ -259,7 +263,8 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             out = service.normalize_existing_ocr(record_id="crop_001")
 
             self.assertEqual([record.record_id for record in out], ["crop_001"])
-            self.assertEqual(store.get_record("crop_001").normalized["numero"], "11")
+            self.assertEqual(store.get_record("crop_001").normalized, {})
+            self.assertEqual(store.get_record("crop_001").step_status(PipelineStep.NORMALIZATION), StageStatus.PENDING)
             self.assertEqual(store.get_record("crop_001").errors, [])
             self.assertNotEqual(store.get_record("crop_001").status, StageStatus.ERROR)
             self.assertEqual(store.get_record("crop_002").normalized["numero"], "99")
@@ -1198,6 +1203,70 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertEqual(raw_dir.name, review_dir.name)
             self.assertEqual(raw_dir.parent.name, "raw_outputs")
             self.assertEqual(review_dir.parent.name, "review_outputs")
+
+    def test_compact_artifact_dir_name_respects_small_path_budgets(self) -> None:
+        record_id = "impecus-jose-meza-barcena-const_aef5f6c63f877da4"
+
+        for max_len in (24, 18, 12, 10, 8, 1):
+            with self.subTest(max_len=max_len):
+                compact = compact_artifact_dir_name(record_id, max_len=max_len)
+                self.assertLessEqual(len(compact), max_len)
+                self.assertTrue(compact)
+
+    def test_artifact_dirs_shrink_for_deep_windows_like_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            target_root_len = 183
+            filler_len = max(12, target_root_len - len(str(base)) - 1)
+            deep_root = base / ("x" * filler_len)
+            context = InstancePipelineContext(book_code="IMPECUS", instance_type="problemas_propuestos", pdf_path=str(Path(tmp) / "book.pdf"))
+            store = InstanceStagingStore(context, root=deep_root)
+            record_id = "impecus-jose-meza-barcena-construcciones-triangulos____CONSTRUCC_" + ("x" * 96)
+
+            raw_dir = store.artifact_dir("raw_outputs", record_id, probe_file="figure_segmentation.json")
+            structured_path = raw_dir / "structured_ocr.json"
+            figure_path = raw_dir / "figure_segmentation.json"
+
+            self.assertNotEqual(raw_dir.name, record_id)
+            self.assertLess(len(raw_dir.name), 48)
+            self.assertLessEqual(len(str(structured_path)), MAX_ARTIFACT_PATH_LEN_SOFT_LIMIT)
+            self.assertLessEqual(len(str(figure_path)), MAX_ARTIFACT_PATH_LEN_SOFT_LIMIT)
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            structured_path.write_text("{}", encoding="utf-8")
+            figure_path.write_text("{}", encoding="utf-8")
+            self.assertTrue(structured_path.exists())
+            self.assertTrue(figure_path.exists())
+
+    def test_record_files_compact_long_record_ids_without_changing_record_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s01", pdf_path=str(Path(tmp) / "book.pdf"))
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            long_record_id = "impecus-jose-meza-barcena-construccio_a7a09462a0____CONSTRUCC_" + ("x" * 120)
+            crop = Path(tmp) / "crop.png"
+            crop.write_bytes(b"png")
+
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id=long_record_id,
+                    crop_id=long_record_id,
+                    crop_path=str(crop),
+                    raw_ocr="<01.> Halle x. A) $1$ B) $2$",
+                    source={"page_number": 1, "bbox_px": [1, 2, 30, 40]},
+                )
+            )
+
+            files = list((Path(tmp) / "staging" / "records").glob("*.json"))
+            self.assertEqual(len(files), 1)
+            self.assertNotEqual(files[0].stem, long_record_id)
+            self.assertLess(len(str(files[0])), 240)
+
+            loaded = store.get_record(long_record_id)
+            assert loaded is not None
+            self.assertEqual(loaded.record_id, long_record_id)
+
+            updated = store.update_review(long_record_id, {"numero": "1", "latex_rendered_item": "Problema $x$"})
+            self.assertEqual(updated.record_id, long_record_id)
+            self.assertEqual(store.get_record(long_record_id).normalized["numero"], "1")
 
     def test_cold_start_503_retry_keeps_ocr_request_alive(self) -> None:
         class Extractor:

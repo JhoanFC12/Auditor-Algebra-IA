@@ -69,18 +69,6 @@ def _record_sort_key(row: dict[str, Any]) -> tuple[int, int, int, int, int, str]
     )
 
 
-def _is_structured_available(structured: Any) -> bool:
-    if not isinstance(structured, dict) or not structured:
-        return False
-    try:
-        if int(structured.get("items_total") or 0) > 0:
-            return True
-    except Exception:
-        pass
-    items = structured.get("items")
-    return isinstance(items, list) and bool(items)
-
-
 def _is_stale_or_invalidated(row: dict[str, Any]) -> bool:
     audit = row.get("audit") if isinstance(row.get("audit"), dict) else {}
     downstream = audit.get("downstream_state") if isinstance(audit.get("downstream_state"), dict) else {}
@@ -125,7 +113,7 @@ def _build_input_row(row: dict[str, Any], record_path: Path) -> dict[str, Any]:
         "crop_id": str(row.get("crop_id") or row.get("record_id") or record_path.stem),
         "crop_path": str(row.get("crop_path") or source.get("crop_path") or ""),
         "raw_ocr": str(row.get("raw_ocr") or ""),
-        "structured_ocr": dict(row.get("structured_ocr") or {}),
+        "structured_ocr": {},
         "figure_segmentation": dict(row.get("figure_segmentation") or {}),
         "source": source,
         "models": dict(row.get("models") or {}),
@@ -157,9 +145,8 @@ def collect_normalizer_inputs(staging_roots: Iterable[Path]) -> tuple[list[dict[
             skipped.append(_skip(record_path, "missing_crop", crop_path=str(crop_path)))
             continue
         raw_ocr = str(row.get("raw_ocr") or "").strip()
-        structured = row.get("structured_ocr") if isinstance(row.get("structured_ocr"), dict) else {}
-        if not raw_ocr and not _is_structured_available(structured):
-            skipped.append(_skip(record_path, "missing_ocr"))
+        if not raw_ocr:
+            skipped.append(_skip(record_path, "missing_raw_ocr"))
             continue
         metadata_issues = _metadata_issues(row)
         if metadata_issues:
@@ -215,7 +202,7 @@ def export_normalizer_inputs(
         "ready_steps": counts_by_step_ready,
         "filters": {
             "requires_existing_crop": True,
-            "requires_raw_or_structured_ocr": True,
+            "requires_raw_ocr": True,
             "requires_page_box_crop_metadata": True,
             "excludes_source_stale_or_invalidated": True,
         },

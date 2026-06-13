@@ -610,7 +610,8 @@ class BookProgressController:
             cur = conn.cursor()
             cur.execute(
                 f"""
-                SELECT i.libro_id, i.{instance_col} AS tipo, COALESCE(i.session_path, ''), COALESCE(i.soluciones_dir, ''), COALESCE(l.workspace_dir, '')
+                SELECT i.libro_id, i.{instance_col} AS tipo, COALESCE(i.session_path, ''), COALESCE(i.soluciones_dir, ''),
+                       COALESCE(l.workspace_dir, ''), COALESCE(l.codigo, '')
                 FROM libro_instancias_escaneo i
                 JOIN libros_escaneo l ON l.id = i.libro_id
                 WHERE i.id = %s
@@ -625,6 +626,7 @@ class BookProgressController:
             old_session_path = self._normalize_resource_path_text(str(row[2] or "").strip(), prefer_existing=True)
             old_soluciones_dir = self._normalize_resource_path_text(str(row[3] or "").strip(), prefer_existing=True)
             workspace_dir = self._normalize_resource_path_text(str(row[4] or "").strip(), prefer_existing=False)
+            libro_codigo = str(row[5] or "").strip()
             self._prepare_instance_workspace(workspace_dir, data.tipo)
             old_default_session = str(self._default_session_path_for_instance(workspace_dir, old_tipo))
             old_default_soluciones = str(self._default_solutions_dir_for_instance(workspace_dir, old_tipo))
@@ -660,6 +662,8 @@ class BookProgressController:
                     int(instancia_id),
                 ),
             )
+            if old_tipo != data.tipo:
+                self._update_instance_references(cur, conn, libro_codigo, old_tipo, data.tipo)
             self._touch_book(cur, libro_id)
             conn.commit()
         except Exception as exc:
@@ -669,6 +673,46 @@ class BookProgressController:
             raise
         finally:
             conn.close()
+
+    def _update_instance_references(self, cur, conn, libro_codigo: str, old_tipo: str, new_tipo: str) -> Dict[str, int]:
+        clean_code = str(libro_codigo or "").strip()
+        old_clean = self._normalize_instance_type(old_tipo)
+        new_clean = self._normalize_instance_type(new_tipo)
+        if not clean_code or not old_clean or not new_clean or old_clean == new_clean:
+            return {"problems_updated": 0, "pending_updated": 0}
+
+        problems_updated = 0
+        pending_updated = 0
+        if self._pg_table_exists(conn, "problemas"):
+            problem_instance_col = self._problem_instance_column_name(conn)
+            cur.execute(
+                f"""
+                UPDATE problemas
+                SET {problem_instance_col} = %s
+                WHERE libro_codigo = %s
+                  AND {problem_instance_col} = %s
+                """,
+                (new_clean, clean_code, old_clean),
+            )
+            problems_updated = max(int(cur.rowcount or 0), 0)
+
+        if self._pg_table_exists(conn, "problema_pending_changes") and self._pg_column_exists(
+            conn,
+            "problema_pending_changes",
+            "libro_codigo",
+        ) and self._pg_column_exists(conn, "problema_pending_changes", "codigo_instancia"):
+            cur.execute(
+                """
+                UPDATE problema_pending_changes
+                SET codigo_instancia = %s
+                WHERE libro_codigo = %s
+                  AND codigo_instancia = %s
+                """,
+                (new_clean, clean_code, old_clean),
+            )
+            pending_updated = max(int(cur.rowcount or 0), 0)
+
+        return {"problems_updated": problems_updated, "pending_updated": pending_updated}
 
     def eliminar_instancia(self, db_name: str, instancia_id: int) -> Dict[str, int]:
         self._ensure_schema(db_name)
@@ -1178,7 +1222,7 @@ class BookProgressController:
         row["cover_path_mirror"] = cover_mirror
         row["workspace_dir"] = self._preferred_resource_path(workspace_local, workspace_mirror, workspace_server)
         row["pdf_path"] = self._preferred_resource_path(pdf_local, pdf_mirror, pdf_server)
-        row["cover_path"] = self._preferred_resource_path(cover_local, cover_mirror, cover_server)
+        row["cover_path"] = self._preferred_resource_path(cover_server, cover_local, cover_mirror)
 
     def _path_exists(self, raw_path: str) -> bool:
         if not raw_path:

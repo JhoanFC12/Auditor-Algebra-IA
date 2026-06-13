@@ -6,6 +6,7 @@ import json
 import os
 import urllib.parse
 
+from .library_covers import copy_cover_to_library_store
 from .models import InstancePipelineContext
 
 if TYPE_CHECKING:
@@ -89,7 +90,7 @@ class LibraryWebApi:
         if parts == ["api", "library", "books"]:
             return {"GET", "POST"}
         if len(parts) == 4 and parts[:3] == ["api", "library", "books"]:
-            return {"GET"}
+            return {"GET", "POST"}
         if len(parts) == 5 and parts[:3] == ["api", "library", "books"] and parts[4] == "instances":
             return {"POST"}
         if len(parts) == 5 and parts[:3] == ["api", "library", "books"] and parts[4] == "state":
@@ -125,7 +126,10 @@ class LibraryWebApi:
         if parts == ["api", "library", "books"] and method == "POST":
             return self._create_book(payload)
         if len(parts) == 4 and parts[:3] == ["api", "library", "books"]:
-            return self._book_detail(query, _int_id(parts[3], "book_id"))
+            book_id = _int_id(parts[3], "book_id")
+            if method == "GET":
+                return self._book_detail(query, book_id)
+            return self._update_book(query, payload, book_id)
         if len(parts) == 5 and parts[:3] == ["api", "library", "books"] and parts[4] == "instances":
             return self._create_instance(query, payload, _int_id(parts[3], "book_id"))
         if len(parts) == 5 and parts[:3] == ["api", "library", "books"] and parts[4] == "state":
@@ -192,9 +196,28 @@ class LibraryWebApi:
 
     def _create_book(self, payload: dict[str, Any]) -> dict[str, Any]:
         db_name = _required_db(payload=payload)
-        book_id = self.controller.crear_libro(db_name, _book_input(payload))
+        data = dict(payload)
+        data["cover_path"] = copy_cover_to_library_store(str(data.get("cover_path") or ""), data, db_name=db_name)
+        book_id = self.controller.crear_libro(db_name, _book_input(data))
         return {
             "schema_version": "library_book_created_v1",
+            "db_name": db_name,
+            "book_id": book_id,
+            "book": self._book_detail_payload(db_name, book_id)["book"],
+            "policy": _policy(),
+        }
+
+    def _update_book(self, query: dict[str, list[str]], payload: dict[str, Any], book_id: int) -> dict[str, Any]:
+        db_name = _required_db(query=query, payload=payload)
+        current = self.controller.obtener_libro(db_name, book_id)
+        if not current:
+            raise FileNotFoundError("Libro no encontrado.")
+        merged = {**dict(current), **payload, "id": book_id}
+        merged["cover_path"] = copy_cover_to_library_store(str(merged.get("cover_path") or ""), merged, db_name=db_name)
+        data = _book_input(merged)
+        self.controller.actualizar_libro(db_name, book_id, _book_update_input(asdict(data)))
+        return {
+            "schema_version": "library_book_updated_v1",
             "db_name": db_name,
             "book_id": book_id,
             "book": self._book_detail_payload(db_name, book_id)["book"],
@@ -246,14 +269,28 @@ class LibraryWebApi:
         if current is None:
             raise FileNotFoundError("Instancia no encontrada.")
         merged = {**current, **payload, "libro_id": book_id}
+        incoming_name = str(
+            payload.get("tipo")
+            or payload.get("name")
+            or payload.get("title")
+            or payload.get("instance_type")
+            or payload.get("codigo_instancia")
+            or ""
+        ).strip()
+        if incoming_name:
+            merged["tipo"] = incoming_name
         self.controller.actualizar_instancia(db_name, instance_id, _instance_update_input(asdict(_instance_input(merged, book_id=book_id))))
-        updated = self._instance_by_id(db_name, book_id, instance_id)
+        detail = self._book_detail_payload(db_name, book_id)
+        updated = next((row for row in detail["instances"] if int(row.get("id") or 0) == int(instance_id)), None)
         return {
             "schema_version": "library_instance_state_updated_v1",
             "db_name": db_name,
             "book_id": book_id,
             "instance_id": instance_id,
             "instance": updated,
+            "instances": detail["instances"],
+            "book": detail["book"],
+            "dashboard": detail["dashboard"],
             "policy": _policy(),
         }
 
@@ -268,7 +305,11 @@ class LibraryWebApi:
             raise FileNotFoundError("Instancia no encontrada.")
         context = InstancePipelineContext.from_library_instance(book, instance, db_name=db_name)
         runtime = self.runtime_factory(context)
-        url = runtime.start()
+        setattr(runtime, "_library_db_name", db_name)
+        setattr(runtime, "_library_book_id", int(book_id))
+        setattr(runtime, "_library_instance_id", int(instance_id))
+        embedded = bool(payload.get("embedded") or payload.get("stable") or payload.get("use_library_server"))
+        url = "" if embedded else runtime.start()
         self._factory_runtimes.append(runtime)
         opened = bool(payload.get("open") or payload.get("abrir"))
         if opened and self.open_url is not None:
@@ -312,6 +353,17 @@ class LibraryWebApi:
     def _book_summary(self, db_name: str, book: dict[str, Any], *, dashboard: dict[str, Any] | None = None) -> dict[str, Any]:
         row = dict(book)
         row["db_name"] = db_name
+        row["code"] = str(row.get("code") or row.get("codigo") or "").strip()
+        row["title"] = str(row.get("title") or row.get("titulo") or "").strip()
+        row["author"] = str(row.get("author") or row.get("autor") or "").strip()
+        row["subject"] = str(row.get("subject") or row.get("curso") or "").strip()
+        row["edition"] = str(row.get("edition") or row.get("edicion") or "").strip()
+        row["notes"] = str(row.get("notes") or row.get("notas") or "").strip()
+        row["status"] = str(row.get("status") or row.get("estado") or "").strip()
+        row["active"] = bool(row.get("active", row.get("activo", True)))
+        row["workspaceDir"] = str(row.get("workspaceDir") or row.get("workspace_dir") or "").strip()
+        row["pdfPath"] = str(row.get("pdfPath") or row.get("pdf_path") or "").strip()
+        row["coverPath"] = str(row.get("coverPath") or row.get("cover_path") or "").strip()
         row["detail_endpoint"] = f"/api/library/books/{int(row.get('id') or 0)}"
         cover_path = str(row.get("cover_path") or "").strip()
         row["cover_url"] = self.file_url_resolver(cover_path) if cover_path and self.file_url_resolver else ""
@@ -468,6 +520,7 @@ def _policy() -> dict[str, Any]:
         "target": "staging_only",
         "never_insert_directly_into_problemas": True,
         "promotion_enabled": False,
+        "explicit_manual_upload_enabled": True,
     }
 
 

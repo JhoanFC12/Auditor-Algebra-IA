@@ -849,6 +849,46 @@ class TrainingAuditController:
         b64 = base64.b64encode(data).decode("ascii")
         return f"data:{mime};base64,{b64}"
 
+    def _resolve_trained_ocr_max_tokens(self, *, model: str, requested: int) -> int:
+        requested = max(256, int(requested or 0))
+        if str(model or "").strip() != self.TRAINED_OCR_VISION_MODEL:
+            return requested
+        try:
+            cap = int(str(os.getenv("HF_TRAINED_OCR_MAX_TOKENS", "700") or "700").strip())
+        except Exception:
+            cap = 700
+        return max(256, min(requested, cap))
+
+    def _resolve_trained_ocr_image_max_side(self, *, model: str) -> int:
+        if str(model or "").strip() != self.TRAINED_OCR_VISION_MODEL:
+            return 1100
+        try:
+            max_side = int(str(os.getenv("HF_TRAINED_OCR_IMAGE_MAX_SIDE", "560") or "560").strip())
+        except Exception:
+            max_side = 560
+        return max(480, min(1600, max_side))
+
+    def _resolve_trained_ocr_context_fallback_image_max_side(self, *, model: str) -> int | None:
+        if str(model or "").strip() != self.TRAINED_OCR_VISION_MODEL:
+            return None
+        try:
+            max_side = int(str(os.getenv("HF_TRAINED_OCR_CONTEXT_FALLBACK_IMAGE_MAX_SIDE", "384") or "384").strip())
+        except Exception:
+            max_side = 384
+        return max(320, min(640, max_side))
+
+    def _is_context_length_model_error(self, exc: Exception) -> bool:
+        text = str(exc or "").lower()
+        return (
+            ("max_tokens" in text or "max_completion_tokens" in text)
+            and (
+                "maximum context length" in text
+                or "input tokens" in text
+                or "too large" in text
+                or "context length" in text
+            )
+        )
+
     def _call_openai_image_ocr_model(
         self,
         *,
@@ -908,10 +948,17 @@ class TrainingAuditController:
             raise RuntimeError("No se encontro HF_TOKEN para usar el modelo OCR visual en Hugging Face.")
         base_url = self._resolve_hf_image_ocr_base_url(model)
         client = OpenAI(base_url=base_url, api_key=token, timeout=timeout_s)
-        img_url = self._encode_image_data_url(path, max_side_px=1100)
+        max_tokens = self._resolve_trained_ocr_max_tokens(model=model, requested=1100)
+        initial_side = self._resolve_trained_ocr_image_max_side(model=model)
+        fallback_side = self._resolve_trained_ocr_context_fallback_image_max_side(model=model)
         last_exc: Exception | None = None
+        used_context_fallback = False
         for attempt in range(max(0, retries) + 1):
             try:
+                img_url = self._encode_image_data_url(
+                    path,
+                    max_side_px=fallback_side if used_context_fallback and fallback_side else initial_side,
+                )
                 resp = client.chat.completions.create(
                     model=model,
                     messages=[
@@ -924,12 +971,19 @@ class TrainingAuditController:
                         }
                     ],
                     temperature=0,
-                    max_tokens=1100,
+                    max_tokens=int(max_tokens),
                 )
                 message = resp.choices[0].message if resp and resp.choices else None
                 return parse_chat_text(message.content if message is not None else "")
             except Exception as exc:
                 last_exc = exc
+                if (
+                    (not used_context_fallback)
+                    and fallback_side is not None
+                    and self._is_context_length_model_error(exc)
+                ):
+                    used_context_fallback = True
+                    continue
                 if attempt < retries and self._is_retryable_model_error(exc):
                     time.sleep(self._retry_delay_seconds(attempt))
                     continue
