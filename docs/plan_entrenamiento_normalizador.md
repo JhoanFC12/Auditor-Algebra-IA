@@ -47,6 +47,8 @@ Fuera de V1:
 - Insercion directa en base de datos final.
 - Creacion automatica de temas definitivos en catalogos.
 - Normalizacion sin revision humana.
+- Vectorizacion, similitud y recomendacion personalizada.
+- Estimacion automatica definitiva de dificultad.
 
 ## Fase Previa: Sacar Problemas De Nuevos Escaneos
 
@@ -258,6 +260,56 @@ Si un OCR comienza con `[CONT.]`, la salida debe marcar:
 El texto de la continuacion no debe convertirse en un problema nuevo. Al final debe quedar fusionado dentro del problema anterior, porque ese problema completo es el que se preparara para futura base de datos.
 
 El registro padre conserva el item LaTeX final completo y puede guardar trazabilidad en `continuaciones_fusionadas`. El registro `[CONT.]` queda marcado como continuacion y no debe promocionarse como problema independiente.
+
+## Preparacion Para La Capa Semantica Futura
+
+El normalizador V1 no debe intentar resolver similitud, dificultad ni recomendacion. Su responsabilidad es dejar el problema limpio, trazable y revisable.
+
+El contrato detallado de esa fase esta en `docs/plan_descriptor_semantico_recomendacion.md`.
+
+Sin embargo, cada muestra revisada debe conservar suficiente evidencia para que despues podamos crear un descriptor semantico multimodal:
+
+```text
+normalizer_input_staging_v1
+-> normalized_problem_staging_v1 revisado
+-> problem_semantic_profile_v1 futuro
+-> embedding / similitud / dificultad / recomendacion
+```
+
+Campos que deben conservarse para esa fase:
+
+- `raw_ocr` revisado;
+- `latex_rendered_item` final;
+- curso, tema y subtema revisados;
+- crop principal y continuaciones fusionadas;
+- `figure_segmentation` y nombres canonicos de imagen;
+- origen: libro, instancia, pagina, box y crop;
+- errores/correcciones humanas relevantes.
+
+Cuando exista el descriptor de graficos geometricos, se agregara como evidencia adicional, no como reemplazo del OCR:
+
+```json
+{
+  "schema_version": "geometry_figure_description_v1",
+  "source_record_id": "string",
+  "figure_tag": "img-15",
+  "construction_cdl": [],
+  "condition_cdl": [],
+  "evidence": []
+}
+```
+
+La salida semantica posterior debera describir:
+
+- conceptos matematicos;
+- habilidades necesarias;
+- objetos del problema;
+- condiciones dadas;
+- incognitas;
+- senales de dificultad;
+- texto limpio para embedding.
+
+Esto permite que la BD local deje de ser solo un repositorio y se convierta en base para busqueda por proximidad, deteccion de problemas similares y practicas especializadas para el alumno.
 
 ## Dataset
 

@@ -25,6 +25,7 @@ from .models import (
     utc_now_text,
 )
 from .page_selection import parse_page_selection
+from .problem_detector_corrections import maybe_write_problem_detector_correction
 from .staging import InstanceStagingStore
 
 
@@ -345,11 +346,39 @@ class InstancePdfPipelineService:
         clean_boxes = self._coerce_boxes(boxes)
         previous_boxes = list(target.boxes or [])
         previous_signature = self._boxes_signature(previous_boxes)
+        baseline_reviewed = bool(target.reviewed)
         target.layout_mode = str(layout_mode or target.layout_mode or "auto")
         target.boxes = sort_boxes_reading_order(clean_boxes, target.layout_mode) if reorder else clean_boxes
         target.reviewed = bool(reviewed)
+        current_signature = self._boxes_signature(target.boxes)
+        if previous_signature != current_signature and target.reviewed:
+            try:
+                correction = maybe_write_problem_detector_correction(
+                    context=self.context,
+                    page_record_id=str(target.record_id or record_id),
+                    page_number=int(target.page_number or 0),
+                    page_image=Path(target.image_path),
+                    pdf_path=str(target.pdf_path or self.context.pdf_path or ""),
+                    detector_source=str(target.detector_source or ""),
+                    layout_mode=str(target.layout_mode or "auto"),
+                    previous_boxes=previous_boxes,
+                    human_boxes=list(target.boxes or []),
+                    baseline_reviewed=baseline_reviewed,
+                )
+                if correction.get("saved"):
+                    setattr(self, "_last_problem_detector_correction", correction)
+            except Exception as exc:
+                setattr(
+                    self,
+                    "_last_problem_detector_correction_error",
+                    {
+                        "record_id": str(record_id),
+                        "error": str(exc),
+                        "stage": "problem_detector_correction_capture",
+                    },
+                )
         self.golden.upsert_instance_rows(self.context.instance_name, self._dedupe_page_rows(rows))
-        if previous_signature != self._boxes_signature(target.boxes):
+        if previous_signature != current_signature:
             self._invalidate_downstream_for_page_boxes_change(target, previous_boxes=previous_boxes)
         for row in self.load_pages():
             if str(row.record_id) == str(record_id):
@@ -1239,9 +1268,10 @@ class InstancePdfPipelineService:
         if not detector_payload:
             detector_payload = {
                 "detector_source": "human_reviewed_segments",
-                "review_status": "reviewed",
+                "review_status": "corrected",
                 "final_boxes": [{"bbox_px": [int(v) for v in box[:4]], "conf": 1.0} for box in clean_boxes],
             }
+        figure_review_status = str(detector_payload.get("review_status") or "reviewed").strip().lower() or "reviewed"
         record.figure_segmentation = {
             "status": StageStatus.READY,
             "segments_total": len(segments),
@@ -1256,7 +1286,7 @@ class InstancePdfPipelineService:
             ],
             "detector": detector_payload,
             "review": {
-                "review_status": "reviewed",
+                "review_status": figure_review_status,
                 "updated_at": utc_now_text(),
                 "source": "human_canvas_editor",
                 "boxes_total": len(segments),

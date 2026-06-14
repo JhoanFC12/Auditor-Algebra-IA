@@ -180,6 +180,50 @@ function currentFactoryInstanceId() {
   return String(instance.id || instance.instance_id || "").trim();
 }
 
+function currentFactoryRequestParams() {
+  const params = new URLSearchParams();
+  const instance = state.currentInstance || {};
+  const context = state.snapshot?.context || {};
+  const instanceId = String(
+    instance.id
+    || instance.instance_id
+    || context.instance_id
+    || ""
+  ).trim();
+  const bookId = String(
+    instance.book?.id
+    || instance.book_id
+    || context.book_id
+    || ""
+  ).trim();
+  const dbName = String(
+    state.library.selectedDb
+    || instance.db_name
+    || context.db_name
+    || ""
+  ).trim();
+  if (instanceId) params.set("instance_id", instanceId);
+  if (bookId) params.set("book_id", bookId);
+  if (dbName) params.set("db_name", dbName);
+  return params;
+}
+
+function pdfPageImageUrl(page, dpi = 150) {
+  const params = currentFactoryRequestParams();
+  params.set("page", String(Math.max(1, Number(page || 1) || 1)));
+  params.set("dpi", String(Math.max(72, Number(dpi || 150) || 150)));
+  const pdf = state.snapshot?.pdf || {};
+  const version = [
+    pdf.path || "",
+    pdf.name || "",
+    pdf.size || "",
+    pdf.mtime_ns || "",
+    state.appVersion?.asset_version || "",
+  ].join("|");
+  if (version.trim()) params.set("v", simpleHash(version));
+  return `/api/pdf/page?${params.toString()}`;
+}
+
 function factoryInstanceFromUrl() {
   const params = new URLSearchParams(window.location.search || "");
   const instanceId = String(params.get("instance_id") || "").trim();
@@ -1235,6 +1279,7 @@ function renderBookDetail(book) {
 function instanceCardHtml(instance) {
   const status = instanceWorkflowStatus(instance);
   const info = instanceWorkflowInfo(instance);
+  const timeline = instanceTimelineInfo(instance);
   const isActive = instance.id === state.library.selectedInstanceId;
   return `
     <article class="instance-card instance-state-${status} ${isActive ? "active" : ""}" data-instance="${instance.id}">
@@ -1248,6 +1293,14 @@ function instanceCardHtml(instance) {
       <div class="instance-state-summary">
         <strong>${escapeHtml(info.title)}</strong>
         <span>${escapeHtml(info.detail)}</span>
+      </div>
+      <div class="instance-timeline-summary" aria-label="Etapa actual de la instancia">
+        <div class="instance-timeline-copy">
+          <span class="section-label">Etapa actual</span>
+          <strong>${escapeHtml(timeline.title)}</strong>
+          <small>${escapeHtml(timeline.detail)}</small>
+        </div>
+        ${instanceTimelineStripHtml(timeline)}
       </div>
       <div class="instance-actions">
         <button data-edit-instance="${escapeAttr(instance.id)}" type="button">Editar</button>
@@ -1281,6 +1334,7 @@ function renderLibraryInspector() {
           ${state.library.screen === "book" ? `
             <div class="inspector-line"><strong>Instancia</strong><span>${escapeHtml(instance?.title || "Sin instancia seleccionada")}</span></div>
             <div class="inspector-line"><strong>Estado</strong><span>${escapeHtml(instance ? displayStatus(instanceWorkflowStatus(instance)) : "-")}</span></div>
+            ${instance ? `<div class="inspector-line"><strong>Etapa</strong><span>${escapeHtml(instanceTimelineInfo(instance).title)}</span></div>` : ""}
             ${instance ? `<div class="inspector-line"><strong>Detalle</strong><span>${escapeHtml(instanceWorkflowInfo(instance).detail)}</span></div>` : ""}
           ` : ""}
         ` : `<span class="muted">Sin libro seleccionado.</span>`}
@@ -2312,7 +2366,7 @@ function renderPagesStage() {
   };
   renderPagePicker(pageCount);
   renderSelectedPagesList();
-  drawImageOnCanvas($("pdfCanvas"), `/api/pdf/page?page=${state.pdfPage}&dpi=150`);
+  drawImageOnCanvas($("pdfCanvas"), pdfPageImageUrl(state.pdfPage, 150));
   setInspector({
     "PDF": pdf.path || "-",
     "Pagina actual": state.pdfPage,
@@ -2341,7 +2395,7 @@ function renderPagePicker(pageCount) {
       else state.selectedPages.add(page);
       state.pdfPage = page;
       persistFactoryUiState();
-      drawImageOnCanvas($("pdfCanvas"), `/api/pdf/page?page=${state.pdfPage}&dpi=150`);
+      drawImageOnCanvas($("pdfCanvas"), pdfPageImageUrl(state.pdfPage, 150));
       updatePagesStageSelectionUi();
     };
   });
@@ -2409,7 +2463,7 @@ function setPdfPage(page) {
   state.pdfPage = Math.max(1, Math.min(count, Number(page || 1)));
   persistFactoryUiState();
   const canvas = $("pdfCanvas");
-  if (canvas) drawImageOnCanvas(canvas, `/api/pdf/page?page=${state.pdfPage}&dpi=150`);
+  if (canvas) drawImageOnCanvas(canvas, pdfPageImageUrl(state.pdfPage, 150));
   updatePagesStageSelectionUi();
 }
 
@@ -2735,7 +2789,7 @@ function setupBoxCanvas(page) {
 
 function boxPageImageSrc(page) {
   if (page?.image_url) return page.image_url;
-  return `/api/pdf/page?page=${encodeURIComponent(page?.page_number || 1)}&dpi=300`;
+  return pdfPageImageUrl(page?.page_number || 1, 300);
 }
 
 function bindBoxZoomControls() {
@@ -5837,11 +5891,80 @@ function instanceWorkflowStatus(instance) {
   return instanceWorkflowInfo(instance).status;
 }
 
+function instanceTimelineInfo(instance) {
+  const raw = instance?.timeline_stage && typeof instance.timeline_stage === "object" ? instance.timeline_stage : {};
+  const id = normalizeTimelineStageId(raw.id || raw.stage || raw.stage_id);
+  const fallback = deriveInstanceTimelineInfo(instance);
+  const stage = STAGES.find((row) => row.id === id) || STAGES.find((row) => row.id === fallback.id) || STAGES[0];
+  const index = Number(raw.index || fallback.index || (STAGES.findIndex((row) => row.id === stage.id) + 1));
+  const detail = String(raw.detail || fallback.detail || stage.action || "").trim();
+  return {
+    id: stage.id,
+    index: Math.max(1, Math.min(STAGES.length, Number.isFinite(index) ? index : 1)),
+    title: raw.title || stage.title,
+    detail,
+    status: normalizeStatus(raw.status || fallback.status || "pendiente"),
+  };
+}
+
+function normalizeTimelineStageId(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) return "";
+  if (["pages", "pagina", "paginas"].includes(text)) return "pages";
+  if (text.includes("box")) return "boxes";
+  if (text.includes("crop") || text.includes("staging")) return "crops";
+  if (text.includes("ocr")) return "ocr";
+  if (text.includes("normal") || text.includes("revision")) return "review";
+  if (text.includes("bd") || text.includes("candidate") || text.includes("candidato")) return "candidate";
+  return text;
+}
+
+function deriveInstanceTimelineInfo(instance) {
+  const indicators = {
+    ...(instance?.indicators && typeof instance.indicators === "object" ? instance.indicators : {}),
+    ...(instance?.summary && typeof instance.summary === "object" ? instance.summary : {}),
+    ...(instance?.metrics && typeof instance.metrics === "object" ? instance.metrics : {}),
+    ...(instance?.timeline_stage?.counts && typeof instance.timeline_stage.counts === "object" ? instance.timeline_stage.counts : {}),
+  };
+  const dbCount = Math.max(
+    Number(indicators.subidos_bd || 0),
+    Number(indicators.consistentes || 0) + Number(indicators.inconsistentes || 0) + Number(indicators.sin_revisar || 0),
+  );
+  const records = Number(indicators.records_total || indicators.records || indicators.escaneados_sesion || 0);
+  const crops = Number(indicators.crops_found || indicators.crops_total || indicators.crops || 0);
+  const ocr = Number(indicators.ocr_done || indicators.ocr || 0);
+  const segments = Number(indicators.segments_done || indicators.segments || 0);
+  const normalized = Number(indicators.normalized_done || indicators.normalized || 0);
+  const ready = Number(indicators.ready || indicators.reviewed || 0);
+  const boxes = Number(indicators.boxes_total || indicators.boxes || 0);
+  const pages = Number(indicators.pages_total || indicators.pages || 0);
+  if (dbCount > 0) return { id: "candidate", index: 6, status: "listo", detail: `${dbCount} problema(s) enviados a BD.` };
+  if (normalized > 0 || ready > 0) return { id: "review", index: 5, status: "procesando", detail: `${normalized || ready} borrador(es) de revision.` };
+  if (ocr > 0 || segments > 0) return { id: "ocr", index: 4, status: "procesando", detail: `${ocr} con OCR; ${segments} con graficos.` };
+  if (records > 0 || crops > 0) return { id: "crops", index: 3, status: "procesando", detail: `${crops || records} crop(s) en staging.` };
+  if (boxes > 0) return { id: "boxes", index: 2, status: "procesando", detail: `${boxes} box(es) detectados.` };
+  if (pages > 0) return { id: "pages", index: 1, status: "procesando", detail: `${pages} pagina(s) elegidas.` };
+  return { id: "pages", index: 1, status: "pendiente", detail: "Sin paginas elegidas todavia." };
+}
+
+function instanceTimelineStripHtml(timeline) {
+  return `
+    <div class="instance-timeline-strip" aria-hidden="true">
+      ${STAGES.map((stage, idx) => {
+        const step = idx + 1;
+        const stateClass = step < timeline.index ? "done" : (step === timeline.index ? "current" : "pending");
+        return `<span class="instance-timeline-dot ${stateClass}" title="${escapeAttr(`${step}. ${stage.title}`)}">${step}</span>`;
+      }).join("")}
+    </div>
+  `;
+}
+
 function instanceWorkflowInfo(instance) {
   const indicators = {
     ...(instance?.indicators && typeof instance.indicators === "object" ? instance.indicators : {}),
     ...(instance?.summary && typeof instance.summary === "object" ? instance.summary : {}),
     ...(instance?.metrics && typeof instance.metrics === "object" ? instance.metrics : {}),
+    ...(instance?.timeline_stage?.counts && typeof instance.timeline_stage.counts === "object" ? instance.timeline_stage.counts : {}),
   };
   const consistencyCount = Number(indicators.consistentes || 0)
     + Number(indicators.inconsistentes || 0)
@@ -5871,13 +5994,13 @@ function instanceWorkflowInfo(instance) {
     healthLike ? 0 : Number(indicators.total || 0),
   );
   const rawStatus = normalizeStatus(instance?.status || instance?.review_status || "");
-  const hasLocalPath = Boolean(String(instance?.session_path || instance?.workspace_dir || "").trim());
   const hasWorkStatus = ["procesando", "requiere_revision", "error", "listo"].includes(rawStatus);
-  if (localCount > 0 || hasLocalPath || hasWorkStatus) {
+  if (localCount > 0 || hasWorkStatus) {
+    const timeline = instanceTimelineInfo(instance);
     return {
       status: "procesando",
-      title: "Trabajo iniciado",
-      detail: "Tiene trabajo local pendiente de subir a BD.",
+      title: `Etapa ${timeline.index}: ${timeline.title}`,
+      detail: timeline.detail || "Tiene trabajo local pendiente de subir a BD.",
       dbCount: 0,
     };
   }
@@ -5984,6 +6107,16 @@ function compactText(value, maxLength) {
   return `${text.slice(0, Math.max(0, maxLength - 1))}...`;
 }
 
+function simpleHash(value) {
+  let hash = 2166136261;
+  const text = String(value || "");
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16);
+}
+
 function formatPreviewText(value) {
   return escapeHtml(decodeLatexTextAccents(value) || "-").replace(/\n/g, "<br>");
 }
@@ -6062,13 +6195,39 @@ function stageHint(id) {
 }
 
 function drawImageOnCanvas(canvas, src) {
+  if (!canvas) return;
+  const expectedSrc = String(src || "");
+  canvas.dataset.pendingSrc = expectedSrc;
+  const ctx = canvas.getContext("2d");
+  canvas.width = Math.max(320, canvas.width || 520);
+  canvas.height = Math.max(220, canvas.height || 320);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#637386";
+  ctx.font = "600 14px Segoe UI";
+  ctx.fillText(`Cargando pagina ${state.pdfPage || ""}...`, 18, 38);
   const img = new Image();
   img.onload = () => {
+    if (canvas.dataset.pendingSrc !== expectedSrc) return;
     const maxW = 980;
     const scale = Math.min(1, maxW / img.naturalWidth);
     canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
     canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
     canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+  };
+  img.onerror = () => {
+    if (canvas.dataset.pendingSrc !== expectedSrc) return;
+    const width = Math.max(320, canvas.width || 520);
+    canvas.width = width;
+    canvas.height = 220;
+    const errorCtx = canvas.getContext("2d");
+    errorCtx.clearRect(0, 0, canvas.width, canvas.height);
+    errorCtx.fillStyle = "#ffffff";
+    errorCtx.fillRect(0, 0, canvas.width, canvas.height);
+    errorCtx.fillStyle = "#8a4b17";
+    errorCtx.font = "600 14px Segoe UI";
+    errorCtx.fillText(`No se pudo cargar la pagina ${state.pdfPage || ""}.`, 18, 42);
   };
   img.src = src;
 }

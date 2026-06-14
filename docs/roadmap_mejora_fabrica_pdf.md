@@ -13,6 +13,7 @@ El orden de prioridad actual es:
 3. Preparar dataset para el futuro modelo normalizador.
 4. Subir a la base de datos solo cuando el problema este revisado.
 5. Mas adelante, vincular problemas con sus soluciones.
+6. Construir una capa semantica para similitud, dificultad y recomendacion personalizada.
 
 ## Principios de trabajo
 
@@ -26,6 +27,8 @@ El orden de prioridad actual es:
 - La app debe mostrar siempre de donde viene cada problema: libro, instancia, pagina, crop, OCR y graficos.
 - El formato final debe ser compatible con Modulo 7 LaTeX a Word y con la base local.
 - Se retira el `Carrito OCR global`: en la practica resulto incomodo. El OCR se trabaja desde la cola local de cada instancia.
+- La BD final no sera solo un almacen: debe alimentar busqueda por similitud, estimacion de dificultad y recomendacion de ejercicios.
+- La descripcion semantica de un problema debe separar texto, grafico, solucion futura, habilidades y evidencias; no debe depender solo del enunciado renderizado.
 
 ## Almacen y Biblioteca
 
@@ -127,6 +130,11 @@ flowchart LR
     F --> G["Paso 5: revision / formato final"]
     G --> H["Paso 6: subir a BD local"]
     H --> I["Modulo 7: practica LaTeX a Word"]
+    H --> L["Capa semantica futura"]
+    L --> M["Embeddings / similitud"]
+    L --> N["Dificultad"]
+    M --> O["Recomendacion al alumno"]
+    N --> O
 
     D -. "correcciones humanas" .-> J["Dataset detector Paso 2"]
     F -. "OCR + graficos + crop" .-> K["Dataset normalizador futuro"]
@@ -239,6 +247,28 @@ Guardar si:
 - cambia el orden de lectura;
 - se marca que la pagina tenia deteccion incorrecta.
 
+### Implementacion inicial
+
+La Fabrica web ya captura correcciones del Paso 2 cuando se guardan boxes desde el revisor visual y hay un cambio significativo respecto a los boxes previos.
+
+Ubicacion por instancia:
+
+```text
+<workspace>/temporales/<instancia>/datasets/problem_detector_corrections/
+  images/
+  labels/
+  metadata/
+  manifest.json
+```
+
+Politica actual:
+
+- solo se guarda si hay cambio significativo;
+- el umbral inicial para movimiento/redimensionamiento es 4 px;
+- las etiquetas se guardan en formato YOLO con clase unica `problem`;
+- `metadata/*.json` conserva boxes previos, boxes humanos, origen y resumen del cambio;
+- problema-vs-solucion queda excluido de esta fase.
+
 No guardar si:
 
 - solo se abre la pagina;
@@ -268,6 +298,26 @@ db_images/img-15.png
 db_images/img-15-2.png
 ```
 
+### Golden base para segmentacion grafica
+
+La mejora del modelo de segmentacion grafica se trabaja con una golden base acumulativa separada del normalizador:
+
+```text
+.cache/transcriptor_runs/datasets/segment_training_live
+```
+
+Plan detallado: `docs/plan_golden_base_segmentacion_graficos.md`.
+
+Regla principal:
+
+```text
+si el usuario corrige, agrega o elimina un box de grafico, esa revision alimenta la golden base.
+```
+
+La meta inicial es reunir `200` imagenes corregidas. Las revisiones sin cambios se conservan como auditoria, pero no cuentan para el dataset de entrenamiento por defecto.
+
+La salida de esta base se exporta como dataset YOLO con clase unica `grafico_problema`.
+
 ## Fase 3: normalizacion futura
 
 El normalizador todavia no es el objetivo inmediato. Primero necesitamos buenos recortes, OCR crudo y graficos bien vinculados.
@@ -287,6 +337,149 @@ Salida esperada:
 
 ```latex
 \item[\textbf{15.}] [[curso=Geometria]] [[tema=Triangulos]] [[Estado=sin_revisar]] [[Clave=E]] Calcule $x$. [[Imagen=img-15]] £A)$10$æB)$20$æC)$45$£D)$30$ææE)$60$£
+```
+
+## Fase 3B: descriptor semantico de texto e imagen
+
+Esta fase es posterior a la normalizacion. Su objetivo no es limpiar OCR ni decidir el formato final, sino describir el contenido matematico para que la base de datos pueda buscar problemas cercanos, estimar dificultad y recomendar ejercicios.
+
+Contrato detallado: `docs/plan_descriptor_semantico_recomendacion.md`.
+
+El descriptor debe trabajar con tres tipos de entrada:
+
+1. Problemas solo de texto.
+2. Problemas con texto e imagen.
+3. Problemas donde el grafico aporta condiciones necesarias, especialmente en Geometria Plana.
+
+```mermaid
+flowchart LR
+    A["Problema normalizado"] --> D["Descriptor semantico"]
+    B["OCR crudo revisado"] --> D
+    C["Descripcion del grafico"] --> D
+    E["Metadata: curso / tema / origen"] --> D
+    D --> F["problem_semantic_profile_v1"]
+    F --> G["Texto para embedding"]
+    F --> H["Senales de dificultad"]
+    F --> I["Conceptos y habilidades"]
+```
+
+### Contrato futuro: `problem_semantic_profile_v1`
+
+El contrato debe ser revisable y no debe reemplazar el formato final almacenado en BD. Es una capa adicional para IA.
+
+```json
+{
+  "schema_version": "problem_semantic_profile_v1",
+  "problem_id": "string",
+  "course": "Geometria",
+  "topic": "Triangulos",
+  "subtopic": "Angulos en triangulos",
+  "problem_modality": "text_image",
+  "statement_summary": "Calcular x usando relaciones angulares en triangulos.",
+  "concepts": ["triangulos", "angulos", "isoceles"],
+  "skills": ["identificar relaciones angulares", "plantear ecuaciones simples"],
+  "objects": {
+    "geometry": ["triangulo", "segmento", "angulo"],
+    "algebra": []
+  },
+  "given_conditions": [
+    "El diagrama muestra angulos de 50 y 70 grados.",
+    "El enunciado pide calcular x."
+  ],
+  "unknowns": ["x"],
+  "solution_requirements": [
+    "relaciones de angulos",
+    "suma de angulos",
+    "uso de marcas visibles del grafico"
+  ],
+  "difficulty_signals": {
+    "estimated_level": 2,
+    "reason": "Requiere una o dos relaciones geometricas directas.",
+    "requires_graph_reading": true,
+    "requires_multi_step_reasoning": false
+  },
+  "embedding_text": "Geometria. Triangulos. Angulos. Problema con grafico. Calcular x usando relaciones angulares visibles.",
+  "review": {
+    "status": "sin_revisar",
+    "human_verified": false
+  }
+}
+```
+
+### Descriptor de graficos geometricos
+
+Para graficos, especialmente de Geometria Plana, la meta futura es producir una descripcion formal verificable. No debe resolver el problema desde la imagen. Primero debe traducir lo visible:
+
+```text
+Imagen del grafico
+-> puntos, segmentos, marcas y etiquetas
+-> construction_cdl / condition_cdl candidatos
+-> evidencia y confianza por predicado
+```
+
+Ejemplo de salida intermedia:
+
+```json
+{
+  "schema_version": "geometry_figure_description_v1",
+  "figure_type": "geometria_plana",
+  "visual_text": {
+    "points": ["A", "B", "C"],
+    "measure_labels": ["50^\\circ", "x^\\circ"]
+  },
+  "formalgeo_candidate": {
+    "construction_cdl": ["Shape(ABC)"],
+    "condition_cdl": ["Equal(MeasureOfAngle(ABC),50)"],
+    "goal_cdl": []
+  },
+  "warnings": ["No inferir paralelismo o igualdad si no hay marca visible."]
+}
+```
+
+Reglas:
+
+- El OCR crudo sigue siendo la fuente principal del texto.
+- El descriptor de grafico solo aporta lo visible y marcado.
+- No se deben inventar condiciones geometricas por apariencia.
+- La fusion texto + imagen debe producir un perfil semantico, no una solucion.
+- El `embedding_text` debe ser estable y limpio, sin ruido de OCR ni rutas de archivo.
+
+### Vectorizacion, similitud y recomendacion
+
+Cuando existan suficientes problemas revisados en BD, cada problema podra tener:
+
+- embedding del enunciado normalizado;
+- embedding del perfil semantico;
+- metadata de curso, tema, subtema y origen;
+- dificultad estimada;
+- historial de rendimiento del alumno.
+
+```mermaid
+flowchart TD
+    A["BD local: problemas revisados"] --> B["Perfil semantico"]
+    B --> C["Embedding"]
+    C --> D["Busqueda por proximidad"]
+    B --> E["Dificultad estimada"]
+    F["Rendimiento del alumno"] --> G["Motor de recomendacion"]
+    D --> G
+    E --> G
+    G --> H["Practica personalizada"]
+```
+
+La similitud no debe depender solo de palabras iguales. Debe considerar:
+
+- conceptos matematicos;
+- habilidades necesarias;
+- estructura del problema;
+- presencia o ausencia de grafico;
+- tipo de razonamiento;
+- nivel de dificultad.
+
+La dificultad debe empezar como una estimacion revisable y luego mejorar con datos reales:
+
+```text
+dificultad_inicial = modelo + reglas + revision humana
+dificultad_final = dificultad_inicial + rendimiento real de alumnos
 ```
 
 ## Fase 4: subida a base de datos local
@@ -380,7 +573,7 @@ Luego una capa de vinculacion relacionaria problema y solucion por:
 
 | ID | Prioridad | Tema | Estado | Descripcion |
 | --- | --- | --- | --- | --- |
-| M-001 | Alta | Dataset detector Paso 2 | Pendiente | Guardar ejemplos cuando se modifican boxes del modelo. |
+| M-001 | Alta | Dataset detector Paso 2 | Implementado inicial | Guarda ejemplos YOLO cuando se modifican boxes del modelo desde la Fabrica web. |
 | M-002 | Alta | Canon de imagenes | En curso | Mantener `[[Imagen=img-n]]` sincronizado con archivos fisicos y BD. |
 | M-003 | Alta | OCR crudo estable | En curso | Trabajar solo con OCR crudo como entrada principal. |
 | M-004 | Media | Dataset normalizador | Pendiente | Exportar OCR, crop, grafico y formato final revisado. |
@@ -388,6 +581,8 @@ Luego una capa de vinculacion relacionaria problema y solucion por:
 | M-006 | Futura | Problema vs solucion | Planificado | Clasificar bloques y vincular cada problema con su solucion. |
 | M-007 | Alta | Biblioteca de cursos | En curso | Mantener la biblioteca operativa solo con libros de cursos; examenes quedan fuera por ahora. |
 | M-008 | Alta | Indicadores por libro | Pendiente | Mostrar total de instancias, instancias agregadas a BD y faltantes por libro. |
+| M-009 | Futura | Descriptor semantico multimodal | Planificado | Describir problemas de texto e imagen para embeddings, similitud, dificultad y recomendacion. |
+| M-010 | Alta | Golden base segmentacion grafica | En curso | Acumular 200 imagenes corregidas de boxes de graficos y exportarlas como dataset YOLO. |
 
 ## Registro de decisiones
 
@@ -411,6 +606,10 @@ Los libros clasificados como `Examenes` se eliminan de la Biblioteca operativa. 
 
 La Biblioteca debe permitir identificar rapidamente que libros ya estan completos y cuales tienen instancias pendientes. El criterio inicial de instancia agregada a BD sera la existencia de al menos un problema asociado a `libro_codigo + codigo_instancia`.
 
+### D-006: La BD alimentara una capa semantica
+
+El problema final en BD debe conservar el formato LaTeX compatible con la app, pero tambien debe permitir generar un perfil semantico posterior. Ese perfil sera la base para embeddings, busqueda por similitud, dificultad y practicas personalizadas.
+
 ## Preguntas abiertas
 
 - Que umbral exacto define que un box fue modificado de forma significativa?
@@ -419,3 +618,6 @@ La Biblioteca debe permitir identificar rapidamente que libros ya estan completo
 - En PDFs con soluciones, queremos detectar soluciones con el mismo modelo de boxes o con un clasificador posterior?
 - Cuando retomemos examenes, iran en una biblioteca separada o como tipo especial dentro de la misma tabla?
 - Para marcar una instancia como `En BD`, basta con un problema subido o exigimos un minimo esperado de problemas?
+- Que motor de embeddings local conviene usar para empezar sin costo?
+- La dificultad inicial sera etiqueta humana, regla heuristica o prediccion de modelo?
+- Donde se guardara el perfil semantico: tabla nueva, JSONB en `problemas` o cache derivada?

@@ -708,9 +708,17 @@ class FactoryWebRuntime:
             "name": pdf_path.name,
             "exists": pdf_path.exists(),
             "page_count": 0,
+            "size": 0,
+            "mtime_ns": 0,
         }
         if not pdf_path.exists():
             return info
+        try:
+            stat = pdf_path.stat()
+            info["size"] = int(stat.st_size)
+            info["mtime_ns"] = int(stat.st_mtime_ns)
+        except Exception:
+            pass
         try:
             import fitz
 
@@ -725,7 +733,7 @@ class FactoryWebRuntime:
         if not pdf_path.exists():
             raise FileNotFoundError(f"No se encontro el PDF: {pdf_path}")
         dpi = max(72, min(320, int(dpi)))
-        target = self.cache_root / f"pdf_page_{int(page_number):04d}_{dpi}.png"
+        target = self.cache_root / f"pdf_page_{self._pdf_cache_key(pdf_path)}_{int(page_number):04d}_{dpi}.png"
         if target.exists():
             return target
         import fitz
@@ -736,6 +744,16 @@ class FactoryWebRuntime:
             matrix = fitz.Matrix(dpi / 72.0, dpi / 72.0)
             document[page_number - 1].get_pixmap(matrix=matrix, alpha=False).save(str(target))
         return target
+
+    @staticmethod
+    def _pdf_cache_key(pdf_path: Path) -> str:
+        try:
+            resolved = pdf_path.expanduser().resolve()
+            stat = resolved.stat()
+            raw = f"{resolved}|{int(stat.st_size)}|{int(stat.st_mtime_ns)}"
+        except Exception:
+            raw = str(pdf_path)
+        return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:12]
 
     def _page_to_web(self, row: Any) -> dict[str, Any]:
         image_path = Path(row.image_path)

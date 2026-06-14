@@ -10,7 +10,7 @@ import urllib.request
 from dataclasses import asdict
 from pathlib import Path
 
-from modulos.instance_factory.library_api import LibraryWebApi
+from modulos.instance_factory.library_api import LibraryWebApi, _timeline_stage_from_counts
 from modulos.instance_factory.library_web_server import LibraryWebRuntime
 from modulos.instance_factory.models import InstancePipelineContext
 from modulos.instance_factory.staging import InstanceStagingStore
@@ -217,6 +217,8 @@ class LibraryWebApiTests(unittest.TestCase):
                 detail = api.dispatch("GET", "/api/library/books/1", {"db_name": ["demo_db"]}, {})
                 self.assertEqual(controller.dashboard_calls, [1])
                 self.assertEqual(detail["instances"][0]["indicators"]["escaneados_sesion"], 4)
+                self.assertEqual(detail["instances"][0]["timeline_stage"]["id"], "crops")
+                self.assertEqual(detail["instances"][0]["timeline_stage"]["index"], 3)
                 self.assertEqual(detail["instances"][0]["factory_prepare_endpoint"], "/api/library/instances/11/factory")
 
                 created = api.dispatch("POST", "/api/library/books", {}, {"db_name": "demo_db", "codigo": "GEO01", "titulo": "Geometria"})
@@ -288,6 +290,15 @@ class LibraryWebApiTests(unittest.TestCase):
                     os.environ.pop("PDF_LIBRARY_COVER_ROOT", None)
                 else:
                     os.environ["PDF_LIBRARY_COVER_ROOT"] = previous_cover_root
+
+    def test_timeline_stage_from_counts_prioritizes_bd_and_ocr(self) -> None:
+        uploaded = _timeline_stage_from_counts({"subidos_bd": 12, "ocr_done": 12})
+        self.assertEqual(uploaded["id"], "candidate")
+        self.assertEqual(uploaded["title"], "BD final")
+
+        ocr = _timeline_stage_from_counts({"records_total": 20, "crops_found": 20, "ocr_done": 8, "segments_done": 7})
+        self.assertEqual(ocr["id"], "ocr")
+        self.assertEqual(ocr["index"], 4)
 
     def test_library_api_resolves_book_cover_url(self) -> None:
         controller = _FakeController()

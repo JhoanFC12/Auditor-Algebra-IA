@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, is_dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 import json
 import os
@@ -340,6 +341,7 @@ class LibraryWebApi:
             stats = instance_stats.get(int(row.get("id") or 0))
             if stats:
                 row["indicators"] = stats
+            row["timeline_stage"] = self._instance_timeline_stage(db_name, book, row, stats or {})
             enriched_instances.append(row)
         return {
             "schema_version": "library_book_detail_v1",
@@ -391,6 +393,56 @@ class LibraryWebApi:
             if int(row.get("id") or 0) == int(instance_id):
                 return dict(row)
         return None
+
+    def _instance_timeline_stage(
+        self,
+        db_name: str,
+        book: dict[str, Any],
+        instance: dict[str, Any],
+        indicators: dict[str, Any],
+    ) -> dict[str, Any]:
+        counts = _empty_timeline_counts(indicators)
+        for key, value in self._local_timeline_counts(db_name, book, instance).items():
+            if isinstance(value, int):
+                counts[key] = max(int(counts.get(key) or 0), int(value))
+            elif value:
+                counts[key] = value
+        return _timeline_stage_from_counts(counts)
+
+    @staticmethod
+    def _local_timeline_counts(db_name: str, book: dict[str, Any], instance: dict[str, Any]) -> dict[str, Any]:
+        counts: dict[str, Any] = {}
+        try:
+            from modulos.modulo13_laboratorio_pdf_segmentacion.controlador_laboratorio_pdf import PdfProblemGoldenController
+
+            from .staging import InstanceStagingStore
+
+            context = InstancePipelineContext.from_library_instance(book, instance, db_name=db_name)
+            pages = PdfProblemGoldenController().load_instance(context.instance_name)
+            by_page: dict[int, Any] = {}
+            for index, page in enumerate(pages or []):
+                try:
+                    page_number = int(page.page_number or 0)
+                except Exception:
+                    page_number = 0
+                if page_number <= 0:
+                    continue
+                current = by_page.get(page_number)
+                current_score = _page_timeline_score(current, -1) if current is not None else None
+                next_score = _page_timeline_score(page, index)
+                if current is None or (current_score is not None and next_score >= current_score):
+                    by_page[page_number] = page
+            page_rows = [by_page[key] for key in sorted(by_page)]
+            counts["pages_total"] = len(page_rows)
+            counts["pages_reviewed"] = sum(1 for row in page_rows if bool(getattr(row, "reviewed", False)))
+            counts["boxes_total"] = sum(len(getattr(row, "boxes", None) or []) for row in page_rows)
+
+            store = InstanceStagingStore(context)
+            records = store.load_records()
+            counts.update(store.summarize_records(records))
+        except Exception as exc:
+            counts["timeline_error"] = str(exc)
+        return counts
 
 
 def _path_parts(path: str) -> list[str]:
@@ -513,6 +565,109 @@ def _health_status_to_web(value: str) -> str:
     if key == "in_progress":
         return "requiere_revision"
     return "pendiente"
+
+
+TIMELINE_STAGE_ROWS: tuple[dict[str, Any], ...] = (
+    {"id": "pages", "index": 1, "title": "Paginas"},
+    {"id": "boxes", "index": 2, "title": "Boxes"},
+    {"id": "crops", "index": 3, "title": "Staging"},
+    {"id": "ocr", "index": 4, "title": "OCR"},
+    {"id": "review", "index": 5, "title": "Revision"},
+    {"id": "candidate", "index": 6, "title": "BD final"},
+)
+
+
+def _empty_timeline_counts(indicators: dict[str, Any] | None = None) -> dict[str, Any]:
+    raw = dict(indicators or {})
+    return {
+        "pages_total": int(raw.get("pages_total") or raw.get("pages") or 0),
+        "pages_reviewed": int(raw.get("pages_reviewed") or 0),
+        "boxes_total": int(raw.get("boxes_total") or raw.get("boxes") or 0),
+        "records_total": int(raw.get("records_total") or raw.get("records") or raw.get("escaneados_sesion") or 0),
+        "crops_found": int(raw.get("crops_found") or raw.get("crops_total") or raw.get("crops") or 0),
+        "ocr_done": int(raw.get("ocr_done") or raw.get("ocr") or 0),
+        "segments_done": int(raw.get("segments_done") or raw.get("segments") or 0),
+        "normalized_done": int(raw.get("normalized_done") or raw.get("normalized") or 0),
+        "ready": int(raw.get("ready") or 0),
+        "errors": int(raw.get("errors") or 0),
+        "subidos_bd": int(raw.get("subidos_bd") or 0),
+        "total_esperado": int(raw.get("total_esperado") or raw.get("expected_total") or 0),
+    }
+
+
+def _timeline_stage_from_counts(counts: dict[str, Any]) -> dict[str, Any]:
+    rows = {str(row["id"]): dict(row) for row in TIMELINE_STAGE_ROWS}
+    subidos_bd = int(counts.get("subidos_bd") or 0)
+    records_total = int(counts.get("records_total") or 0)
+    crops_found = int(counts.get("crops_found") or 0)
+    ocr_done = int(counts.get("ocr_done") or 0)
+    segments_done = int(counts.get("segments_done") or 0)
+    normalized_done = int(counts.get("normalized_done") or 0)
+    ready = int(counts.get("ready") or 0)
+    boxes_total = int(counts.get("boxes_total") or 0)
+    pages_total = int(counts.get("pages_total") or 0)
+    pages_reviewed = int(counts.get("pages_reviewed") or 0)
+    errors = int(counts.get("errors") or 0)
+
+    if subidos_bd > 0:
+        stage_id = "candidate"
+        detail = f"{subidos_bd} problema(s) enviados a BD."
+        status = "listo"
+    elif normalized_done > 0 or ready > 0:
+        stage_id = "review"
+        detail = f"{normalized_done}/{records_total} borrador(es); {ready} listo(s)."
+        status = "requiere_revision" if errors else "procesando"
+    elif ocr_done > 0 or segments_done > 0:
+        stage_id = "ocr"
+        detail = f"{ocr_done}/{records_total} con OCR; {segments_done} con graficos."
+        status = "error" if errors else "procesando"
+    elif records_total > 0 or crops_found > 0:
+        stage_id = "crops"
+        detail = f"{crops_found}/{records_total} crop(s) disponibles."
+        status = "procesando"
+    elif boxes_total > 0:
+        stage_id = "boxes"
+        detail = f"{boxes_total} box(es) detectados."
+        status = "procesando"
+    elif pages_total > 0:
+        stage_id = "pages"
+        detail = f"{pages_total} pagina(s), {pages_reviewed}/{pages_total} revisada(s)."
+        status = "procesando" if pages_reviewed or boxes_total else "pendiente"
+    else:
+        stage_id = "pages"
+        detail = "Sin paginas elegidas todavia."
+        status = "pendiente"
+
+    row = rows[stage_id]
+    return {
+        "schema_version": "library_instance_timeline_stage_v1",
+        "id": stage_id,
+        "index": int(row["index"]),
+        "title": str(row["title"]),
+        "status": status,
+        "detail": detail,
+        "counts": {key: int(value) for key, value in counts.items() if isinstance(value, int)},
+        "error": str(counts.get("timeline_error") or ""),
+    }
+
+
+def _page_timeline_score(page: Any, index: int) -> tuple[int, int, int, int, str]:
+    if page is None:
+        return (0, 0, 0, int(index), "")
+    try:
+        image_path = Path(getattr(page, "image_path", ""))
+        image_exists = 1 if image_path.exists() else 0
+    except Exception:
+        image_exists = 0
+    detector = str(getattr(page, "detector_source", "") or "").lower()
+    return (
+        1 if detector.startswith("pdf_factory") else 0,
+        1 if bool(getattr(page, "reviewed", False)) else 0,
+        len(getattr(page, "boxes", None) or []),
+        image_exists,
+        int(index),
+        str(getattr(page, "record_id", "") or ""),
+    )
 
 
 def _policy() -> dict[str, Any]:

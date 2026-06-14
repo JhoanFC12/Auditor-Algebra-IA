@@ -103,6 +103,24 @@ class SegmentadorProblemasV2:
 
         return sorted([dict(row) for row in list(rows or []) if isinstance(row, dict)], key=_key)
 
+    def _detector_boxes_changed(
+        self,
+        *,
+        predicted_rows: List[dict],
+        final_boxes: List[Tuple[int, int, int, int]],
+    ) -> bool:
+        predicted = []
+        for row in self._sort_detection_rows_reading_order(predicted_rows):
+            bbox = row.get("bbox_px")
+            if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+                continue
+            try:
+                predicted.append(tuple(int(v) for v in bbox[:4]))
+            except Exception:
+                continue
+        final = self._sort_boxes_reading_order(list(final_boxes or []))
+        return predicted != final
+
     def _iter_external_python_commands(self) -> List[List[str]]:
         commands: List[List[str]] = []
         seen: set[tuple[str, ...]] = set()
@@ -443,6 +461,20 @@ print(json.dumps(out, ensure_ascii=False))
             "\n".join(json.dumps(row, ensure_ascii=False) for row in positives) + ("\n" if positives else ""),
             encoding="utf-8",
         )
+        corrected_rows = []
+        for row in rows:
+            review = row.get("detector_review") if isinstance(row.get("detector_review"), dict) else {}
+            if str(review.get("review_status") or "").strip().lower() == "corrected":
+                corrected_rows.append(row)
+        (live_dir / "source_records_corrected.jsonl").write_text(
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in corrected_rows) + ("\n" if corrected_rows else ""),
+            encoding="utf-8",
+        )
+        try:
+            target_corrected = int((os.getenv("SEGMENT_LIVE_GOLDEN_TARGET_CORRECTED", "200") or "200").strip())
+        except Exception:
+            target_corrected = 200
+        target_corrected = max(1, target_corrected)
         segment_rows: List[dict] = []
         for row in rows:
             for segment in list(row.get("segments", []) or []):
@@ -484,10 +516,14 @@ print(json.dumps(out, ensure_ascii=False))
             "records_total": len(rows),
             "positive_images": len(positives),
             "negative_images": max(0, len(rows) - len(positives)),
+            "corrected_images": len(corrected_rows),
+            "target_corrected_images": target_corrected,
+            "remaining_corrected_images": max(0, target_corrected - len(corrected_rows)),
             "boxes_total": sum(int(row.get("boxes_total", 0) or 0) for row in rows),
             "files": {
                 "source_records_all": "source_records_all.jsonl",
                 "source_records_positive": "source_records_positive.jsonl",
+                "source_records_corrected": "source_records_corrected.jsonl",
                 "records_all_jsonl": "records_all.jsonl",
                 "records_dir": "records",
                 "source_images_dir": "source_images",
@@ -1013,24 +1049,30 @@ print(json.dumps(out, ensure_ascii=False))
         """Persist human-reviewed figure boxes and regenerate segment crops."""
         src = Path(image_path)
         payload = dict(detector_payload or {})
+        normalized_before = self._normalize_detector_payload(payload) or {}
+        clean_boxes = self._sort_boxes_reading_order(list(boxes or []))
+        changed = self._detector_boxes_changed(
+            predicted_rows=list(normalized_before.get("predicted_boxes") or []),
+            final_boxes=clean_boxes,
+        )
         payload.update(
             {
                 "detector_source": "human_reviewed_segments",
                 "detector_model": self._yolo_model_path or self._resolve_problem_model_path(),
-                "review_status": "reviewed",
-                "max_conf": 1.0 if boxes else 0.0,
-                "avg_conf": 1.0 if boxes else 0.0,
+                "review_status": "corrected" if changed else "reviewed",
+                "max_conf": 1.0 if clean_boxes else 0.0,
+                "avg_conf": 1.0 if clean_boxes else 0.0,
                 "diagram_presence_source": "human_review",
-                "diagram_presence_label": "yes" if boxes else "no",
+                "diagram_presence_label": "yes" if clean_boxes else "no",
                 "final_boxes": [
                     {"bbox_px": [int(v) for v in box[:4]], "conf": 1.0, "source": "human_review"}
-                    for box in list(boxes or [])
+                    for box in clean_boxes
                 ],
             }
         )
         self.last_detector_source = "human_reviewed_segments"
         self.last_detector_payload = self._normalize_detector_payload(payload) or payload
-        return self._save_segments_from_boxes(src, list(boxes or []), detector_payload=self.last_detector_payload)
+        return self._save_segments_from_boxes(src, clean_boxes, detector_payload=self.last_detector_payload)
 
     def _load_existing_segments(self, src: Path) -> List[SegmentoProblemaV2]:
         out_dir = self._segment_dir_for_read(src)

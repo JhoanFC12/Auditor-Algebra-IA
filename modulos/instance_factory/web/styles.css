@@ -2227,7 +2227,7 @@ details.raw-block summary {
 }
 
 .library-detail-page {
-  max-width: 980px;
+  max-width: 1120px;
 }
 
 .book-detail-head {
@@ -2260,19 +2260,24 @@ details.raw-block summary {
 
 .instance-list {
   display: grid;
-  gap: 10px;
+  gap: 12px;
+  min-width: 0;
 }
 
 .instance-card {
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: var(--surface);
-  padding: 10px;
+  background: color-mix(in srgb, var(--surface) 94%, var(--surface-soft));
+  padding: 12px;
   display: grid;
-  grid-template-columns: minmax(240px, 1fr) auto auto;
-  align-items: center;
-  gap: 10px;
+  grid-template-columns: minmax(210px, .8fr) minmax(280px, 1fr) minmax(132px, 148px);
+  grid-template-areas:
+    "select status status"
+    "timeline timeline actions";
+  align-items: stretch;
+  gap: 12px;
   min-width: 0;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, .04);
 }
 
 .instance-card.active {
@@ -2281,20 +2286,37 @@ details.raw-block summary {
 }
 
 .instance-select {
+  grid-area: select;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
   width: 100%;
-  min-height: 44px;
-  padding: 0;
-  border: 0;
-  background: transparent;
+  min-height: 58px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--surface-soft) 76%, transparent);
   text-align: left;
   white-space: normal;
 }
 
-.instance-select:hover { border-color: transparent; }
+.instance-select:hover {
+  border-color: var(--border);
+  background: var(--surface-soft);
+}
+
+.instance-select .status-pill {
+  flex: 0 0 auto;
+  min-width: 62px;
+  min-height: 28px;
+  justify-content: center;
+  padding: 5px 9px;
+  text-align: center;
+  overflow-wrap: normal;
+  white-space: nowrap;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 24%, transparent);
+}
 
 .instance-select span:first-child {
   display: grid;
@@ -2303,7 +2325,9 @@ details.raw-block summary {
 }
 
 .instance-select strong {
+  display: block;
   overflow-wrap: anywhere;
+  line-height: 1.22;
 }
 
 .instance-select small {
@@ -2312,23 +2336,29 @@ details.raw-block summary {
 }
 
 .instance-state-summary {
+  grid-area: status;
   display: grid;
+  align-content: center;
   gap: 4px;
-  padding: 10px 12px;
+  min-height: 58px;
+  padding: 10px 12px 10px 14px;
   border: 1px solid var(--border);
   border-radius: 7px;
   background: var(--surface-soft);
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--border-strong) 58%, transparent);
 }
 
 .instance-state-summary strong {
   color: var(--text);
-  font-size: 13px;
+  font-size: 13.5px;
+  line-height: 1.25;
 }
 
 .instance-state-summary span {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .instance-state-vacia .instance-state-summary {
@@ -2338,23 +2368,110 @@ details.raw-block summary {
 .instance-state-procesando .instance-state-summary {
   border-color: color-mix(in srgb, #d97706 38%, var(--border));
   background: rgba(217, 119, 6, .10);
+  box-shadow: inset 3px 0 0 color-mix(in srgb, #d97706 65%, transparent);
 }
 
 .instance-state-llena .instance-state-summary {
   border-color: color-mix(in srgb, #16a34a 40%, var(--border));
   background: rgba(22, 163, 74, .12);
+  box-shadow: inset 3px 0 0 color-mix(in srgb, #16a34a 66%, transparent);
+}
+
+.instance-timeline-summary {
+  grid-area: timeline;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: stretch;
+  gap: 12px;
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--surface-soft) 88%, transparent);
+}
+
+.instance-timeline-copy {
+  display: grid;
+  gap: 3px;
+  align-content: center;
+  min-width: 0;
+}
+
+.instance-timeline-copy strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.instance-timeline-copy small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.instance-timeline-strip {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: start;
+  align-content: center;
+  gap: 5px;
+  align-items: center;
+  max-width: 232px;
+  min-width: 0;
+}
+
+.instance-timeline-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  min-width: 28px;
+  height: 24px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  background: var(--surface);
+  font-size: 11px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.instance-timeline-dot.done {
+  border-color: color-mix(in srgb, var(--green) 48%, var(--border));
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.instance-timeline-dot.current {
+  border-color: var(--blue);
+  color: #fff;
+  background: var(--blue);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 18%, transparent);
 }
 
 .instance-actions {
-  display: flex;
-  justify-content: flex-end;
+  grid-area: actions;
+  display: grid;
+  align-items: stretch;
+  align-content: center;
+  justify-content: stretch;
+  justify-items: stretch;
+  gap: 8px;
   min-width: 0;
 }
 
 .instance-actions button {
-  min-width: 128px;
-  max-width: 100%;
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  min-height: 40px;
+  padding-inline: 12px;
   white-space: normal;
+}
+
+.instance-actions button.primary {
+  min-height: 48px;
 }
 
 .library-form {
@@ -2513,7 +2630,22 @@ details.raw-block summary {
   .timeline::before { display: none; }
   .inspector { grid-template-columns: 1fr; }
   .grid-two, .record-layout, .record-layout.ocr-layout, .review-columns, .candidate-grid, .crops-layout, .library-layout { grid-template-columns: 1fr; }
-  .instance-card { grid-template-columns: 1fr; }
+  .instance-card {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "select"
+      "status"
+      "timeline"
+      "actions";
+  }
+  .instance-timeline-summary { grid-template-columns: 1fr; }
+  .instance-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-content: stretch;
+  }
+  .instance-actions button {
+    max-width: none;
+  }
   .batch-result { grid-template-columns: 1fr; }
   .sticky-preview { position: static; }
   #stageHost {
@@ -2546,8 +2678,11 @@ details.raw-block summary {
     grid-template-columns: 1fr;
     flex-direction: column;
   }
-  .book-stats, .instance-actions, .form-actions {
+  .book-stats, .form-actions {
     justify-content: stretch;
+  }
+  .instance-actions {
+    grid-template-columns: 1fr;
   }
   .instance-actions button, .form-actions button {
     width: 100%;

@@ -1,0 +1,73 @@
+{
+  "schema_version": "problem_semantic_profile_v1",
+  "problem_id": "example_text_only_algebra_001",
+  "modality": "text_only",
+  "course": "Algebra",
+  "topic": "Ecuaciones lineales",
+  "subtopic": "Ecuaciones de primer grado",
+  "statement_summary": "Resolver una ecuacion lineal de primer grado.",
+  "concepts": [
+    "ecuaciones lineales",
+    "despeje",
+    "operaciones con enteros"
+  ],
+  "skills": [
+    "despejar variable",
+    "operar terminos independientes",
+    "verificar una alternativa"
+  ],
+  "objects": {
+    "geometry": [],
+    "algebra": [
+      "ecuacion lineal",
+      "variable"
+    ],
+    "arithmetic": [
+      "suma",
+      "resta",
+      "division"
+    ]
+  },
+  "given_conditions": [
+    "La ecuacion dada es 2x + 5 = 17."
+  ],
+  "unknowns": [
+    "x"
+  ],
+  "representation": {
+    "embedding_text": "Algebra. Ecuaciones lineales. Resolver 2x + 5 = 17 despejando x.",
+    "search_keywords": [
+      "algebra",
+      "ecuacion lineal",
+      "despeje",
+      "primer grado"
+    ],
+    "canonical_problem_type": "resolver_ecuacion_lineal"
+  },
+  "difficulty": {
+    "estimated_level": 1,
+    "scale": "1-5",
+    "signals": {
+      "steps_estimated": 2,
+      "requires_graph_reading": false,
+      "requires_formula_memory": false,
+      "requires_multi_case_reasoning": false,
+      "requires_algebraic_manipulation": "low"
+    },
+    "reason": "Aplicacion directa de despeje en una ecuacion lineal simple."
+  },
+  "evidence": {
+    "uses_text": true,
+    "uses_figure": false,
+    "figure_tags": [],
+    "source_fields": [
+      "latex_rendered_item",
+      "raw_ocr"
+    ]
+  },
+  "review": {
+    "status": "sin_revisar",
+    "human_verified": false,
+    "notes": ""
+  }
+}

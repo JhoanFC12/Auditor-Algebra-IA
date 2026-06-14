@@ -1,0 +1,57 @@
+{
+  "schema_version": "geometry_figure_description_v1",
+  "source_record_id": "example_record_geometry_001",
+  "figure_tag": "img-15",
+  "figure_type": "geometria_plana",
+  "visual_text": {
+    "points": [
+      "A",
+      "B",
+      "C"
+    ],
+    "measure_labels": [
+      "50^\\circ",
+      "x^\\circ"
+    ],
+    "other_labels": []
+  },
+  "primitives": {
+    "points": [
+      "A",
+      "B",
+      "C"
+    ],
+    "segments": [
+      "AB",
+      "BC",
+      "CA"
+    ],
+    "circles": [],
+    "arcs": []
+  },
+  "formalgeo_candidate": {
+    "construction_cdl": [
+      "Shape(ABC)"
+    ],
+    "condition_cdl": [
+      "Equal(MeasureOfAngle(ABC),50)"
+    ],
+    "goal_cdl": []
+  },
+  "evidence": [
+    {
+      "predicate": "Shape(ABC)",
+      "source": "line_detection",
+      "confidence": 0.9
+    },
+    {
+      "predicate": "Equal(MeasureOfAngle(ABC),50)",
+      "source": "visual_measure_label",
+      "confidence": 0.85
+    }
+  ],
+  "warnings": [
+    "No inferir paralelismo o igualdad si no hay marca visual.",
+    "No resolver el valor de x desde el grafico en esta etapa."
+  ]
+}

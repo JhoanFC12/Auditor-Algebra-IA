@@ -1,0 +1,80 @@
+{
+  "schema_version": "problem_semantic_profile_v1",
+  "problem_id": "example_text_image_geometry_001",
+  "modality": "text_image",
+  "course": "Geometria",
+  "topic": "Triangulos",
+  "subtopic": "Angulos en triangulos",
+  "statement_summary": "Calcular un angulo desconocido usando datos del grafico.",
+  "concepts": [
+    "triangulos",
+    "angulos",
+    "relaciones angulares"
+  ],
+  "skills": [
+    "leer grafico",
+    "identificar angulos",
+    "plantear relacion geometrica"
+  ],
+  "objects": {
+    "geometry": [
+      "triangulo",
+      "angulo",
+      "segmento"
+    ],
+    "algebra": [
+      "ecuacion simple"
+    ],
+    "arithmetic": [
+      "suma de angulos"
+    ]
+  },
+  "given_conditions": [
+    "El enunciado pide calcular x.",
+    "El grafico contiene medidas angulares necesarias."
+  ],
+  "unknowns": [
+    "x"
+  ],
+  "representation": {
+    "embedding_text": "Geometria. Triangulos. Angulos. Calculo de angulo x con grafico y relaciones angulares visibles.",
+    "search_keywords": [
+      "geometria",
+      "triangulos",
+      "angulos",
+      "grafico",
+      "calcular x"
+    ],
+    "canonical_problem_type": "calculo_de_angulo_con_grafico"
+  },
+  "difficulty": {
+    "estimated_level": 2,
+    "scale": "1-5",
+    "signals": {
+      "steps_estimated": 2,
+      "requires_graph_reading": true,
+      "requires_formula_memory": false,
+      "requires_multi_case_reasoning": false,
+      "requires_algebraic_manipulation": "low"
+    },
+    "reason": "Requiere leer el grafico y aplicar una relacion angular directa."
+  },
+  "evidence": {
+    "uses_text": true,
+    "uses_figure": true,
+    "figure_tags": [
+      "img-15"
+    ],
+    "source_fields": [
+      "latex_rendered_item",
+      "raw_ocr",
+      "figure_segmentation",
+      "geometry_figure_description"
+    ]
+  },
+  "review": {
+    "status": "sin_revisar",
+    "human_verified": false,
+    "notes": ""
+  }
+}
