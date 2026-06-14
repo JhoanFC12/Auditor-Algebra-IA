@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from modulos.instance_factory.hf_endpoint_manager import HfEndpointManager, MANAGE_ENDPOINT_PERMISSION_HINT
+from modulos.instance_factory.hf_endpoint_manager import HfEndpointManager, HfOcrRequestGate, MANAGE_ENDPOINT_PERMISSION_HINT
 
 
 class FakeEndpoint:
@@ -191,6 +191,34 @@ class HfEndpointManagerTests(unittest.TestCase):
         self.assertEqual(status["status"], "skipped")
         self.assertEqual(status["reason"], "active_ocr_jobs")
         self.assertFalse(endpoint.scale_to_zero_called)
+
+    def test_request_gate_limits_parallel_ocr_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gate_file = root / "request_gate.json"
+            with patch.dict(os.environ, {
+                "HF_OCR_REQUEST_GATE_FILE": str(gate_file),
+                "HF_TRAINED_OCR_CLIENT_CONCURRENCY": "1",
+                "HF_TRAINED_OCR_REQUEST_LEASE_TTL_SECONDS": "60",
+            }, clear=False):
+                gate = HfOcrRequestGate()
+                first = gate.acquire(kind="ocr", job_id="job-1", label="uno")
+                try:
+                    status = gate.status()
+                    self.assertEqual(status["active_count"], 1)
+                    self.assertEqual(status["available_slots"], 0)
+                    with self.assertRaises(TimeoutError):
+                        gate.acquire(kind="ocr", job_id="job-2", label="dos", wait_timeout_s=0.05, poll_s=0.01)
+                finally:
+                    gate.release(first.lease_id)
+
+                second = gate.acquire(kind="ocr", job_id="job-2", label="dos", wait_timeout_s=0.05, poll_s=0.01)
+                try:
+                    self.assertEqual(second.active_count, 1)
+                    self.assertEqual(gate.status()["active_count"], 1)
+                finally:
+                    gate.release(second.lease_id)
+                self.assertEqual(gate.status()["active_count"], 0)
 
     def test_permission_error_returns_actionable_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

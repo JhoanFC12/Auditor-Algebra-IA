@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import modulos.instance_factory.staging as staging_module
 from modulos.instance_factory.model_inventory import build_model_inventory_manifest, resolve_model_defaults
 from modulos.instance_factory.models import InstancePipelineContext, PipelineStep, StageStatus, StagingProblemRecord
 from modulos.instance_factory.page_selection import parse_page_selection
@@ -123,6 +124,42 @@ class InstanceFactoryStagingTests(unittest.TestCase):
                 manifest["training_contracts"]["human_review_training_example_schema"],
                 "human_review_training_example_v1",
             )
+
+    def test_manifest_static_payloads_are_cached_between_rewrites(self) -> None:
+        staging_module._STATIC_MANIFEST_PAYLOAD_CACHE.clear()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                context = InstancePipelineContext(book_code="ALG01", instance_type="s01")
+                store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+                record = StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(Path(tmp) / "crop.png"),
+                    status=StageStatus.PENDING,
+                )
+                calls = {"inventory": 0, "matrix": 0}
+
+                def inventory() -> dict:
+                    calls["inventory"] += 1
+                    return {"schema_version": "fake_inventory_v1"}
+
+                def matrix() -> dict:
+                    calls["matrix"] += 1
+                    return {"schema_version": "fake_matrix_v1", "stages": {}}
+
+                with patch("modulos.instance_factory.model_inventory.build_model_inventory_manifest", side_effect=inventory), patch(
+                    "modulos.instance_factory.model_inventory.build_retraining_evaluation_matrix",
+                    side_effect=matrix,
+                ):
+                    store.upsert_record(record)
+                    store.rewrite_manifest()
+
+                manifest = json.loads(store.manifest_path.read_text(encoding="utf-8"))
+                self.assertEqual(manifest["model_inventory"]["schema_version"], "fake_inventory_v1")
+                self.assertEqual(manifest["evaluation_matrix"]["schema_version"], "fake_matrix_v1")
+                self.assertEqual(calls, {"inventory": 1, "matrix": 1})
+        finally:
+            staging_module._STATIC_MANIFEST_PAYLOAD_CACHE.clear()
 
     def test_record_steps_are_normalized_and_manifest_counts_by_step(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -588,6 +625,37 @@ class InstanceFactoryStagingTests(unittest.TestCase):
 
             self.assertEqual(store.load_records(), [])
 
+    def test_load_records_cache_is_isolated_and_refreshes_on_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s04")
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            record = StagingProblemRecord(
+                record_id="crop_001",
+                crop_id="crop_001",
+                crop_path=str(Path(tmp) / "crop.png"),
+                raw_ocr="uno",
+            )
+            store.upsert_record(record)
+
+            first = store.load_records()
+            second = store.load_records()
+            self.assertEqual(first[0].raw_ocr, "uno")
+            self.assertEqual(second[0].raw_ocr, "uno")
+            self.assertIsNot(first[0], second[0])
+
+            first[0].raw_ocr = "mutado sin guardar"
+            self.assertEqual(store.load_records()[0].raw_ocr, "uno")
+
+            record.raw_ocr = "dos"
+            store.upsert_record(record)
+            self.assertEqual(store.load_records()[0].raw_ocr, "dos")
+
+            path = store._record_path("crop_001")
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["raw_ocr"] = "externo con mas caracteres"
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.assertEqual(store.load_records()[0].raw_ocr, "externo con mas caracteres")
+
     def test_context_can_be_created_from_biblioteca_instance_payload(self) -> None:
         book = {
             "id": 42,
@@ -697,6 +765,107 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertEqual(loaded.audit["downstream_state"]["status"], "invalidated")
             self.assertEqual(loaded.audit["downstream_state"]["reason"], "page_boxes_changed")
             self.assertEqual(loaded.trace["downstream_invalidations"][-1]["reason"], "page_boxes_changed")
+
+    def test_page_delete_invalidates_downstream_staging_records(self) -> None:
+        try:
+            from modulos.instance_factory.pipeline import InstancePdfPipelineService
+        except Exception as exc:  # pragma: no cover - optional detector/OCR dependencies.
+            self.skipTest(f"pipeline deps unavailable: {exc}")
+
+        class FakeGolden:
+            def __init__(self, page_image: Path) -> None:
+                self.rows = [
+                    SimpleNamespace(
+                        record_id="page_001",
+                        page_number=1,
+                        boxes=[(1, 2, 30, 40)],
+                        reviewed=True,
+                        layout_mode="una_columna",
+                        detector_source="pdf_factory:test",
+                        image_path=page_image,
+                    ),
+                    SimpleNamespace(
+                        record_id="page_002",
+                        page_number=2,
+                        boxes=[(5, 6, 45, 55)],
+                        reviewed=True,
+                        layout_mode="una_columna",
+                        detector_source="pdf_factory:test",
+                        image_path=page_image,
+                    ),
+                ]
+
+            def load_instance(self, _name: str):
+                return self.rows
+
+            def delete_instance_row(self, _name: str, record_id: str):
+                self.rows = [row for row in self.rows if str(row.record_id) != str(record_id)]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            page = root / "page.png"
+            page.write_bytes(b"png")
+            crop = root / "crop.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s08", pdf_path="E:/Banco/libro.pdf")
+            store = InstanceStagingStore(context, root=root / "staging")
+            record = StagingProblemRecord(
+                record_id="crop_001",
+                crop_id="crop_001",
+                crop_path=str(crop),
+                status=StageStatus.READY,
+                source={
+                    "book_code": "ALG01",
+                    "instance_type": "s08",
+                    "pdf_path": "E:/Banco/libro.pdf",
+                    "page_number": 1,
+                    "source_record_id": "page_001",
+                    "bbox_px": [1, 2, 30, 40],
+                },
+                raw_ocr="OCR viejo",
+                figure_segmentation={"segments_total": 1},
+                normalized={"numero": "1"},
+                review={"notes": "validado"},
+                artifacts={"raw": "old.json"},
+                golden_sync={"status": "contract_prepared"},
+                errors=["error anterior"],
+            )
+            for step in (
+                PipelineStep.PAGES,
+                PipelineStep.BOXES,
+                PipelineStep.CROPS,
+                PipelineStep.OCR,
+                PipelineStep.SEGMENTATION,
+                PipelineStep.NORMALIZATION,
+                PipelineStep.REVIEW,
+            ):
+                record.set_step(step, StageStatus.READY, "listo")
+            store.upsert_record(record)
+            service = InstancePdfPipelineService(context, golden_controller=FakeGolden(page), staging_store=store)
+
+            remaining_pages = service.delete_page_record("page_001")
+
+            self.assertEqual([row.record_id for row in remaining_pages], ["page_002"])
+            loaded = store.get_record("crop_001")
+            assert loaded is not None
+            self.assertEqual(loaded.crop_path, "")
+            self.assertEqual(loaded.raw_ocr, "")
+            self.assertEqual(loaded.figure_segmentation, {})
+            self.assertEqual(loaded.normalized, {})
+            self.assertEqual(loaded.review, {})
+            self.assertEqual(loaded.artifacts, {})
+            self.assertEqual(loaded.golden_sync, {})
+            self.assertEqual(loaded.errors, [])
+            self.assertEqual(loaded.step_status(PipelineStep.PAGES), StageStatus.PENDING)
+            self.assertEqual(loaded.step_status(PipelineStep.BOXES), StageStatus.PENDING)
+            self.assertEqual(loaded.step_status(PipelineStep.CROPS), StageStatus.PENDING)
+            self.assertEqual(loaded.step_status(PipelineStep.OCR), StageStatus.PENDING)
+            self.assertEqual(loaded.step_status(PipelineStep.SEGMENTATION), StageStatus.PENDING)
+            self.assertEqual(loaded.step_status(PipelineStep.NORMALIZATION), StageStatus.PENDING)
+            self.assertEqual(loaded.step_status(PipelineStep.REVIEW), StageStatus.PENDING)
+            self.assertEqual(loaded.audit["downstream_state"]["status"], "invalidated")
+            self.assertEqual(loaded.audit["downstream_state"]["reason"], "page_removed_from_boxes")
+            self.assertTrue(loaded.source["source_removed"])
 
     def test_page_box_save_without_coordinate_change_preserves_downstream_records(self) -> None:
         try:
@@ -1267,6 +1436,73 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             updated = store.update_review(long_record_id, {"numero": "1", "latex_rendered_item": "Problema $x$"})
             self.assertEqual(updated.record_id, long_record_id)
             self.assertEqual(store.get_record(long_record_id).normalized["numero"], "1")
+
+    def test_ocr_batch_saves_each_record_but_rewrites_manifest_once(self) -> None:
+        class CountingStore(InstanceStagingStore):
+            def __init__(self, context: InstancePipelineContext, root: Path) -> None:
+                super().__init__(context, root=root)
+                self.rewrite_count = 0
+                self.load_count = 0
+
+            def load_records(self) -> list[StagingProblemRecord]:
+                self.load_count += 1
+                return super().load_records()
+
+            def rewrite_manifest(self) -> None:
+                self.rewrite_count += 1
+                super().rewrite_manifest()
+
+        class FakeExtractor:
+            def extract_from_image(self, **kwargs):
+                start_n = int(kwargs.get("start_n") or 1)
+                return [], f"<{start_n:02d}.> Halle x. A) $1$ B) $2$"
+
+        class FakeScanPipeline:
+            def __init__(self, *_args, **_kwargs) -> None:
+                self.extractor = FakeExtractor()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s01", pdf_path=str(root / "book.pdf"))
+            store = CountingStore(context, root=root / "staging")
+            crop_ids = []
+            for index in range(3):
+                crop = root / f"crop_{index}.png"
+                crop.write_bytes(b"png")
+                record_id = f"crop_{index}"
+                crop_ids.append(record_id)
+                store.upsert_record(
+                    StagingProblemRecord(
+                        record_id=record_id,
+                        crop_id=record_id,
+                        crop_path=str(crop),
+                        status=StageStatus.PENDING,
+                    )
+                )
+            store.rewrite_count = 0
+            store.load_count = 0
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            with patch("modulos.modulo0_transcriptor.scan_pipeline.pipeline.ScanPipeline", FakeScanPipeline), patch.object(
+                service,
+                "_validate_ocr_runtime",
+                lambda **_kwargs: None,
+            ):
+                processed = service.run_ocr_and_segmentation(
+                    provider="local",
+                    record_ids=crop_ids,
+                    run_segmentation=False,
+                    run_ocr=True,
+                )
+
+            self.assertEqual(len(processed), 3)
+            self.assertEqual(store.rewrite_count, 1)
+            self.assertEqual(store.load_count, 1)
+            self.assertEqual([row.raw_ocr for row in store.load_records()], [
+                "<01.> Halle x. A) $1$ B) $2$",
+                "<02.> Halle x. A) $1$ B) $2$",
+                "<03.> Halle x. A) $1$ B) $2$",
+            ])
 
     def test_cold_start_503_retry_keeps_ocr_request_alive(self) -> None:
         class Extractor:

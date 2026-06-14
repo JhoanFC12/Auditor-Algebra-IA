@@ -9,6 +9,7 @@ import urllib.error
 import urllib.request
 from dataclasses import asdict
 from pathlib import Path
+from unittest.mock import patch
 
 from modulos.instance_factory.library_api import LibraryWebApi, _timeline_stage_from_counts
 from modulos.instance_factory.library_web_server import LibraryWebRuntime
@@ -85,12 +86,15 @@ class _FakeController:
         self.created_instances = []
         self.updated_books = []
         self.updated_instances = []
+        self.book_list_calls = []
         self.dashboard_calls = []
+        self.instance_list_calls = []
 
     def listar_bases_datos(self):
         return ["demo_db"]
 
     def listar_libros(self, _db_name):
+        self.book_list_calls.append(str(_db_name))
         return [dict(row) for row in self.books.values()]
 
     def obtener_libro(self, _db_name, libro_id):
@@ -98,6 +102,7 @@ class _FakeController:
         return dict(row) if row else None
 
     def listar_instancias_libro(self, _db_name, libro_id):
+        self.instance_list_calls.append(int(libro_id))
         return [dict(row) for row in self.instances.get(int(libro_id), [])]
 
     def obtener_dashboard_libro(self, _db_name, libro_id):
@@ -212,7 +217,12 @@ class LibraryWebApiTests(unittest.TestCase):
                 self.assertTrue(books["policy"]["never_insert_directly_into_problemas"])
                 self.assertEqual(books["books"][0]["indicators"]["total_instancias"], 1)
                 self.assertEqual(controller.dashboard_calls, [])
-                self.assertEqual(books["books"][0]["instances"][0]["tipo"], "S01")
+                self.assertNotIn("instances", books["books"][0])
+                self.assertEqual(controller.instance_list_calls, [])
+
+                books_with_instances = api.dispatch("GET", "/api/library/books", {"db_name": ["demo_db"], "include_instances": ["1"]}, {})
+                self.assertEqual(books_with_instances["books"][0]["instances"][0]["tipo"], "S01")
+                self.assertEqual(controller.instance_list_calls, [1])
 
                 detail = api.dispatch("GET", "/api/library/books/1", {"db_name": ["demo_db"]}, {})
                 self.assertEqual(controller.dashboard_calls, [1])
@@ -291,6 +301,58 @@ class LibraryWebApiTests(unittest.TestCase):
                 else:
                     os.environ["PDF_LIBRARY_COVER_ROOT"] = previous_cover_root
 
+    def test_library_api_caches_gets_and_invalidates_after_mutation(self) -> None:
+        controller = _FakeController()
+        api = LibraryWebApi(controller=controller)
+
+        first = api.dispatch("GET", "/api/library/books", {"db_name": ["demo_db"]}, {})
+        first["books"][0]["title"] = "mutado en cliente"
+        second = api.dispatch("GET", "/api/library/books", {"db_name": ["demo_db"]}, {})
+
+        self.assertEqual(controller.book_list_calls, ["demo_db"])
+        self.assertEqual(second["books"][0]["title"], "Algebra")
+
+        with_instances = api.dispatch("GET", "/api/library/books", {"db_name": ["demo_db"], "include_instances": ["1"]}, {})
+        again_with_instances = api.dispatch("GET", "/api/library/books", {"db_name": ["demo_db"], "include_instances": ["1"]}, {})
+        self.assertEqual(with_instances["books"][0]["instances"][0]["tipo"], "S01")
+        self.assertEqual(again_with_instances["books"][0]["instances"][0]["tipo"], "S01")
+        self.assertEqual(controller.instance_list_calls, [1])
+
+        forced = api.dispatch("GET", "/api/library/books", {"db_name": ["demo_db"], "no_cache": ["1"]}, {})
+        self.assertEqual(forced["books"][0]["title"], "Algebra")
+        self.assertEqual(controller.book_list_calls, ["demo_db", "demo_db", "demo_db"])
+
+        api.dispatch("POST", "/api/library/books/1/state", {}, {"db_name": "demo_db", "estado": "en_progreso"})
+        refreshed = api.dispatch("GET", "/api/library/books", {"db_name": ["demo_db"]}, {})
+
+        self.assertEqual(controller.book_list_calls, ["demo_db", "demo_db", "demo_db", "demo_db"])
+        self.assertEqual(refreshed["books"][0]["status"], "en_progreso")
+
+    def test_library_mutations_return_lightweight_payloads_without_dashboard_scan(self) -> None:
+        controller = _FakeController()
+        api = LibraryWebApi(controller=controller)
+
+        created_book = api.dispatch("POST", "/api/library/books", {}, {"db_name": "demo_db", "codigo": "GEO01", "titulo": "Geometria"})
+        updated_book = api.dispatch("POST", "/api/library/books/1", {}, {"db_name": "demo_db", "titulo": "Algebra rapida"})
+        state = api.dispatch("POST", "/api/library/books/1/state", {}, {"db_name": "demo_db", "estado": "en_progreso"})
+        created_instance = api.dispatch("POST", "/api/library/books/1/instances", {}, {"db_name": "demo_db", "tipo": "S02", "total_esperado": 20})
+        updated_instance = api.dispatch(
+            "POST",
+            "/api/library/instances/11/state",
+            {},
+            {"db_name": "demo_db", "book_id": 1, "tipo": "S01 editada", "total_esperado": 12},
+        )
+
+        self.assertEqual(controller.dashboard_calls, [])
+        self.assertEqual(created_book["book"]["code"], "GEO01")
+        self.assertEqual(updated_book["book"]["title"], "Algebra rapida")
+        self.assertEqual(state["book"]["status"], "en_progreso")
+        self.assertEqual(created_instance["instance"]["id"], 12)
+        self.assertNotIn("dashboard", created_instance)
+        self.assertEqual(updated_instance["instance"]["tipo"], "S01 editada")
+        self.assertNotIn("instances", updated_instance)
+        self.assertNotIn("dashboard", updated_instance)
+
     def test_timeline_stage_from_counts_prioritizes_bd_and_ocr(self) -> None:
         uploaded = _timeline_stage_from_counts({"subidos_bd": 12, "ocr_done": 12})
         self.assertEqual(uploaded["id"], "candidate")
@@ -325,8 +387,15 @@ class LibraryWebApiTests(unittest.TestCase):
                 cover_url = payload["books"][0]["cover_url"]
                 self.assertTrue(cover_url.startswith("/api/library/file/"))
                 with urllib.request.urlopen(base + cover_url.lstrip("/"), timeout=5) as response:
+                    etag = response.headers.get("ETag")
                     self.assertEqual(response.read(), b"\x89PNG\r\n\x1a\n")
                     self.assertEqual(response.headers.get_content_type(), "image/png")
+                    self.assertTrue(etag)
+                    self.assertIn("immutable", response.headers.get("Cache-Control", ""))
+                request = urllib.request.Request(base + cover_url.lstrip("/"), headers={"If-None-Match": etag or ""})
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    urllib.request.urlopen(request, timeout=5)
+                self.assertEqual(raised.exception.code, 304)
             finally:
                 runtime.stop()
 
@@ -408,6 +477,126 @@ class LibraryWebApiTests(unittest.TestCase):
                     os.environ.pop("PDF_LIBRARY_COVER_ROOT", None)
                 else:
                     os.environ["PDF_LIBRARY_COVER_ROOT"] = previous_cover_root
+
+    def test_local_timeline_counts_uses_cached_manifests(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            book = {
+                "id": 1,
+                "codigo": "ALG01",
+                "titulo": "Algebra",
+                "workspace_dir": str(root),
+                "pdf_path": str(root / "book.pdf"),
+            }
+            instance = {"id": 11, "libro_id": 1, "tipo": "S01", "total_esperado": 10}
+            context = InstancePipelineContext.from_library_instance(book, instance, db_name="demo_db")
+            staging_root = context.staging_root()
+            staging_root.mkdir(parents=True, exist_ok=True)
+            (staging_root / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "pdf_factory_staging_v1",
+                        "records_total": 5,
+                        "summary": {
+                            "records_total": 5,
+                            "crops_found": 5,
+                            "ocr_done": 4,
+                            "segments_done": 3,
+                            "normalized_done": 2,
+                            "needs_review": 1,
+                            "human_reviewed": 2,
+                            "ready": 2,
+                            "errors": 1,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            class _GoldenFromManifest:
+                def load_instance_summary(self, _name):
+                    return {"pages_total": 2, "reviewed_pages": 1, "boxes_total": 5}
+
+                def load_instance(self, _name):
+                    raise AssertionError("No debe leer cada pagina si existe manifest.")
+
+            with patch(
+                "modulos.modulo13_laboratorio_pdf_segmentacion.controlador_laboratorio_pdf.PdfProblemGoldenController",
+                return_value=_GoldenFromManifest(),
+            ), patch.object(InstanceStagingStore, "load_records", side_effect=AssertionError("No debe leer cada record si existe manifest.")):
+                counts = LibraryWebApi._local_timeline_counts("demo_db", book, instance)
+
+            self.assertEqual(counts["pages_total"], 2)
+            self.assertEqual(counts["pages_reviewed"], 1)
+            self.assertEqual(counts["boxes_total"], 5)
+            self.assertEqual(counts["records_total"], 5)
+            self.assertEqual(counts["ocr_done"], 4)
+            self.assertEqual(counts["segments_done"], 3)
+            self.assertEqual(counts["errors"], 1)
+
+    def test_timeline_stage_skips_local_scan_when_instance_is_already_in_db(self) -> None:
+        controller = _FakeController()
+        api = LibraryWebApi(controller=controller)
+        book = controller.books[1]
+        instance = controller.instances[1][0]
+
+        with patch(
+            "modulos.modulo13_laboratorio_pdf_segmentacion.controlador_laboratorio_pdf.PdfProblemGoldenController",
+            side_effect=AssertionError("No debe leer staging local si ya esta en BD."),
+        ):
+            stage = api._instance_timeline_stage(
+                "demo_db",
+                book,
+                instance,
+                {"subidos_bd": 3, "total_esperado": 10},
+            )
+
+        self.assertEqual(stage["id"], "candidate")
+        self.assertEqual(stage["title"], "BD final")
+        self.assertEqual(stage["counts"]["subidos_bd"], 3)
+
+    def test_local_timeline_counts_are_cached_per_instance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            book = {
+                "id": 1,
+                "codigo": "ALG01",
+                "titulo": "Algebra",
+                "workspace_dir": str(root),
+                "pdf_path": str(root / "book.pdf"),
+            }
+            instance = {"id": 11, "libro_id": 1, "tipo": "S01", "total_esperado": 10}
+            context = InstancePipelineContext.from_library_instance(book, instance, db_name="demo_db")
+            context.staging_root().mkdir(parents=True, exist_ok=True)
+            (context.staging_root() / "manifest.json").write_text(
+                json.dumps({"schema_version": "pdf_factory_staging_v1", "summary": {"records_total": 5, "ocr_done": 4}}),
+                encoding="utf-8",
+            )
+
+            class _GoldenFromManifest:
+                def __init__(self):
+                    self.calls = 0
+
+                def load_instance_summary(self, _name):
+                    self.calls += 1
+                    return {"pages_total": 2, "reviewed_pages": 1, "boxes_total": 5}
+
+                def load_instance(self, _name):
+                    raise AssertionError("No debe leer paginas si existe resumen.")
+
+            golden = _GoldenFromManifest()
+            api = LibraryWebApi(controller=_FakeController())
+            with patch(
+                "modulos.modulo13_laboratorio_pdf_segmentacion.controlador_laboratorio_pdf.PdfProblemGoldenController",
+                return_value=golden,
+            ):
+                first = api._cached_local_timeline_counts("demo_db", book, instance)
+                first["pages_total"] = 999
+                second = api._cached_local_timeline_counts("demo_db", book, instance)
+
+        self.assertEqual(golden.calls, 1)
+        self.assertEqual(second["pages_total"], 2)
+        self.assertEqual(second["records_total"], 5)
 
     def test_library_runtime_serves_factory_file_token_from_non_active_instance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

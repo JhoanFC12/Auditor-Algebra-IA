@@ -132,6 +132,17 @@ button.secondary {
   color: var(--secondary-text);
 }
 
+button.danger {
+  border-color: color-mix(in srgb, var(--red) 55%, var(--border));
+  background: color-mix(in srgb, var(--red-soft) 68%, var(--surface));
+  color: var(--red);
+}
+
+button.danger:hover {
+  border-color: var(--red);
+  background: color-mix(in srgb, var(--red) 14%, var(--surface));
+}
+
 button.ghost { background: var(--surface-soft); }
 
 input, select, textarea {
@@ -736,6 +747,12 @@ canvas {
   border-radius: var(--radius);
 }
 
+.page-picker-note,
+.selected-pages-note {
+  width: 100%;
+  font-size: 13px;
+}
+
 .page-chip {
   min-width: 36px;
   height: 34px;
@@ -777,6 +794,31 @@ canvas {
 .row-card.active, .crop-card.active {
   border-color: var(--blue);
   background: var(--blue-soft);
+}
+
+.page-record-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.page-record-main {
+  min-width: 0;
+}
+
+.page-record-card .page-delete-btn {
+  min-width: 78px;
+  min-height: 34px;
+  padding: 6px 10px;
+  border-color: color-mix(in srgb, var(--red) 45%, var(--border));
+  color: var(--red);
+  font-weight: 900;
+}
+
+.page-record-card .page-delete-btn:hover {
+  border-color: var(--red);
+  background: color-mix(in srgb, var(--red) 12%, var(--surface));
 }
 
 .crop-card.queued {
@@ -886,6 +928,27 @@ canvas {
   min-height: 360px;
   overflow: auto;
   padding-right: 4px;
+}
+
+.crop-gallery-window {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+}
+
+.crop-gallery-window strong,
+.crop-gallery-window span {
+  display: block;
+}
+
+.crop-gallery-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .crop-card img, .segment-card img {
@@ -1157,6 +1220,17 @@ canvas {
 .record-jump-label .muted {
   font-size: 12px;
   font-weight: 800;
+}
+
+.record-jump-control {
+  display: grid;
+  grid-template-columns: minmax(72px, 120px) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.record-jump-control input {
+  min-width: 0;
 }
 
 .record-meta-compact {
@@ -1993,6 +2067,19 @@ details.raw-block summary {
 .library-books-grid {
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   align-items: stretch;
+}
+
+.library-load-more {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 58px;
+}
+
+.library-load-more button {
+  min-width: 132px;
 }
 
 .book-card {

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
+import inspect
 import json
 import os
+import time
 import urllib.parse
 
 from .library_covers import copy_cover_to_library_store
@@ -74,6 +77,10 @@ class LibraryWebApi:
         self.open_url = open_url or _default_open_url
         self.file_url_resolver = file_url_resolver
         self._factory_runtimes: list[Any] = []
+        self._response_cache: dict[tuple[str, str, tuple[tuple[str, tuple[str, ...]], ...]], tuple[float, dict[str, Any]]] = {}
+        self._response_cache_ttl_s = 2.0
+        self._local_timeline_cache: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
+        self._local_timeline_cache_ttl_s = 8.0
 
     @property
     def controller(self) -> Any:
@@ -119,6 +126,26 @@ class LibraryWebApi:
                 code="method_not_allowed",
             )
 
+        cache_key = self._cache_key(method, path, query) if method == "GET" else None
+        if cache_key is not None:
+            cached = self._get_cached_response(cache_key)
+            if cached is not None:
+                return cached
+        elif method != "GET" or _query_bool(query, "no_cache", default=False):
+            self._invalidate_response_cache()
+
+        result = self._dispatch_uncached(method, path, query, payload)
+        if cache_key is not None:
+            self._set_cached_response(cache_key, result)
+        return result
+
+    def _dispatch_uncached(
+        self,
+        method: str,
+        path: str,
+        query: dict[str, list[str]],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
         parts = _path_parts(path)
         if parts == ["api", "library", "databases"]:
             return self._databases()
@@ -141,6 +168,47 @@ class LibraryWebApi:
             return self._prepare_factory(payload, _int_id(parts[3], "instance_id"))
         raise FileNotFoundError(f"Ruta API no encontrada: {method} {path}")
 
+    @staticmethod
+    def _cache_key(
+        method: str,
+        path: str,
+        query: dict[str, list[str]],
+    ) -> tuple[str, str, tuple[tuple[str, tuple[str, ...]], ...]] | None:
+        if _query_bool(query, "no_cache", default=False):
+            return None
+        normalized_query = tuple(
+            sorted(
+                (str(key), tuple(str(value) for value in values))
+                for key, values in (query or {}).items()
+                if str(key) not in {"_", "ts", "cache_bust"}
+            )
+        )
+        return (str(method).upper(), str(path), normalized_query)
+
+    def _get_cached_response(
+        self,
+        key: tuple[str, str, tuple[tuple[str, tuple[str, ...]], ...]],
+    ) -> dict[str, Any] | None:
+        cached = self._response_cache.get(key)
+        if cached is None:
+            return None
+        created_at, payload = cached
+        if time.monotonic() - created_at > self._response_cache_ttl_s:
+            self._response_cache.pop(key, None)
+            return None
+        return copy.deepcopy(payload)
+
+    def _set_cached_response(
+        self,
+        key: tuple[str, str, tuple[tuple[str, tuple[str, ...]], ...]],
+        payload: dict[str, Any],
+    ) -> None:
+        self._response_cache[key] = (time.monotonic(), copy.deepcopy(payload))
+
+    def _invalidate_response_cache(self) -> None:
+        self._response_cache.clear()
+        self._local_timeline_cache.clear()
+
     def _databases(self) -> dict[str, Any]:
         dbs = [str(name) for name in self.controller.listar_bases_datos()]
         configured = str(os.getenv("DB_NAME", "") or "").strip()
@@ -154,11 +222,12 @@ class LibraryWebApi:
 
     def _books(self, query: dict[str, list[str]]) -> dict[str, Any]:
         db_name = _required_db(query=query)
+        include_instances = _query_bool(query, "include_instances", default=False)
         books = []
         for row in self.controller.listar_libros(db_name):
             book = self._book_summary(db_name, dict(row))
             book_id = int(book.get("id") or 0)
-            if book_id > 0:
+            if include_instances and book_id > 0:
                 try:
                     book["instances"] = self._lightweight_instances(db_name, book_id, book)
                 except Exception:
@@ -200,11 +269,12 @@ class LibraryWebApi:
         data = dict(payload)
         data["cover_path"] = copy_cover_to_library_store(str(data.get("cover_path") or ""), data, db_name=db_name)
         book_id = self.controller.crear_libro(db_name, _book_input(data))
+        book = self.controller.obtener_libro(db_name, book_id) or {"id": book_id, **data}
         return {
             "schema_version": "library_book_created_v1",
             "db_name": db_name,
             "book_id": book_id,
-            "book": self._book_detail_payload(db_name, book_id)["book"],
+            "book": self._book_summary(db_name, dict(book)),
             "policy": _policy(),
         }
 
@@ -217,11 +287,12 @@ class LibraryWebApi:
         merged["cover_path"] = copy_cover_to_library_store(str(merged.get("cover_path") or ""), merged, db_name=db_name)
         data = _book_input(merged)
         self.controller.actualizar_libro(db_name, book_id, _book_update_input(asdict(data)))
+        updated = self.controller.obtener_libro(db_name, book_id) or asdict(data)
         return {
             "schema_version": "library_book_updated_v1",
             "db_name": db_name,
             "book_id": book_id,
-            "book": self._book_detail_payload(db_name, book_id)["book"],
+            "book": self._book_summary(db_name, dict(updated)),
             "policy": _policy(),
         }
 
@@ -231,16 +302,17 @@ class LibraryWebApi:
             db_name,
             _instance_input(payload, book_id=book_id),
         )
-        detail = self._book_detail_payload(db_name, book_id)
-        instance = next((row for row in detail["instances"] if int(row.get("id") or 0) == instance_id), None)
+        book = self.controller.obtener_libro(db_name, book_id) or {"id": book_id}
+        instance = self._instance_by_id(db_name, book_id, instance_id)
+        if instance is not None:
+            instance = self._lightweight_instance(db_name, dict(book), dict(instance))
         return {
             "schema_version": "library_instance_created_v1",
             "db_name": db_name,
             "book_id": book_id,
             "instance_id": instance_id,
             "instance": instance,
-            "book": detail["book"],
-            "dashboard": detail["dashboard"],
+            "book": self._book_summary(db_name, dict(book)),
             "policy": _policy(),
         }
 
@@ -254,12 +326,13 @@ class LibraryWebApi:
             raise FileNotFoundError("Libro no encontrado.")
         data = _book_input({**book, "estado": state})
         self.controller.actualizar_libro(db_name, book_id, _book_update_input(asdict(data)))
+        updated = self.controller.obtener_libro(db_name, book_id) or {**book, "estado": state}
         return {
             "schema_version": "library_book_state_updated_v1",
             "db_name": db_name,
             "book_id": book_id,
             "estado": state,
-            "book": self._book_detail_payload(db_name, book_id)["book"],
+            "book": self._book_summary(db_name, dict(updated)),
             "policy": _policy(),
         }
 
@@ -281,17 +354,16 @@ class LibraryWebApi:
         if incoming_name:
             merged["tipo"] = incoming_name
         self.controller.actualizar_instancia(db_name, instance_id, _instance_update_input(asdict(_instance_input(merged, book_id=book_id))))
-        detail = self._book_detail_payload(db_name, book_id)
-        updated = next((row for row in detail["instances"] if int(row.get("id") or 0) == int(instance_id)), None)
+        book = self.controller.obtener_libro(db_name, book_id) or {"id": book_id}
+        updated = self._instance_by_id(db_name, book_id, instance_id) or merged
+        updated = self._lightweight_instance(db_name, dict(book), dict(updated))
         return {
             "schema_version": "library_instance_state_updated_v1",
             "db_name": db_name,
             "book_id": book_id,
             "instance_id": instance_id,
             "instance": updated,
-            "instances": detail["instances"],
-            "book": detail["book"],
-            "dashboard": detail["dashboard"],
+            "book": self._book_summary(db_name, dict(book)),
             "policy": _policy(),
         }
 
@@ -331,7 +403,7 @@ class LibraryWebApi:
         if not book:
             raise FileNotFoundError("Libro no encontrado.")
         instances = [dict(row) for row in self.controller.listar_instancias_libro(db_name, book_id)]
-        dashboard = _serialize(self.controller.obtener_dashboard_libro(db_name, book_id))
+        dashboard = _serialize(self._dashboard_for_book(db_name, book_id, dict(book), instances))
         instance_stats = {int(row.get("instancia_id") or 0): row for row in list(dashboard.get("instancias") or []) if isinstance(row, dict)}
         enriched_instances = []
         for instance in instances:
@@ -351,6 +423,22 @@ class LibraryWebApi:
             "dashboard": dashboard,
             "policy": _policy(),
         }
+
+    def _lightweight_instance(self, db_name: str, book: dict[str, Any], instance: dict[str, Any]) -> dict[str, Any]:
+        row = dict(instance)
+        row["factory_available"] = bool(str(book.get("pdf_path") or "").strip())
+        row["factory_prepare_endpoint"] = f"/api/library/instances/{int(row.get('id') or 0)}/factory"
+        row["timeline_stage"] = self._instance_timeline_stage(db_name, book, row, {})
+        return row
+
+    def _dashboard_for_book(self, db_name: str, book_id: int, book: dict[str, Any], instances: list[dict[str, Any]]) -> Any:
+        try:
+            signature = inspect.signature(self.controller.obtener_dashboard_libro)
+        except (TypeError, ValueError):
+            signature = None
+        if signature and {"book", "instance_rows"}.issubset(signature.parameters):
+            return self.controller.obtener_dashboard_libro(db_name, book_id, book=book, instance_rows=instances)
+        return self.controller.obtener_dashboard_libro(db_name, book_id)
 
     def _book_summary(self, db_name: str, book: dict[str, Any], *, dashboard: dict[str, Any] | None = None) -> dict[str, Any]:
         row = dict(book)
@@ -402,12 +490,46 @@ class LibraryWebApi:
         indicators: dict[str, Any],
     ) -> dict[str, Any]:
         counts = _empty_timeline_counts(indicators)
-        for key, value in self._local_timeline_counts(db_name, book, instance).items():
+        if int(counts.get("subidos_bd") or 0) > 0:
+            return _timeline_stage_from_counts(counts)
+        for key, value in self._cached_local_timeline_counts(db_name, book, instance).items():
             if isinstance(value, int):
                 counts[key] = max(int(counts.get(key) or 0), int(value))
             elif value:
                 counts[key] = value
         return _timeline_stage_from_counts(counts)
+
+    def _cached_local_timeline_counts(self, db_name: str, book: dict[str, Any], instance: dict[str, Any]) -> dict[str, Any]:
+        key = self._local_timeline_cache_key(db_name, book, instance)
+        cached = self._local_timeline_cache.get(key)
+        if cached is not None:
+            created_at, payload = cached
+            if time.monotonic() - created_at <= self._local_timeline_cache_ttl_s:
+                return copy.deepcopy(payload)
+            self._local_timeline_cache.pop(key, None)
+        counts = self._local_timeline_counts(db_name, book, instance)
+        self._local_timeline_cache[key] = (time.monotonic(), copy.deepcopy(counts))
+        return counts
+
+    @staticmethod
+    def _local_timeline_cache_key(db_name: str, book: dict[str, Any], instance: dict[str, Any]) -> tuple[str, str, str]:
+        book_key = "|".join(
+            [
+                str(book.get("id") or ""),
+                str(book.get("codigo") or book.get("code") or ""),
+                str(book.get("pdf_path") or book.get("pdfPath") or ""),
+                str(book.get("workspace_dir") or book.get("workspaceDir") or ""),
+            ]
+        )
+        instance_key = "|".join(
+            [
+                str(instance.get("id") or ""),
+                str(instance.get("tipo") or ""),
+                str(instance.get("session_path") or ""),
+                str(instance.get("soluciones_dir") or ""),
+            ]
+        )
+        return (str(db_name or ""), book_key, instance_key)
 
     @staticmethod
     def _local_timeline_counts(db_name: str, book: dict[str, Any], instance: dict[str, Any]) -> dict[str, Any]:
@@ -418,28 +540,39 @@ class LibraryWebApi:
             from .staging import InstanceStagingStore
 
             context = InstancePipelineContext.from_library_instance(book, instance, db_name=db_name)
-            pages = PdfProblemGoldenController().load_instance(context.instance_name)
-            by_page: dict[int, Any] = {}
-            for index, page in enumerate(pages or []):
-                try:
-                    page_number = int(page.page_number or 0)
-                except Exception:
-                    page_number = 0
-                if page_number <= 0:
-                    continue
-                current = by_page.get(page_number)
-                current_score = _page_timeline_score(current, -1) if current is not None else None
-                next_score = _page_timeline_score(page, index)
-                if current is None or (current_score is not None and next_score >= current_score):
-                    by_page[page_number] = page
-            page_rows = [by_page[key] for key in sorted(by_page)]
-            counts["pages_total"] = len(page_rows)
-            counts["pages_reviewed"] = sum(1 for row in page_rows if bool(getattr(row, "reviewed", False)))
-            counts["boxes_total"] = sum(len(getattr(row, "boxes", None) or []) for row in page_rows)
+            golden = PdfProblemGoldenController()
+            page_summary = golden.load_instance_summary(context.instance_name)
+            if page_summary is not None:
+                counts["pages_total"] = int(page_summary.get("pages_total") or 0)
+                counts["pages_reviewed"] = int(page_summary.get("reviewed_pages") or 0)
+                counts["boxes_total"] = int(page_summary.get("boxes_total") or 0)
+            else:
+                pages = golden.load_instance(context.instance_name)
+                by_page: dict[int, Any] = {}
+                for index, page in enumerate(pages or []):
+                    try:
+                        page_number = int(page.page_number or 0)
+                    except Exception:
+                        page_number = 0
+                    if page_number <= 0:
+                        continue
+                    current = by_page.get(page_number)
+                    current_score = _page_timeline_score(current, -1) if current is not None else None
+                    next_score = _page_timeline_score(page, index)
+                    if current is None or (current_score is not None and next_score >= current_score):
+                        by_page[page_number] = page
+                page_rows = [by_page[key] for key in sorted(by_page)]
+                counts["pages_total"] = len(page_rows)
+                counts["pages_reviewed"] = sum(1 for row in page_rows if bool(getattr(row, "reviewed", False)))
+                counts["boxes_total"] = sum(len(getattr(row, "boxes", None) or []) for row in page_rows)
 
-            store = InstanceStagingStore(context)
-            records = store.load_records()
-            counts.update(store.summarize_records(records))
+            staging_summary = InstanceStagingStore.load_manifest_summary_from_root(context.staging_root())
+            if staging_summary is None and (context.staging_root() / "records").exists():
+                store = InstanceStagingStore(context)
+                records = store.load_records()
+                staging_summary = store.summarize_records(records)
+            if staging_summary is not None:
+                counts.update(staging_summary)
         except Exception as exc:
             counts["timeline_error"] = str(exc)
         return counts
@@ -462,6 +595,18 @@ def _int_id(raw: str, name: str) -> int:
 def _first(query: dict[str, list[str]], key: str) -> str:
     values = query.get(key) or []
     return str(values[0] or "").strip() if values else ""
+
+
+def _query_bool(query: dict[str, list[str]], key: str, *, default: bool = False) -> bool:
+    values = query.get(key) or []
+    if not values:
+        return default
+    value = str(values[-1] or "").strip().lower()
+    if value in {"1", "true", "si", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 def _required_db(*, query: dict[str, list[str]] | None = None, payload: dict[str, Any] | None = None) -> str:

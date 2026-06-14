@@ -3,9 +3,9 @@ from __future__ import annotations
 import dataclasses
 import base64
 import binascii
-import hashlib
 import json
 import mimetypes
+import shutil
 import tempfile
 import threading
 import traceback
@@ -66,7 +66,16 @@ from .library_covers import library_cover_dir, save_cover_bytes
 from .models import InstancePipelineContext
 from .library_api import LibraryApiError, LibraryWebApi
 from .runtime_env import load_factory_runtime_env
-from .web_server import FactoryWebRuntime, WebApiError, _FilePayload, build_web_app_version, signal_web_app_reload
+from .web_server import (
+    FactoryWebRuntime,
+    WebApiError,
+    _FilePayload,
+    build_web_app_version,
+    file_cache_identity,
+    file_cache_token,
+    request_etag_matches,
+    signal_web_app_reload,
+)
 
 
 class LibraryWebRuntime:
@@ -95,6 +104,7 @@ class LibraryWebRuntime:
         self.static_root = Path(__file__).with_name("web")
         self.cache_root = Path(tempfile.mkdtemp(prefix="pdf_library_web_"))
         self._file_tokens: dict[str, Path] = {}
+        self._file_url_cache: dict[str, tuple[tuple[int, int], str, str]] = {}
         self._factory_runtimes: list[FactoryWebRuntime] = []
         self.endpoint_manager = HfEndpointManager()
         self._lock = threading.RLock()
@@ -179,7 +189,7 @@ class LibraryWebRuntime:
                 return
             if method == "GET" and path.startswith("/api/file/"):
                 result = self._dispatch_factory_file(path, query)
-                self._send_file(handler, result.path, result.content_type)
+                self._send_file(handler, result.path, result.content_type, cache_control=result.cache_control)
                 return
             if method == "POST" and path == "/api/library/cover/paste":
                 result = self._save_pasted_cover(self._read_json(handler, max_bytes=24_000_000))
@@ -194,7 +204,7 @@ class LibraryWebRuntime:
                 payload = self._read_json(handler) if method == "POST" else {}
                 result = self._dispatch_factory_api(handler, method, path, query, payload)
                 if isinstance(result, _FilePayload):
-                    self._send_file(handler, result.path, result.content_type)
+                    self._send_file(handler, result.path, result.content_type, cache_control=result.cache_control)
                 else:
                     self._send_json(handler, result)
                 return
@@ -629,7 +639,12 @@ class LibraryWebRuntime:
         if file_path.name == "index.html":
             self._send_library_index(handler, file_path)
             return
-        self._send_file(handler, file_path, mimetypes.guess_type(str(file_path))[0] or "text/plain")
+        self._send_file(
+            handler,
+            file_path,
+            mimetypes.guess_type(str(file_path))[0] or "text/plain",
+            cache_control="public, max-age=0, must-revalidate",
+        )
 
     def _send_library_index(self, handler: BaseHTTPRequestHandler, path: Path) -> None:
         text = Path(path).read_text(encoding="utf-8")
@@ -669,10 +684,24 @@ class LibraryWebRuntime:
             return ""
         if file_path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}:
             return ""
-        token = hashlib.sha1(str(file_path).encode("utf-8", errors="ignore")).hexdigest()[:24]
+        try:
+            stat = file_path.stat()
+        except OSError:
+            return ""
+        signature = (int(stat.st_mtime_ns), int(stat.st_size))
+        cache_key = str(file_path)
+        cached = self._file_url_cache.get(cache_key)
+        if cached and cached[0] == signature:
+            token, url = cached[1], cached[2]
+            with self._lock:
+                self._file_tokens[token] = file_path
+            return url
+        token = file_cache_token(file_path, limit=32)
+        url = f"/api/library/file/{token}"
         with self._lock:
             self._file_tokens[token] = file_path
-        return f"/api/library/file/{token}"
+            self._file_url_cache[cache_key] = (signature, token, url)
+        return url
 
     def _send_registered_file(self, handler: BaseHTTPRequestHandler, path: str) -> None:
         token = urllib.parse.unquote(path.rsplit("/", 1)[-1])
@@ -681,7 +710,12 @@ class LibraryWebRuntime:
         if file_path is None:
             self._send_json(handler, {"error": "file_not_found"}, status=404)
             return
-        self._send_file(handler, file_path, mimetypes.guess_type(str(file_path))[0] or "application/octet-stream")
+        self._send_file(
+            handler,
+            file_path,
+            mimetypes.guess_type(str(file_path))[0] or "application/octet-stream",
+            cache_control="public, max-age=86400, immutable",
+        )
 
     @staticmethod
     def _send_cors_headers(handler: BaseHTTPRequestHandler) -> None:
@@ -708,19 +742,36 @@ class LibraryWebRuntime:
         handler.wfile.write(raw)
 
     @staticmethod
-    def _send_file(handler: BaseHTTPRequestHandler, path: Path, content_type: str) -> None:
+    def _send_file(
+        handler: BaseHTTPRequestHandler,
+        path: Path,
+        content_type: str,
+        *,
+        cache_control: str = "public, max-age=0, must-revalidate",
+    ) -> None:
         file_path = Path(path)
         if not file_path.exists():
             LibraryWebRuntime._send_json(handler, {"error": "file_not_found"}, status=404)
             return
-        raw = file_path.read_bytes()
+        etag, last_modified = file_cache_identity(file_path)
+        if request_etag_matches(handler, etag):
+            handler.send_response(304)
+            handler.send_header("ETag", etag)
+            handler.send_header("Last-Modified", last_modified)
+            handler.send_header("Cache-Control", cache_control)
+            LibraryWebRuntime._send_cors_headers(handler)
+            handler.end_headers()
+            return
         handler.send_response(200)
         handler.send_header("Content-Type", content_type)
-        handler.send_header("Content-Length", str(len(raw)))
-        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Content-Length", str(file_path.stat().st_size))
+        handler.send_header("ETag", etag)
+        handler.send_header("Last-Modified", last_modified)
+        handler.send_header("Cache-Control", cache_control)
         LibraryWebRuntime._send_cors_headers(handler)
         handler.end_headers()
-        handler.wfile.write(raw)
+        with file_path.open("rb") as stream:
+            shutil.copyfileobj(stream, handler.wfile)
 
     @staticmethod
     def _send_error(

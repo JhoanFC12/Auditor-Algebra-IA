@@ -5,6 +5,7 @@ import json
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -21,6 +22,7 @@ _ACTIVE_ENDPOINT_JOBS: dict[str, dict[str, Any]] = {}
 _ACTIVE_ENDPOINT_JOBS_LOCK = threading.RLock()
 _PROCESS_ID = f"{os.getpid()}:{uuid.uuid4().hex}"
 _DEFAULT_ENDPOINT_LEASE_FILE = Path(__file__).resolve().parents[2] / ".cache" / "instance_factory" / "hf_ocr_endpoint_leases.json"
+_DEFAULT_OCR_REQUEST_GATE_FILE = Path(__file__).resolve().parents[2] / ".cache" / "instance_factory" / "hf_ocr_request_gate.json"
 
 
 @dataclass(frozen=True)
@@ -32,6 +34,18 @@ class HfEndpointConfig:
     @property
     def configured(self) -> bool:
         return bool(self.name or self.base_url)
+
+
+@dataclass(frozen=True)
+class HfOcrRequestLease:
+    lease_id: str
+    kind: str
+    job_id: str
+    label: str
+    acquired_at: float
+    waited_s: float
+    active_count: int
+    max_concurrency: int
 
 
 def _normalize_endpoint_url(value: str) -> str:
@@ -108,6 +122,59 @@ def _lease_file_path() -> Path:
     return Path(override) if override else _DEFAULT_ENDPOINT_LEASE_FILE
 
 
+def _request_gate_file_path() -> Path:
+    override = str(os.getenv("HF_OCR_REQUEST_GATE_FILE", "") or "").strip()
+    return Path(override) if override else _DEFAULT_OCR_REQUEST_GATE_FILE
+
+
+def _ocr_request_max_concurrency() -> int:
+    raw = (
+        os.getenv("HF_TRAINED_OCR_CLIENT_CONCURRENCY", "")
+        or os.getenv("HF_OCR_CLIENT_CONCURRENCY", "")
+        or "1"
+    )
+    try:
+        return max(1, min(16, int(str(raw).strip())))
+    except Exception:
+        return 1
+
+
+def _ocr_request_wait_timeout_s() -> float:
+    raw = (
+        os.getenv("HF_TRAINED_OCR_QUEUE_WAIT_TIMEOUT_SECONDS", "")
+        or os.getenv("HF_OCR_QUEUE_WAIT_TIMEOUT_SECONDS", "")
+        or "14400"
+    )
+    try:
+        return max(1.0, min(86400.0, float(str(raw).strip())))
+    except Exception:
+        return 14400.0
+
+
+def _ocr_request_poll_s() -> float:
+    raw = (
+        os.getenv("HF_TRAINED_OCR_QUEUE_POLL_SECONDS", "")
+        or os.getenv("HF_OCR_QUEUE_POLL_SECONDS", "")
+        or "2"
+    )
+    try:
+        return max(0.2, min(30.0, float(str(raw).strip())))
+    except Exception:
+        return 2.0
+
+
+def _ocr_request_lease_ttl_s() -> float:
+    raw = (
+        os.getenv("HF_TRAINED_OCR_REQUEST_LEASE_TTL_SECONDS", "")
+        or os.getenv("HF_OCR_REQUEST_LEASE_TTL_SECONDS", "")
+        or "1800"
+    )
+    try:
+        return max(60.0, min(21600.0, float(str(raw).strip())))
+    except Exception:
+        return 1800.0
+
+
 def _lease_ttl_s() -> float:
     raw = os.getenv("HF_ENDPOINT_JOB_LEASE_TTL_SECONDS", "") or "43200"
     try:
@@ -177,6 +244,276 @@ def _sync_process_leases_locked() -> None:
                 tmp.unlink()
         except Exception:
             pass
+
+
+class HfOcrRequestGate:
+    """Cross-process limiter for trained OCR calls.
+
+    vLLM endpoints may accept many HTTP requests while serving only a small number
+    at once. The gate keeps that queue on our side, where the UI can report it and
+    where endpoint shutdown logic can stay honest.
+    """
+
+    def __init__(self, *, gate_file: str | os.PathLike[str] | None = None) -> None:
+        self.gate_file = Path(gate_file) if gate_file else _request_gate_file_path()
+        self.lock_file = self.gate_file.with_suffix(self.gate_file.suffix + ".lock")
+
+    @contextmanager
+    def slot(
+        self,
+        *,
+        kind: str,
+        job_id: str,
+        label: str = "",
+        wait_timeout_s: float | None = None,
+        poll_s: float | None = None,
+        status_callback: Callable[[dict[str, Any]], None] | None = None,
+    ):
+        lease = self.acquire(
+            kind=kind,
+            job_id=job_id,
+            label=label,
+            wait_timeout_s=wait_timeout_s,
+            poll_s=poll_s,
+            status_callback=status_callback,
+        )
+        try:
+            yield lease
+        finally:
+            self.release(lease.lease_id)
+
+    def acquire(
+        self,
+        *,
+        kind: str,
+        job_id: str,
+        label: str = "",
+        wait_timeout_s: float | None = None,
+        poll_s: float | None = None,
+        status_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> HfOcrRequestLease:
+        max_concurrency = _ocr_request_max_concurrency()
+        wait_limit = _ocr_request_wait_timeout_s() if wait_timeout_s is None else max(0.0, float(wait_timeout_s))
+        sleep_s = _ocr_request_poll_s() if poll_s is None else max(0.05, float(poll_s))
+        started = time.time()
+        last_notice = 0.0
+        lease_id = f"{str(kind or 'ocr').strip() or 'ocr'}:{str(job_id or uuid.uuid4().hex).strip()}:{uuid.uuid4().hex}"
+        while True:
+            now = time.time()
+
+            def _try_acquire() -> HfOcrRequestLease | None:
+                payload = self._read_payload_unlocked()
+                slots = self._fresh_slots(payload.get("slots") if isinstance(payload, dict) else [])
+                if len(slots) >= max_concurrency:
+                    self._write_payload_unlocked(slots)
+                    return None
+                row = {
+                    "lease_id": lease_id,
+                    "kind": str(kind or "ocr"),
+                    "job_id": str(job_id or ""),
+                    "label": str(label or ""),
+                    "started_at": now,
+                    "updated_at": now,
+                    "pid": os.getpid(),
+                    "process_id": _PROCESS_ID,
+                }
+                slots.append(row)
+                self._write_payload_unlocked(slots)
+                return HfOcrRequestLease(
+                    lease_id=lease_id,
+                    kind=str(row["kind"]),
+                    job_id=str(row["job_id"]),
+                    label=str(row["label"]),
+                    acquired_at=now,
+                    waited_s=max(0.0, round(now - started, 2)),
+                    active_count=len(slots),
+                    max_concurrency=max_concurrency,
+                )
+
+            lease = self._with_file_lock(_try_acquire)
+            if lease is not None:
+                if status_callback is not None:
+                    self._notify(
+                        status_callback,
+                        {
+                            "event": "ocr_request_slot_acquired",
+                            "message": (
+                                f"Turno OCR remoto adquirido ({lease.active_count}/{lease.max_concurrency})."
+                                if lease.waited_s
+                                else "Turno OCR remoto adquirido."
+                            ),
+                            "waited_s": lease.waited_s,
+                            "active_count": lease.active_count,
+                            "max_concurrency": lease.max_concurrency,
+                        },
+                    )
+                return lease
+            waited = time.time() - started
+            if waited >= wait_limit:
+                raise TimeoutError(
+                    "Tiempo agotado esperando turno OCR remoto. "
+                    f"Concurrencia configurada: {max_concurrency}."
+                )
+            if status_callback is not None and (time.time() - last_notice) >= max(2.0, min(15.0, sleep_s * 3)):
+                last_notice = time.time()
+                status = self.status()
+                self._notify(
+                    status_callback,
+                    {
+                        "event": "ocr_request_waiting",
+                        "message": (
+                            "Esperando turno OCR remoto "
+                            f"({status.get('active_count', 0)}/{status.get('max_concurrency', max_concurrency)} activo)."
+                        ),
+                        "waited_s": round(waited, 1),
+                        **status,
+                    },
+                )
+            time.sleep(sleep_s)
+
+    def release(self, lease_id: str) -> None:
+        key = str(lease_id or "").strip()
+        if not key:
+            return
+
+        def _release() -> None:
+            payload = self._read_payload_unlocked()
+            slots = [
+                row
+                for row in self._fresh_slots(payload.get("slots") if isinstance(payload, dict) else [])
+                if str(row.get("lease_id") or "") != key
+            ]
+            self._write_payload_unlocked(slots)
+
+        self._with_file_lock(_release)
+
+    def status(self) -> dict[str, Any]:
+        def _status() -> dict[str, Any]:
+            payload = self._read_payload_unlocked()
+            slots = self._fresh_slots(payload.get("slots") if isinstance(payload, dict) else [])
+            self._write_payload_unlocked(slots)
+            max_concurrency = _ocr_request_max_concurrency()
+            return {
+                "schema_version": "hf_ocr_request_gate_status_v1",
+                "active_count": len(slots),
+                "max_concurrency": max_concurrency,
+                "available_slots": max(0, max_concurrency - len(slots)),
+                "slots": slots,
+                "gate_file": str(self.gate_file),
+            }
+
+        return self._with_file_lock(_status)
+
+    def _fresh_slots(self, rows: Any) -> list[dict[str, Any]]:
+        now = time.time()
+        fresh: list[dict[str, Any]] = []
+        if not isinstance(rows, list):
+            return fresh
+        ttl = _ocr_request_lease_ttl_s()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                stamp = float(row.get("updated_at") or row.get("started_at") or 0.0)
+            except Exception:
+                stamp = 0.0
+            if stamp > 0 and (now - stamp) <= ttl:
+                fresh.append(dict(row))
+        return fresh
+
+    def _read_payload_unlocked(self) -> dict[str, Any]:
+        try:
+            payload = json.loads(self.gate_file.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _write_payload_unlocked(self, slots: list[dict[str, Any]]) -> None:
+        now = time.time()
+        self.gate_file.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema_version": "hf_ocr_request_gate_v1",
+            "updated_at": now,
+            "max_concurrency": _ocr_request_max_concurrency(),
+            "slots": slots,
+        }
+        tmp = self.gate_file.with_name(f"{self.gate_file.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(self.gate_file)
+        finally:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except Exception:
+                pass
+
+    def _with_file_lock(self, callback: Callable[[], Any]) -> Any:
+        self.lock_file.parent.mkdir(parents=True, exist_ok=True)
+        with self.lock_file.open("a+b") as fh:
+            fh.seek(0, os.SEEK_END)
+            if fh.tell() == 0:
+                fh.write(b"\0")
+                fh.flush()
+            fh.seek(0)
+            self._lock_file_handle(fh)
+            try:
+                return callback()
+            finally:
+                self._unlock_file_handle(fh)
+
+    @staticmethod
+    def _lock_file_handle(fh: Any) -> None:
+        if os.name == "nt":
+            import msvcrt
+
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+            return
+        import fcntl  # type: ignore
+
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+
+    @staticmethod
+    def _unlock_file_handle(fh: Any) -> None:
+        if os.name == "nt":
+            import msvcrt
+
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+            return
+        import fcntl  # type: ignore
+
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+    @staticmethod
+    def _notify(callback: Callable[[dict[str, Any]], None], payload: dict[str, Any]) -> None:
+        try:
+            callback(dict(payload))
+        except Exception:
+            pass
+
+
+@contextmanager
+def ocr_endpoint_request_slot(
+    *,
+    kind: str,
+    job_id: str,
+    label: str = "",
+    wait_timeout_s: float | None = None,
+    poll_s: float | None = None,
+    status_callback: Callable[[dict[str, Any]], None] | None = None,
+):
+    gate = HfOcrRequestGate()
+    with gate.slot(
+        kind=kind,
+        job_id=job_id,
+        label=label,
+        wait_timeout_s=wait_timeout_s,
+        poll_s=poll_s,
+        status_callback=status_callback,
+    ) as lease:
+        yield lease
 
 
 class HfEndpointManager:
@@ -276,6 +613,9 @@ class HfEndpointManager:
 
     def active_jobs(self) -> list[dict[str, Any]]:
         return active_ocr_endpoint_jobs()
+
+    def request_gate_status(self) -> dict[str, Any]:
+        return HfOcrRequestGate().status()
 
     def scale_to_zero_if_idle(self, *, force: bool = False, delay_s: float | None = None) -> dict[str, Any]:
         active = active_ocr_endpoint_jobs()

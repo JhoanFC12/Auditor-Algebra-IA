@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import tempfile
@@ -41,6 +42,8 @@ class InstancePdfPipelineService:
         self.golden = golden_controller or PdfProblemGoldenController()
         self.staging = staging_store or InstanceStagingStore(context)
         self.models = resolve_model_defaults()
+        self._pages_cache_signature: tuple[tuple[str, int, int], ...] | None = None
+        self._pages_cache_rows: list[ProblemPageRecord] | None = None
 
     @classmethod
     def from_library_instance(
@@ -84,7 +87,46 @@ class InstancePdfPipelineService:
         return service.run_instance_pipeline(**run_options)
 
     def load_pages(self) -> list[ProblemPageRecord]:
-        return self._dedupe_page_rows(self.golden.load_instance(self.context.instance_name))
+        signature = self._page_records_signature()
+        if signature is not None and self._pages_cache_signature == signature and self._pages_cache_rows is not None:
+            return self._clone_page_rows(self._pages_cache_rows)
+        rows = self._dedupe_page_rows(self.golden.load_instance(self.context.instance_name))
+        signature = self._page_records_signature()
+        if signature is not None:
+            self._pages_cache_signature = signature
+            self._pages_cache_rows = self._clone_page_rows(rows)
+        return self._clone_page_rows(rows)
+
+    def _invalidate_pages_cache(self) -> None:
+        self._pages_cache_signature = None
+        self._pages_cache_rows = None
+
+    @staticmethod
+    def _clone_page_rows(rows: list[ProblemPageRecord]) -> list[ProblemPageRecord]:
+        return copy.deepcopy(list(rows or []))
+
+    def _page_records_signature(self) -> tuple[tuple[str, int, int], ...] | None:
+        instance_dir = getattr(self.golden, "instance_dir", None)
+        if not callable(instance_dir):
+            return None
+        try:
+            records_dir = Path(instance_dir(self.context.instance_name)) / "records"
+        except Exception:
+            return None
+        if not records_dir.exists():
+            return tuple()
+        signature: list[tuple[str, int, int]] = []
+        try:
+            paths = sorted(records_dir.glob("*.json"), key=lambda item: item.name.lower())
+        except Exception:
+            return None
+        for path in paths:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            signature.append((path.name, int(stat.st_mtime_ns), int(stat.st_size)))
+        return tuple(signature)
 
     @staticmethod
     def _dedupe_page_rows(rows: list[ProblemPageRecord]) -> list[ProblemPageRecord]:
@@ -132,10 +174,16 @@ class InstancePdfPipelineService:
             confidence_overrides=confidence_overrides,
         )
 
-    def build_stage_overview(self) -> list[dict[str, str]]:
-        pages = self.load_pages()
-        records = self.staging.load_records()
-        summary = self.staging.summarize_records(records)
+    def build_stage_overview(
+        self,
+        *,
+        pages: list[ProblemPageRecord] | None = None,
+        records: list[StagingProblemRecord] | None = None,
+        summary: dict[str, int] | None = None,
+    ) -> list[dict[str, str]]:
+        pages = pages if pages is not None else self.load_pages()
+        records = records if records is not None else self.staging.load_records()
+        summary = summary if summary is not None else self.staging.summarize_records(records)
         boxes_total = sum(len(row.boxes) for row in pages)
         reviewed_pages = sum(1 for row in pages if row.reviewed)
         pages_status = self._status_from_counts(
@@ -190,14 +238,16 @@ class InstancePdfPipelineService:
 
     def build_contract_report(self) -> dict[str, Any]:
         records = self.staging.load_records()
+        pages = self.load_pages()
+        summary = self.staging.summarize_records(records)
         return {
             "schema_version": "instance_pdf_pipeline_contract_report_v1",
             "contract_version": PIPELINE_CONTRACT_VERSION,
             "context": self.context.to_dict(),
             "contract": build_pipeline_contract(),
             "validation": self.staging.validate_contract(records),
-            "stage_overview": self.build_stage_overview(),
-            "summary": self.staging.summarize_records(records),
+            "stage_overview": self.build_stage_overview(pages=pages, records=records, summary=summary),
+            "summary": summary,
         }
 
     def run_instance_pipeline(
@@ -275,7 +325,7 @@ class InstancePdfPipelineService:
             "selected_pages": selected_pages,
             "executed": executed,
             "status": self._aggregate_record_status(records),
-            "stage_overview": self.build_stage_overview(),
+            "stage_overview": self.build_stage_overview(records=records),
             "staging_root": str(self.staging.root),
             "contract_report": self.build_contract_report(),
             "model_inventory": build_model_inventory_manifest(self.models),
@@ -288,10 +338,16 @@ class InstancePdfPipelineService:
 
     run_from_instance = run_instance_pipeline
 
-    def build_instance_summary(self) -> dict[str, int]:
-        pages = self.load_pages()
-        records = self.staging.load_records()
-        summary = self.staging.summarize_records(records)
+    def build_instance_summary(
+        self,
+        *,
+        pages: list[ProblemPageRecord] | None = None,
+        records: list[StagingProblemRecord] | None = None,
+        summary: dict[str, int] | None = None,
+    ) -> dict[str, int]:
+        pages = pages if pages is not None else self.load_pages()
+        records = records if records is not None else self.staging.load_records()
+        summary = summary if summary is not None else self.staging.summarize_records(records)
         return {
             **summary,
             "pages_total": len(pages),
@@ -377,13 +433,36 @@ class InstancePdfPipelineService:
                         "stage": "problem_detector_correction_capture",
                     },
                 )
-        self.golden.upsert_instance_rows(self.context.instance_name, self._dedupe_page_rows(rows))
+        self.golden.upsert_instance_rows(self.context.instance_name, [target])
+        self._invalidate_pages_cache()
+        invalidated_records: list[StagingProblemRecord] = []
         if previous_signature != current_signature:
-            self._invalidate_downstream_for_page_boxes_change(target, previous_boxes=previous_boxes)
-        for row in self.load_pages():
-            if str(row.record_id) == str(record_id):
-                return row
+            invalidated_records = self._invalidate_downstream_for_page_boxes_change(target, previous_boxes=previous_boxes)
+        setattr(self, "_last_page_boxes_invalidated_count", len(invalidated_records))
+        setattr(self, "_last_page_boxes_invalidated_records", list(invalidated_records))
         return target
+
+    def delete_page_record(self, record_id: str) -> list[ProblemPageRecord]:
+        """Remove a detected PDF page from the factory flow and invalidate dependent staging rows."""
+        rows = self._dedupe_page_rows(self.load_pages())
+        target: ProblemPageRecord | None = None
+        for row in rows:
+            if str(row.record_id) == str(record_id):
+                target = row
+                break
+        if target is None:
+            raise KeyError(f"Pagina no encontrada en la instancia: {record_id}")
+        delete_row = getattr(self.golden, "delete_instance_row", None)
+        if callable(delete_row):
+            delete_row(self.context.instance_name, str(target.record_id))
+        else:
+            remaining = [row for row in rows if str(row.record_id) != str(target.record_id)]
+            self.golden.save_instance(self.context.instance_name, remaining)
+        self._invalidate_pages_cache()
+        invalidated_records = self._invalidate_downstream_for_page_removed(target)
+        setattr(self, "_last_page_removed_invalidated_count", len(invalidated_records))
+        setattr(self, "_last_page_removed_invalidated_records", list(invalidated_records))
+        return self.load_pages()
 
     @staticmethod
     def _coerce_boxes(raw_boxes: list[Any]) -> list[tuple[int, int, int, int]]:
@@ -480,6 +559,38 @@ class InstancePdfPipelineService:
                     "page_record_id": page.record_id,
                 },
             )
+            changed.append(record)
+        if changed:
+            self.staging.upsert_many(changed)
+        return changed
+
+    def _invalidate_downstream_for_page_removed(self, page: ProblemPageRecord) -> list[StagingProblemRecord]:
+        changed: list[StagingProblemRecord] = []
+        for record in self.staging.load_records():
+            source = dict(record.source or {})
+            same_source_record = str(source.get("source_record_id") or "") == str(page.record_id or "")
+            same_page = str(source.get("page_number") or "") == str(page.page_number or "")
+            if not (same_source_record or same_page):
+                continue
+            self._invalidate_record_downstream(
+                record,
+                reason="page_removed_from_boxes",
+                clear_crop=True,
+                previous_source=dict(source),
+                updated_source={
+                    **dict(source),
+                    "page_number": page.page_number,
+                    "source_record_id": page.record_id,
+                    "source_removed": True,
+                },
+                metadata={
+                    "page_record_id": page.record_id,
+                    "page_number": page.page_number,
+                },
+            )
+            record.set_step(PipelineStep.PAGES, StageStatus.PENDING, "pagina fuente eliminada de boxes")
+            record.set_step(PipelineStep.BOXES, StageStatus.PENDING, "boxes fuente eliminados")
+            record.sync_status_from_steps()
             changed.append(record)
         if changed:
             self.staging.upsert_many(changed)
@@ -623,6 +734,7 @@ class InstancePdfPipelineService:
                 rows = [existing for existing in rows if int(existing.page_number or 0) != int(row.page_number or 0)]
                 rows.append(row)
         self.golden.upsert_instance_rows(self.context.instance_name, self._dedupe_page_rows(rows))
+        self._invalidate_pages_cache()
         return self.load_pages()
 
     def materialize_crops_to_staging(self, rows: list[ProblemPageRecord] | None = None) -> list[StagingProblemRecord]:
@@ -759,7 +871,9 @@ class InstancePdfPipelineService:
         run_ocr: bool = True,
         manage_endpoint: bool = True,
     ) -> list[StagingProblemRecord]:
-        records = self.staging.load_records()
+        all_records = self.staging.load_records()
+        existing_by_identity = self.staging.identity_map_for_records(all_records)
+        records = all_records
         selected_record_ids = [str(item or "").strip() for item in list(record_ids or []) if str(item or "").strip()]
         if selected_record_ids:
             by_id = {str(record.record_id or ""): record for record in records}
@@ -912,7 +1026,11 @@ class InstancePdfPipelineService:
                     record.set_step(PipelineStep.SEGMENTATION, StageStatus.PENDING, "pendiente hasta recuperar crop")
                 record.set_step(PipelineStep.NORMALIZATION, StageStatus.PENDING, "pendiente hasta recuperar crop")
                 record.sync_status_from_steps()
-                self.staging.upsert_record(record)
+                record = self.staging.upsert_record(
+                    record,
+                    rewrite_manifest=False,
+                    existing_by_identity=existing_by_identity,
+                )
                 processed.append(record)
                 continue
             record.status = StageStatus.PROCESSING
@@ -981,6 +1099,12 @@ class InstancePdfPipelineService:
                         tema=tema,
                         start_n=next_n,
                         progress_callback=progress_callback,
+                        gate_remote=(
+                            str(provider or "").strip().lower() == "hf"
+                            and str(resolved_ocr_model or "").strip() == str(TRAINED_OCR_VISION_MODEL or "").strip()
+                        ),
+                        gate_job_id=str(record.record_id or crop_path.stem),
+                        gate_label=crop_path.name,
                     )
                     record.raw_ocr = raw_output
                     record.structured_ocr = {}
@@ -1045,9 +1169,13 @@ class InstancePdfPipelineService:
             }
             record.sync_status_from_steps()
             record.touch()
-            self.staging.upsert_record(record)
+            record = self.staging.upsert_record(
+                record,
+                rewrite_manifest=False,
+                existing_by_identity=existing_by_identity,
+            )
             processed.append(record)
-        self.staging.upsert_many(processed)
+        self.staging.rewrite_manifest()
         return processed
 
     def _prepare_trained_ocr_endpoint(self, *, provider: str, model: str, trained_model: str) -> dict[str, Any]:
@@ -1079,8 +1207,11 @@ class InstancePdfPipelineService:
         tema: str,
         start_n: int,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        gate_remote: bool = False,
+        gate_job_id: str = "",
+        gate_label: str = "",
     ) -> Any:
-        from .hf_endpoint_manager import cold_start_sleep_seconds, is_cold_start_runtime_error
+        from .hf_endpoint_manager import cold_start_sleep_seconds, is_cold_start_runtime_error, ocr_endpoint_request_slot
 
         try:
             retries = int(str(os.getenv("HF_ENDPOINT_COLD_START_RETRIES", "8") or "8").strip())
@@ -1093,6 +1224,19 @@ class InstancePdfPipelineService:
                 extractor = pipeline.extractor
                 extract_raw = getattr(extractor, "extract_raw_from_image", None)
                 extract_fn = extract_raw if callable(extract_raw) else extractor.extract_from_image
+                if gate_remote:
+                    with ocr_endpoint_request_slot(
+                        kind="trained_ocr_request",
+                        job_id=str(gate_job_id or image_path.stem),
+                        label=str(gate_label or image_path.name),
+                        status_callback=progress_callback,
+                    ):
+                        return extract_fn(
+                            image_path=image_path,
+                            curso=curso,
+                            tema=tema,
+                            start_n=start_n,
+                        )
                 return extract_fn(
                     image_path=image_path,
                     curso=curso,
@@ -1113,8 +1257,8 @@ class InstancePdfPipelineService:
                                 "retries": retries,
                                 "delay_s": delay_s,
                                 "message": (
-                                    "Endpoint OCR despertando o temporalmente no disponible "
-                                    f"(reintento {attempt + 1}/{retries}, espera {int(delay_s)}s)."
+                                    "despertando endpoint OCR; todavia no acepta la solicitud "
+                                    f"(espera {attempt + 1}/{retries}, reintento en {int(delay_s)}s)."
                                 ),
                                 "error": str(exc or ""),
                             }
@@ -1202,7 +1346,6 @@ class InstancePdfPipelineService:
                 record.set_step(PipelineStep.NORMALIZATION, StageStatus.ERROR, f"normalizacion: {message}")
                 record.sync_status_from_steps()
             record.touch()
-            self.staging.upsert_record(record)
             out.append(record)
         self.staging.upsert_many(out)
         return out

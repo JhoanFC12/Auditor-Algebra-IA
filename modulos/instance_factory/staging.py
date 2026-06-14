@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
+import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -19,20 +22,79 @@ from .normalizer_training_bank import remove_sample as remove_normalizer_trainin
 from .normalizer_training_bank import upsert_sample as upsert_normalizer_training_sample
 
 
+STATIC_MANIFEST_PAYLOAD_CACHE_TTL_S = 30.0
+MODEL_INVENTORY_ENV_KEYS = (
+    "PDF_PROBLEM_MODEL",
+    "PDF_PROBLEM_MODEL_REPO",
+    "YOLO_FIGURE_SEGMENT_MODEL",
+    "YOLO_FIGURE_MODEL",
+    "FIGURE_DETECTOR_MODEL",
+    "YOLO_SEGMENT_MODEL",
+    "YOLO_DETECT_MODEL",
+    "YOLO_FIGURE_SEGMENT_MODEL_REPO",
+    "HF_MODEL",
+    "HF_OCR_NORMALIZER_MODEL",
+)
+MODEL_INVENTORY_CONFIG_FILES = (
+    "hf_pdf_problem_detector_job_v4.json",
+    "hf_pdf_problem_detector_job_v3.json",
+    "hf_pdf_problem_detector_job_v2.json",
+    "hf_ocr_geometry_rules_v4_reasoning_job.json",
+    "hf_ocr_geometry_reviewed_v3_graphaware_reasoning_job.json",
+    "hf_ocr_reviewed_v3_reasoning_job.json",
+    "hf_graph_detector_job.json",
+    "hf_ocr_normalizer_job.json",
+)
+_STATIC_MANIFEST_PAYLOAD_CACHE: dict[str, tuple[str, float, dict[str, Any]]] = {}
+
+
+def _static_manifest_payload_signature() -> str:
+    repo_root = Path(__file__).resolve().parents[2]
+    rows: list[dict[str, Any]] = []
+    for key in MODEL_INVENTORY_ENV_KEYS:
+        rows.append({"kind": "env", "name": key, "value": str(os.getenv(key, "") or "")})
+    for filename in MODEL_INVENTORY_CONFIG_FILES:
+        path = repo_root / "config" / filename
+        try:
+            stat = path.stat()
+            rows.append({"kind": "config", "name": filename, "mtime_ns": int(stat.st_mtime_ns), "size": int(stat.st_size)})
+        except OSError:
+            rows.append({"kind": "config", "name": filename, "mtime_ns": 0, "size": 0})
+    return hashlib.sha1(json.dumps(rows, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _cached_static_manifest_payload(cache_key: str, builder: Any) -> dict[str, Any]:
+    signature = _static_manifest_payload_signature()
+    cached = _STATIC_MANIFEST_PAYLOAD_CACHE.get(cache_key)
+    if cached is not None:
+        cached_signature, created_at, payload = cached
+        if cached_signature == signature and time.monotonic() - created_at <= STATIC_MANIFEST_PAYLOAD_CACHE_TTL_S:
+            return copy.deepcopy(payload)
+    payload = builder()
+    _STATIC_MANIFEST_PAYLOAD_CACHE[cache_key] = (signature, time.monotonic(), copy.deepcopy(payload))
+    return payload
+
+
 def _build_retraining_evaluation_matrix() -> dict[str, Any]:
-    try:
+    def _build() -> dict[str, Any]:
         from .model_inventory import build_retraining_evaluation_matrix
 
         return build_retraining_evaluation_matrix()
+
+    try:
+        return _cached_static_manifest_payload("evaluation_matrix", _build)
     except Exception:
         return {}
 
 
 def _build_model_inventory_manifest() -> dict[str, Any]:
-    try:
+    def _build() -> dict[str, Any]:
         from .model_inventory import build_model_inventory_manifest
 
         return build_model_inventory_manifest()
+
+    try:
+        return _cached_static_manifest_payload("model_inventory", _build)
     except Exception:
         return {}
 
@@ -81,10 +143,49 @@ class InstanceStagingStore:
         self.records_dir = self.root / "records"
         self.root.mkdir(parents=True, exist_ok=True)
         self.records_dir.mkdir(parents=True, exist_ok=True)
+        self._records_cache_signature: tuple[tuple[str, int, int], ...] | None = None
+        self._records_cache_entries: list[tuple[Path, StagingProblemRecord]] | None = None
 
     @property
     def manifest_path(self) -> Path:
         return self.root / "manifest.json"
+
+    @staticmethod
+    def load_manifest_summary_from_root(root: Path | str) -> dict[str, int] | None:
+        """Read staging counters from manifest.json without loading every record file."""
+        manifest_path = Path(root) / "manifest.json"
+        if not manifest_path.exists():
+            return None
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        raw_summary = payload.get("summary")
+        if not isinstance(raw_summary, dict):
+            return None
+        defaults = {
+            "records_total": payload.get("records_total", 0),
+            "crops_found": 0,
+            "ocr_done": 0,
+            "segments_done": 0,
+            "normalized_done": 0,
+            "needs_review": 0,
+            "human_reviewed": 0,
+            "ready": 0,
+            "errors": 0,
+        }
+        summary: dict[str, int] = {}
+        for key, fallback in defaults.items():
+            try:
+                summary[key] = int(raw_summary.get(key, fallback) or 0)
+            except Exception:
+                summary[key] = int(fallback or 0)
+        return summary
+
+    def load_manifest_summary(self) -> dict[str, int] | None:
+        return self.load_manifest_summary_from_root(self.root)
 
     def _record_path(self, record_id: str) -> Path:
         clean = str(record_id or "").strip()
@@ -131,6 +232,7 @@ class InstanceStagingStore:
                 candidate.unlink()
             except OSError:
                 pass
+        self._invalidate_records_cache()
         return path
 
     def artifact_dir(self, kind: str, record_id: str, *, probe_file: str = "latest.json") -> Path:
@@ -372,7 +474,28 @@ class InstanceStagingStore:
         identity_to_record[identity] = record
         return record
 
+    def _invalidate_records_cache(self) -> None:
+        self._records_cache_signature = None
+        self._records_cache_entries = None
+
+    def _records_dir_signature(self) -> tuple[tuple[str, int, int], ...]:
+        signature: list[tuple[str, int, int]] = []
+        for path in sorted(self.records_dir.glob("*.json"), key=lambda item: item.name.lower()):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            signature.append((path.name, int(stat.st_mtime_ns), int(stat.st_size)))
+        return tuple(signature)
+
+    @staticmethod
+    def _clone_record_entries(entries: list[tuple[Path, StagingProblemRecord]]) -> list[tuple[Path, StagingProblemRecord]]:
+        return [(Path(path), copy.deepcopy(record)) for path, record in entries]
+
     def _load_record_entries(self) -> list[tuple[Path, StagingProblemRecord]]:
+        signature = self._records_dir_signature()
+        if self._records_cache_signature == signature and self._records_cache_entries is not None:
+            return self._clone_record_entries(self._records_cache_entries)
         rows: list[tuple[Path, StagingProblemRecord]] = []
         for path in sorted(self.records_dir.glob("*.json"), key=lambda item: item.name.lower()):
             try:
@@ -386,6 +509,8 @@ class InstanceStagingStore:
                 if not record.crop_id:
                     record.crop_id = record.record_id
                 rows.append((path, record))
+        self._records_cache_signature = signature
+        self._records_cache_entries = self._clone_record_entries(rows)
         return rows
 
     @staticmethod
@@ -413,6 +538,21 @@ class InstanceStagingStore:
 
     def load_records(self) -> list[StagingProblemRecord]:
         return sorted((record for _path, record in self._load_record_entries()), key=self._record_sort_key)
+
+    def load_record_entries(self) -> list[tuple[Path, StagingProblemRecord]]:
+        return sorted(self._load_record_entries(), key=lambda item: self._record_sort_key(item[1]))
+
+    def identity_map_for_records(
+        self,
+        records: list[StagingProblemRecord] | None = None,
+    ) -> dict[str, StagingProblemRecord]:
+        rows = records if records is not None else self.load_records()
+        by_identity: dict[str, StagingProblemRecord] = {}
+        for row in rows:
+            identity = self._source_identity_key(row)
+            if identity:
+                by_identity[identity] = row
+        return by_identity
 
     def _deduplicate_record_entries(
         self,
@@ -455,6 +595,7 @@ class InstanceStagingStore:
                     continue
                 try:
                     path.unlink()
+                    self._invalidate_records_cache()
                     repaired += 1
                 except FileNotFoundError:
                     pass
@@ -523,24 +664,29 @@ class InstanceStagingStore:
                 return record
         return None
 
-    def upsert_record(self, record: StagingProblemRecord) -> None:
-        existing_by_identity = {
-            self._source_identity_key(row): row
-            for row in self.load_records()
-            if self._source_identity_key(row)
-        }
+    def upsert_record(
+        self,
+        record: StagingProblemRecord,
+        *,
+        rewrite_manifest: bool = True,
+        existing_by_identity: dict[str, StagingProblemRecord] | None = None,
+    ) -> StagingProblemRecord:
+        existing_by_identity = existing_by_identity if existing_by_identity is not None else self.identity_map_for_records()
         record = self._prepare_record_for_write(record)
         record = self._coalesce_duplicate_identity(record, existing_by_identity)
         record = self._prepare_record_for_write(record)
         self._write_record_file(record)
-        self.rewrite_manifest()
+        if rewrite_manifest:
+            self.rewrite_manifest()
+        return record
 
-    def upsert_many(self, records: list[StagingProblemRecord]) -> None:
-        existing_by_identity = {
-            self._source_identity_key(row): row
-            for row in self.load_records()
-            if self._source_identity_key(row)
-        }
+    def upsert_many(
+        self,
+        records: list[StagingProblemRecord],
+        *,
+        existing_by_identity: dict[str, StagingProblemRecord] | None = None,
+    ) -> None:
+        existing_by_identity = existing_by_identity if existing_by_identity is not None else self.identity_map_for_records()
         prepared_by_id: dict[str, StagingProblemRecord] = {}
         for record in records:
             record = self._prepare_record_for_write(record)

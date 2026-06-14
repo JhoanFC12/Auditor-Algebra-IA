@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import mimetypes
+import shutil
 import tempfile
 import threading
+import time
 import traceback
 import urllib.parse
 import uuid
+from email.utils import formatdate
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -16,7 +20,7 @@ from modulos.modulo13_laboratorio_pdf_segmentacion.controlador_laboratorio_pdf i
     DEFAULT_PROBLEM_CROPS_LIVE_ROOT,
 )
 
-from .models import InstancePipelineContext, StageStatus, StagingProblemRecord
+from .models import InstancePipelineContext, PipelineStep, StageStatus, StagingProblemRecord
 from .pipeline import InstancePdfPipelineService
 from .library_api import LibraryApiError, LibraryWebApi
 from .runtime_env import load_factory_runtime_env
@@ -36,6 +40,8 @@ WEB_BACKEND_SOURCE_NAMES = (
     "../modulo9_organizador_libros/controlador_organizador_libros.py",
 )
 WEB_RELOAD_SIGNAL_PATH = Path(__file__).resolve().parents[2] / ".cache" / "instance_factory" / "web_reload_signal.json"
+WEB_APP_VERSION_CACHE_TTL_S = 1.5
+_WEB_APP_VERSION_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
 def _version_rows(paths: list[Path] | tuple[Path, ...]) -> list[dict[str, Any]]:
@@ -69,7 +75,13 @@ def _backend_source_version() -> dict[str, Any]:
 WEB_BACKEND_BOOT_VERSION = str(_backend_source_version().get("backend_version") or "")
 
 
-def build_web_app_version(static_root: Path) -> dict[str, Any]:
+def build_web_app_version(static_root: Path, *, force: bool = False) -> dict[str, Any]:
+    cache_key = str(Path(static_root).expanduser().resolve())
+    cached = _WEB_APP_VERSION_CACHE.get(cache_key)
+    if not force and cached is not None:
+        created_at, payload = cached
+        if time.monotonic() - created_at <= WEB_APP_VERSION_CACHE_TTL_S:
+            return copy.deepcopy(payload)
     root = Path(static_root)
     rows = _version_rows(tuple(root / name for name in WEB_APP_ASSET_NAMES))
     backend = _backend_source_version()
@@ -81,7 +93,7 @@ def build_web_app_version(static_root: Path) -> dict[str, Any]:
             reload_token = str(payload.get("token") or "")
     except Exception:
         reload_token = ""
-    return {
+    payload = {
         "schema_version": "pdf_factory_web_app_version_v1",
         "asset_version": _digest_rows(rows),
         "reload_token": reload_token,
@@ -91,6 +103,8 @@ def build_web_app_version(static_root: Path) -> dict[str, Any]:
         "assets": rows,
         "backend_sources": backend.get("backend_sources") or [],
     }
+    _WEB_APP_VERSION_CACHE[cache_key] = (time.monotonic(), copy.deepcopy(payload))
+    return copy.deepcopy(payload)
 
 
 def signal_web_app_reload(static_root: Path) -> dict[str, Any]:
@@ -103,9 +117,35 @@ def signal_web_app_reload(static_root: Path) -> dict[str, Any]:
     }
     WEB_RELOAD_SIGNAL_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return {
-        **build_web_app_version(static_root),
+        **build_web_app_version(static_root, force=True),
         "reload_requested": True,
     }
+
+
+def file_cache_identity(path: Path) -> tuple[str, str]:
+    stat = Path(path).stat()
+    etag = f"\"{int(stat.st_mtime_ns):x}-{int(stat.st_size):x}\""
+    last_modified = formatdate(float(stat.st_mtime), usegmt=True)
+    return etag, last_modified
+
+
+def file_cache_token(path: Path, *, limit: int = 40) -> str:
+    resolved = Path(path).expanduser().resolve()
+    try:
+        stat = resolved.stat()
+        raw = f"{resolved}|{int(stat.st_mtime_ns)}|{int(stat.st_size)}"
+    except Exception:
+        raw = str(resolved)
+    return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:limit]
+
+
+def request_etag_matches(handler: BaseHTTPRequestHandler, etag: str) -> bool:
+    raw = str(handler.headers.get("If-None-Match") or "").strip()
+    if not raw:
+        return False
+    if raw == "*":
+        return True
+    return etag in {part.strip() for part in raw.split(",")}
 
 
 class WebApiError(Exception):
@@ -138,11 +178,16 @@ class FactoryWebRuntime:
         self.static_root = Path(__file__).with_name("web")
         self.cache_root = Path(tempfile.mkdtemp(prefix="pdf_factory_web_"))
         self._file_tokens: dict[str, Path] = {}
+        self._file_url_cache: dict[str, tuple[tuple[int, int, str], str, str]] = {}
+        self._page_web_cache: dict[str, tuple[tuple[Any, ...], dict[str, Any]]] = {}
+        self._record_web_cache: dict[str, tuple[tuple[Any, ...], dict[str, Any]]] = {}
+        self._trusted_file_roots_cache: list[Path] | None = None
         self._lock = threading.RLock()
         self._job_lock = threading.RLock()
         self._endpoint_lifecycle_lock = threading.RLock()
         self._ocr_jobs: dict[str, dict[str, Any]] = {}
         self._active_ocr_job_id = ""
+        self._pdf_info_cache: dict[str, Any] = {}
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self.url = ""
@@ -190,7 +235,7 @@ class FactoryWebRuntime:
                 payload = self._read_json(handler) if method == "POST" else {}
                 result = self._dispatch_api(method, path, query, payload)
                 if isinstance(result, _FilePayload):
-                    self._send_file(handler, result.path, result.content_type)
+                    self._send_file(handler, result.path, result.content_type, cache_control=result.cache_control)
                 else:
                     self._send_json(handler, result)
                 return
@@ -223,7 +268,13 @@ class FactoryWebRuntime:
         if method == "POST" and path == "/api/app/reload-signal":
             return signal_web_app_reload(self.static_root)
         if method == "GET" and path == "/api/ocr/jobs/status":
-            return self._ocr_job_status(self._first(query, "job_id", ""))
+            since_update = self._bounded_int(
+                self._first(query, "since_update", "0") or "0",
+                "since_update",
+                minimum=0,
+                maximum=1_000_000_000,
+            )
+            return self._ocr_job_status(self._first(query, "job_id", ""), since_update=since_update)
         if method == "POST" and path == "/api/ocr/jobs/start":
             return self._start_ocr_job(payload)
         with self._lock:
@@ -232,10 +283,16 @@ class FactoryWebRuntime:
             self._ensure_allowed_method(method, path)
             if method == "GET" and path == "/api/bootstrap":
                 return self._snapshot()
+            if method == "GET" and path == "/api/summary":
+                return self._summary_response()
             if method == "GET" and path == "/api/pdf/page":
                 page = self._bounded_int(self._first(query, "page", "1"), "page", minimum=1, maximum=10000)
                 dpi = self._bounded_int(self._first(query, "dpi", "140"), "dpi", minimum=72, maximum=320)
-                return _FilePayload(self._render_pdf_page(page, dpi=dpi), "image/png")
+                return _FilePayload(
+                    self._render_pdf_page(page, dpi=dpi),
+                    "image/png",
+                    cache_control="public, max-age=86400, immutable",
+                )
             if method == "GET" and path.startswith("/api/file/"):
                 token = path.rsplit("/", 1)[-1]
                 file_path = self._file_tokens.get(token)
@@ -243,7 +300,11 @@ class FactoryWebRuntime:
                     raise FileNotFoundError("Archivo no registrado en la sesion web.")
                 if not self._is_trusted_file(file_path):
                     raise PermissionError("Archivo fuera de las rutas confiables de la fabrica.")
-                return _FilePayload(file_path, mimetypes.guess_type(str(file_path))[0] or "application/octet-stream")
+                return _FilePayload(
+                    file_path,
+                    mimetypes.guess_type(str(file_path))[0] or "application/octet-stream",
+                    cache_control="public, max-age=86400, immutable",
+                )
             if method == "GET" and path == "/api/record":
                 record_id = self._first(query, "record_id", "")
                 return self._record_detail(record_id)
@@ -259,7 +320,7 @@ class FactoryWebRuntime:
                 explicit_record_id = str(payload.get("record_id") or "").strip()
                 if explicit_record_id and not record_ids:
                     record_ids = [explicit_record_id]
-                return promote_staging_records_to_db(
+                report = promote_staging_records_to_db(
                     self.service.staging,
                     self.context,
                     db_name=db_name,
@@ -267,8 +328,34 @@ class FactoryWebRuntime:
                     record_ids=record_ids,
                     dry_run=dry_run,
                 )
+                if self._bool(payload.get("compact"), default=False):
+                    touched_ids = [
+                        str(row.get("record_id") or "").strip()
+                        for row in list(report.get("rows") or [])
+                        if str(row.get("status") or "") in {"inserted", "updated"}
+                    ]
+                    touched_records = []
+                    for record_id in dict.fromkeys(touched_ids):
+                        record = self.service.staging.get_record(record_id)
+                        if record is not None:
+                            touched_records.append(record)
+                    report["records"] = [self._record_to_web(record) for record in touched_records]
+                    if self._bool(payload.get("include_summary"), default=True):
+                        all_records = self.service.staging.load_records()
+                        pages = self.service.load_pages()
+                        summary = self.service.staging.summarize_records(all_records)
+                        report["summary"] = self._build_instance_summary_cached(pages, all_records, summary)
+                        report["timeline"] = self._build_stage_overview_cached(pages, all_records, summary)
+                return report
             if method == "GET" and path == "/api/endpoint/ocr/status":
-                return self.endpoint_manager.status()
+                status = dict(self.endpoint_manager.status())
+                gate_status = getattr(self.endpoint_manager, "request_gate_status", None)
+                if callable(gate_status):
+                    try:
+                        status["request_gate"] = gate_status()
+                    except Exception as exc:
+                        status["request_gate"] = {"status": "error", "message": str(exc)}
+                return status
             if method == "GET" and path == "/api/training/normalizer/status":
                 return self._normalizer_training_status()
             if method == "POST" and path == "/api/endpoint/ocr/resume":
@@ -287,31 +374,104 @@ class FactoryWebRuntime:
                 dpi = self._bounded_int(payload.get("dpi") or 300, "dpi", minimum=72, maximum=600)
                 confidence = self._bounded_float(payload.get("confidence") or 0.25, "confidence", minimum=0.0, maximum=1.0)
                 selected = self.service.resolve_page_selection(str(pages))
-                self.service.detect_pdf_pages(
+                detected_pages = self.service.detect_pdf_pages(
                     selected,
                     dpi=dpi,
                     confidence=confidence,
                     detector_model=str(payload.get("detector_model") or ""),
                 )
+                if self._bool(payload.get("compact"), default=False):
+                    response: dict[str, Any] = {
+                        "schema_version": "pdf_factory_web_pages_detected_v1",
+                        "selected_pages": selected,
+                        "pages": [self._page_to_web(row) for row in detected_pages],
+                    }
+                    if self._bool(payload.get("include_summary"), default=False):
+                        records = self.service.staging.load_records()
+                        summary = self.service.staging.summarize_records(records)
+                        response["summary"] = self._build_instance_summary_cached(detected_pages, records, summary)
+                        response["timeline"] = self._build_stage_overview_cached(detected_pages, records, summary)
+                    return response
                 return self._snapshot()
             if method == "POST" and path == "/api/pages/boxes":
                 boxes = payload.get("boxes") or []
                 if not isinstance(boxes, list):
                     raise ValueError("boxes debe ser una lista.")
-                self.service.update_page_boxes(
+                page = self.service.update_page_boxes(
                     self._required_str(payload, "record_id"),
                     boxes,
                     layout_mode=str(payload.get("layout_mode") or "auto"),
                     reviewed=bool(payload.get("reviewed", True)),
                     reorder=bool(payload.get("reorder", False)),
                 )
+                if self._bool(payload.get("compact"), default=False):
+                    include_summary = self._bool(payload.get("include_summary"), default=True)
+                    invalidated_count = int(getattr(self.service, "_last_page_boxes_invalidated_count", 0) or 0)
+                    invalidated_records = list(getattr(self.service, "_last_page_boxes_invalidated_records", []) or [])
+                    response = {
+                        "schema_version": "pdf_factory_web_page_saved_v1",
+                        "page": self._page_to_web(page),
+                        "invalidated_records": invalidated_count,
+                    }
+                    if invalidated_records:
+                        response["updated_records"] = [self._record_to_web(record) for record in invalidated_records]
+                    if include_summary:
+                        records = self.service.staging.load_records()
+                        pages = self.service.load_pages()
+                        summary = self.service.staging.summarize_records(records)
+                        response["summary"] = self._build_instance_summary_cached(pages, records, summary)
+                        response["timeline"] = self._build_stage_overview_cached(pages, records, summary)
+                    return response
                 return self._snapshot()
+            if method == "POST" and path == "/api/pages/delete":
+                deleted_id = self._required_str(payload, "record_id")
+                pages = self.service.delete_page_record(deleted_id)
+                if self._bool(payload.get("compact"), default=False):
+                    include_summary = self._bool(payload.get("include_summary"), default=True)
+                    invalidated_count = int(getattr(self.service, "_last_page_removed_invalidated_count", 0) or 0)
+                    invalidated_records = list(getattr(self.service, "_last_page_removed_invalidated_records", []) or [])
+                    response = {
+                        "schema_version": "pdf_factory_web_page_deleted_v1",
+                        "record_id": deleted_id,
+                        "pages": [self._page_to_web(row) for row in pages],
+                        "invalidated_records": invalidated_count,
+                    }
+                    if invalidated_records:
+                        response["updated_records"] = [self._record_to_web(record) for record in invalidated_records]
+                    if include_summary:
+                        records = self.service.staging.load_records()
+                        summary = self.service.staging.summarize_records(records)
+                        response["summary"] = self._build_instance_summary_cached(pages, records, summary)
+                        response["timeline"] = self._build_stage_overview_cached(pages, records, summary)
+                    return response
+                records = self.service.staging.load_records()
+                summary = self.service.staging.summarize_records(records)
+                return {
+                    "schema_version": "pdf_factory_web_page_deleted_v1",
+                    "record_id": deleted_id,
+                    "pages": [self._page_to_web(row) for row in pages],
+                    "summary": self._build_instance_summary_cached(pages, records, summary),
+                    "timeline": self._build_stage_overview_cached(pages, records, summary),
+                    "records": [self._record_to_web(record) for record in records],
+                }
             if method == "POST" and path == "/api/staging/materialize":
-                self.service.materialize_crops_to_staging()
+                records = self.service.materialize_crops_to_staging()
+                if self._bool(payload.get("compact"), default=False):
+                    records = list(records or self.service.staging.load_records())
+                    pages = self.service.load_pages()
+                    summary = self.service.staging.summarize_records(records)
+                    response = {
+                        "schema_version": "pdf_factory_web_staging_materialized_v1",
+                        "records": [self._record_to_web(record) for record in records],
+                    }
+                    if self._bool(payload.get("include_summary"), default=True):
+                        response["summary"] = self._build_instance_summary_cached(pages, records, summary)
+                        response["timeline"] = self._build_stage_overview_cached(pages, records, summary)
+                    return response
                 return self._snapshot()
             if method == "POST" and path == "/api/ocr/run":
                 record_ids = self._record_ids_from_payload(payload)
-                self.service.run_ocr_and_segmentation(
+                processed = self.service.run_ocr_and_segmentation(
                     provider=str(payload.get("provider") or "hf"),
                     curso=str(payload.get("curso") or "SIN_CURSO"),
                     tema=str(payload.get("tema") or "SIN_TEMA"),
@@ -323,12 +483,32 @@ class FactoryWebRuntime:
                     record_id=str(payload.get("record_id") or ""),
                     record_ids=record_ids,
                 )
+                if self._bool(payload.get("compact"), default=False):
+                    processed_records = list(processed or [])
+                    response: dict[str, Any] = {
+                        "schema_version": "pdf_factory_web_ocr_run_v1",
+                        "records": [self._record_to_web(record) for record in processed_records],
+                    }
+                    if len(processed_records) == 1:
+                        response["record"] = response["records"][0]
+                    if self._bool(payload.get("include_summary"), default=True):
+                        all_records = self.service.staging.load_records()
+                        pages = self.service.load_pages()
+                        summary = self.service.staging.summarize_records(all_records)
+                        response["summary"] = self._build_instance_summary_cached(pages, all_records, summary)
+                        response["timeline"] = self._build_stage_overview_cached(pages, all_records, summary)
+                    return response
                 return self._snapshot()
             if method == "POST" and path in {"/api/segments/boxes", "/api/ocr/segments/boxes"}:
                 boxes = payload.get("boxes") or []
                 if not isinstance(boxes, list):
                     raise ValueError("boxes debe ser una lista.")
-                self.service.update_figure_segments(self._required_str(payload, "record_id"), boxes)
+                updated = self.service.update_figure_segments(self._required_str(payload, "record_id"), boxes)
+                if self._bool(payload.get("compact"), default=False):
+                    return self._record_saved_response(
+                        updated,
+                        include_summary=self._bool(payload.get("include_summary"), default=True),
+                    )
                 return self._snapshot()
             if method == "POST" and path == "/api/ocr/raw":
                 updated = self.service.update_raw_ocr(
@@ -336,10 +516,10 @@ class FactoryWebRuntime:
                     str(payload.get("raw_ocr") or ""),
                 )
                 if self._bool(payload.get("compact"), default=False):
-                    return {
-                        "schema_version": "pdf_factory_web_record_saved_v1",
-                        "record": self._record_to_web(updated),
-                    }
+                    return self._record_saved_response(
+                        updated,
+                        include_summary=self._bool(payload.get("include_summary"), default=True),
+                    )
                 return self._snapshot()
             if method == "POST" and path == "/api/normalize":
                 record_ids = self._record_ids_from_payload(payload)
@@ -347,6 +527,14 @@ class FactoryWebRuntime:
                     record_id=str(payload.get("record_id") or ""),
                     record_ids=record_ids,
                 )
+                if self._bool(payload.get("compact"), default=False) and str(payload.get("record_id") or "").strip():
+                    updated = self.service.staging.get_record(str(payload.get("record_id") or ""))
+                    if updated is None:
+                        raise KeyError(str(payload.get("record_id") or ""))
+                    return self._record_saved_response(
+                        updated,
+                        include_summary=self._bool(payload.get("include_summary"), default=True),
+                    )
                 return self._snapshot()
             if method == "POST" and path == "/api/review/save":
                 record_id = self._required_str(payload, "record_id")
@@ -364,10 +552,10 @@ class FactoryWebRuntime:
                     sync_golden=sync_golden,
                 )
                 if self._bool(payload.get("compact"), default=False):
-                    return {
-                        "schema_version": "pdf_factory_web_record_saved_v1",
-                        "record": self._record_to_web(updated),
-                    }
+                    return self._record_saved_response(
+                        updated,
+                        include_summary=self._bool(payload.get("include_summary"), default=True),
+                    )
                 return {
                     "schema_version": "pdf_factory_web_review_saved_v1",
                     "record": self._record_to_web(updated),
@@ -396,8 +584,13 @@ class FactoryWebRuntime:
                 "failed": 0,
                 "active_id": record_ids[0] if record_ids else "",
                 "active_name": "",
-                "message": f"Cola OCR preparada 0 de {len(record_ids)}",
+                "phase": "queued",
+                "active_position": 0,
+                "progress_label": f"0/{len(record_ids)}",
+                "message": f"Cola OCR preparada 0/{len(record_ids)}",
                 "errors": [],
+                "record_update_seq": 0,
+                "record_updates": [],
                 "payload": {
                     "provider": str(payload.get("provider") or "hf"),
                     "curso": str(payload.get("curso") or "SIN_CURSO"),
@@ -418,7 +611,7 @@ class FactoryWebRuntime:
             thread.start()
             return response
 
-    def _ocr_job_status(self, job_id: str = "") -> dict[str, Any]:
+    def _ocr_job_status(self, job_id: str = "", *, since_update: int = 0) -> dict[str, Any]:
         with self._job_lock:
             selected = str(job_id or self._current_ocr_job_id() or "").strip()
             job = self._ocr_jobs.get(selected) if selected else None
@@ -433,8 +626,10 @@ class FactoryWebRuntime:
                     "ok": 0,
                     "failed": 0,
                     "errors": [],
+                    "record_update_seq": 0,
+                    "record_updates": [],
                 }
-            return self._public_ocr_job(job)
+            return self._public_ocr_job(job, since_update=since_update)
 
     def _current_ocr_job_id(self) -> str:
         active_id = str(self._active_ocr_job_id or "").strip()
@@ -454,12 +649,32 @@ class FactoryWebRuntime:
     def _active_ocr_job_count(self) -> int:
         return sum(1 for job in self._ocr_jobs.values() if self._ocr_job_is_running(job))
 
-    def _public_ocr_job(self, job: dict[str, Any]) -> dict[str, Any]:
+    def _public_ocr_job(self, job: dict[str, Any], *, since_update: int = 0) -> dict[str, Any]:
         payload = dict(job)
         payload.pop("payload", None)
         payload.pop("thread_name", None)
+        record_updates = list(payload.pop("record_updates", []) or [])
+        record_update_seq = int(payload.get("record_update_seq") or 0)
+        if since_update > 0:
+            record_updates = [
+                update for update in record_updates
+                if int(update.get("seq") or 0) > since_update
+            ]
+        payload["record_update_seq"] = record_update_seq
+        payload["record_updates"] = record_updates
         payload["running"] = self._ocr_job_is_running(payload)
         payload["active_jobs"] = self._active_ocr_job_count()
+        phase = str(payload.get("phase") or "").strip().lower()
+        phase_labels = {
+            "queued": "Cola preparada",
+            "segmentation": "Segmentacion grafica",
+            "ocr": "OCR",
+        }
+        payload["phase_label"] = phase_labels.get(phase, phase or "Proceso")
+        total = int(payload.get("total") or 0)
+        active_position = int(payload.get("active_position") or 0)
+        if total and active_position and not payload.get("progress_label"):
+            payload["progress_label"] = f"{active_position}/{total}"
         return payload
 
     def _update_ocr_job(self, job_id: str, **updates: Any) -> None:
@@ -468,6 +683,28 @@ class FactoryWebRuntime:
             if not job:
                 return
             job.update(updates)
+
+    def _append_ocr_record_update(self, job_id: str, record_id: str) -> None:
+        try:
+            record = self.service.staging.get_record(str(record_id or ""))
+            if record is None:
+                return
+            record_payload = self._record_to_web(record)
+        except Exception:
+            return
+        with self._job_lock:
+            job = self._ocr_jobs.get(job_id)
+            if not job:
+                return
+            seq = int(job.get("record_update_seq") or 0) + 1
+            updates = list(job.get("record_updates") or [])
+            updates.append({
+                "seq": seq,
+                "record_id": str(record_id or ""),
+                "record": record_payload,
+            })
+            job["record_update_seq"] = seq
+            job["record_updates"] = updates[-200:]
 
     def _begin_endpoint_job(self, *, kind: str, job_id: str, label: str = "") -> str:
         begin_job = getattr(self.endpoint_manager, "begin_job", None)
@@ -536,14 +773,51 @@ class FactoryWebRuntime:
             options = dict(job.get("payload") or {})
         total = len(record_ids)
         provider_key = str(options.get("provider") or "hf").strip().lower()
-        self._update_ocr_job(job_id, status="running", message=f"Segmentando graficos 0 de {total}", phase="segmentation")
+        self._update_ocr_job(
+            job_id,
+            status="running",
+            current=0,
+            active_position=0,
+            progress_label=f"0/{total}",
+            message=f"Segmentando graficos 0/{total}",
+            phase="segmentation",
+        )
+        skipped_segmentation = 0
         for index, record_id in enumerate(record_ids):
+            position = index + 1
+            if self._record_has_completed_figure_segmentation(str(record_id)):
+                skipped_segmentation += 1
+                self._update_ocr_job(
+                    job_id,
+                    current=position,
+                    active_position=position,
+                    active_id=record_id,
+                    progress_label=f"{position}/{total}",
+                    active_event={
+                        "phase": "segmentation",
+                        "record_id": record_id,
+                        "position": position,
+                        "total": total,
+                        "progress_label": f"{position}/{total}",
+                        "skipped": True,
+                    },
+                    message=f"Segmentacion ya lista {position}/{total}; saltando a OCR",
+                )
+                continue
             self._update_ocr_job(
                 job_id,
                 current=index,
+                active_position=position,
                 active_id=record_id,
-                active_event={"phase": "segmentation", "record_id": record_id},
-                message=f"Segmentando graficos {index + 1} de {total}",
+                progress_label=f"{position}/{total}",
+                active_event={
+                    "phase": "segmentation",
+                    "record_id": record_id,
+                    "position": position,
+                    "total": total,
+                    "progress_label": f"{position}/{total}",
+                },
+                message=f"Segmentando graficos {position}/{total}",
             )
             try:
                 self.service.run_ocr_and_segmentation(
@@ -560,13 +834,23 @@ class FactoryWebRuntime:
                     run_segmentation=True,
                     run_ocr=False,
                 )
+                self._update_ocr_job(
+                    job_id,
+                    current=position,
+                    active_position=position,
+                    progress_label=f"{position}/{total}",
+                    message=f"Segmentacion lista {position}/{total}",
+                )
             except Exception as exc:
                 with self._job_lock:
                     job = self._ocr_jobs.get(job_id) or {}
                     errors = list(job.get("errors") or [])
                     errors.append({"record_id": record_id, "phase": "segmentation", "message": str(exc)})
                     job["errors"] = errors[-50:]
-                    job["message"] = f"Error de segmentacion en {index + 1} de {total}; se intentara OCR igual"
+                    job["current"] = position
+                    job["active_position"] = position
+                    job["progress_label"] = f"{position}/{total}"
+                    job["message"] = f"Error de segmentacion en {position}/{total}; se intentara OCR igual"
         endpoint_lease_id = ""
         if provider_key == "hf":
             endpoint_lease_id = self._begin_endpoint_job(
@@ -574,15 +858,35 @@ class FactoryWebRuntime:
                 job_id=job_id,
                 label=f"{self.context.instance_type} ({total} imagenes)",
             )
-        self._update_ocr_job(job_id, current=0, message=f"Ejecutando OCR remoto 0 de {total}", phase="ocr")
+        self._update_ocr_job(
+            job_id,
+            current=0,
+            active_position=0,
+            progress_label=f"0/{total}",
+            message=(
+                f"Ejecutando OCR remoto 0/{total}"
+                if not skipped_segmentation
+                else f"Ejecutando OCR remoto 0/{total}; {skipped_segmentation} segmentacion(es) ya listas"
+            ),
+            phase="ocr",
+        )
         try:
             for index, record_id in enumerate(record_ids):
+                position = index + 1
                 self._update_ocr_job(
                     job_id,
                     current=index,
+                    active_position=position,
                     active_id=record_id,
-                    active_event={"phase": "ocr", "record_id": record_id},
-                    message=f"OCR remoto {index + 1} de {total}",
+                    progress_label=f"{position}/{total}",
+                    active_event={
+                        "phase": "ocr",
+                        "record_id": record_id,
+                        "position": position,
+                        "total": total,
+                        "progress_label": f"{position}/{total}",
+                    },
+                    message=f"OCR remoto {position}/{total}",
                 )
                 def _progress(event: dict[str, Any], *, _record_id: str = str(record_id)) -> None:
                     with self._job_lock:
@@ -592,9 +896,11 @@ class FactoryWebRuntime:
                         clean_event = dict(event or {})
                         job["active_id"] = _record_id
                         job["active_event"] = clean_event
+                        job["active_position"] = position
+                        job["progress_label"] = f"{position}/{total}"
                         message = str(clean_event.get("message") or "").strip()
                         if message:
-                            job["message"] = message
+                            job["message"] = f"{position}/{total} - {message}"
 
                 try:
                     self.service.run_ocr_and_segmentation(
@@ -612,11 +918,14 @@ class FactoryWebRuntime:
                         run_segmentation=False,
                         run_ocr=True,
                     )
+                    self._append_ocr_record_update(job_id, str(record_id))
                     with self._job_lock:
                         job = self._ocr_jobs.get(job_id) or {}
                         job["ok"] = int(job.get("ok") or 0) + 1
-                        job["current"] = index + 1
-                        job["message"] = f"Guardado {index + 1} de {total}"
+                        job["current"] = position
+                        job["active_position"] = position
+                        job["progress_label"] = f"{position}/{total}"
+                        job["message"] = f"Guardado {position}/{total}"
                 except Exception as exc:
                     with self._job_lock:
                         job = self._ocr_jobs.get(job_id) or {}
@@ -624,8 +933,10 @@ class FactoryWebRuntime:
                         errors.append({"record_id": record_id, "message": str(exc)})
                         job["errors"] = errors[-50:]
                         job["failed"] = int(job.get("failed") or 0) + 1
-                        job["current"] = index + 1
-                        job["message"] = f"Error en {index + 1} de {total}"
+                        job["current"] = position
+                        job["active_position"] = position
+                        job["progress_label"] = f"{position}/{total}"
+                        job["message"] = f"Error en {position}/{total}"
         finally:
             self._end_endpoint_job(endpoint_lease_id)
         should_shutdown = False
@@ -637,6 +948,8 @@ class FactoryWebRuntime:
                 job["status"] = "error" if failed else "done"
                 job["running"] = False
                 job["current"] = total
+                job["active_position"] = total
+                job["progress_label"] = f"{total}/{total}" if total else "0/0"
                 job["message"] = f"Cola terminada con {failed} error(es)." if failed else f"OCR terminado para {total} imagen(es)."
                 should_shutdown = self._active_ocr_job_count() == 0
                 if not should_shutdown:
@@ -666,6 +979,22 @@ class FactoryWebRuntime:
                 if job:
                     job["endpoint_shutdown"] = endpoint_shutdown
 
+    def _record_has_completed_figure_segmentation(self, record_id: str) -> bool:
+        try:
+            record = self.service.staging.get_record(str(record_id or ""))
+        except Exception:
+            return False
+        if record is None:
+            return False
+        figure = record.figure_segmentation if isinstance(record.figure_segmentation, dict) else {}
+        if not figure:
+            return False
+        step_status = record.step_status(PipelineStep.SEGMENTATION)
+        figure_status = StageStatus.normalize(figure.get("status") or step_status)
+        if figure_status in {StageStatus.ERROR, StageStatus.PROCESSING, StageStatus.PENDING}:
+            return False
+        return "segments_total" in figure or isinstance(figure.get("segments"), list)
+
     def _normalizer_training_status(self) -> dict[str, Any]:
         manifest = load_normalizer_training_manifest()
         samples_total = int(manifest.get("samples_total") or 0)
@@ -684,14 +1013,18 @@ class FactoryWebRuntime:
         }
 
     def _snapshot(self) -> dict[str, Any]:
+        pages = self.service.load_pages()
+        record_entries = self.service.staging.load_record_entries()
+        records = [record for _path, record in record_entries]
+        summary = self.service.staging.summarize_records(records)
         return {
             "schema_version": "pdf_factory_web_snapshot_v1",
             "context": self.context.to_dict(),
             "pdf": self._pdf_info(),
-            "summary": self.service.build_instance_summary(),
-            "timeline": self.service.build_stage_overview(),
-            "pages": [self._page_to_web(row) for row in self.service.load_pages()],
-            "records": [self._record_to_web(record) for record in self.service.staging.load_records()],
+            "summary": self._build_instance_summary_cached(pages, records, summary),
+            "timeline": self._build_stage_overview_cached(pages, records, summary),
+            "pages": [self._page_to_web(row) for row in pages],
+            "records": [self._record_to_web(record, record_path=path) for path, record in record_entries],
             "models": self.service.models.to_dict(),
             "policy": {
                 "target": "staging_only",
@@ -700,6 +1033,32 @@ class FactoryWebRuntime:
                 "explicit_manual_upload_enabled": True,
             },
         }
+
+    def _build_instance_summary_cached(
+        self,
+        pages: list[Any],
+        records: list[StagingProblemRecord],
+        summary: dict[str, int],
+    ) -> dict[str, Any]:
+        try:
+            return self.service.build_instance_summary(pages=pages, records=records, summary=summary)
+        except TypeError as exc:
+            if "unexpected keyword" not in str(exc):
+                raise
+            return self.service.build_instance_summary()
+
+    def _build_stage_overview_cached(
+        self,
+        pages: list[Any],
+        records: list[StagingProblemRecord],
+        summary: dict[str, int],
+    ) -> list[dict[str, Any]]:
+        try:
+            return self.service.build_stage_overview(pages=pages, records=records, summary=summary)
+        except TypeError as exc:
+            if "unexpected keyword" not in str(exc):
+                raise
+            return self.service.build_stage_overview()
 
     def _pdf_info(self) -> dict[str, Any]:
         pdf_path = self.context.resolved_pdf_path()
@@ -719,6 +1078,10 @@ class FactoryWebRuntime:
             info["mtime_ns"] = int(stat.st_mtime_ns)
         except Exception:
             pass
+        cache_key = f"{info['path']}|{info['size']}|{info['mtime_ns']}"
+        cached = self._pdf_info_cache.get(cache_key)
+        if isinstance(cached, dict):
+            return dict(cached)
         try:
             import fitz
 
@@ -726,6 +1089,7 @@ class FactoryWebRuntime:
                 info["page_count"] = int(document.page_count)
         except Exception as exc:
             info["error"] = str(exc)
+        self._pdf_info_cache = {cache_key: dict(info)}
         return info
 
     def _render_pdf_page(self, page_number: int, *, dpi: int = 140) -> Path:
@@ -755,9 +1119,34 @@ class FactoryWebRuntime:
             raw = str(pdf_path)
         return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:12]
 
-    def _page_to_web(self, row: Any) -> dict[str, Any]:
+    def _page_web_cache_signature(self, row: Any) -> tuple[Any, ...]:
         image_path = Path(row.image_path)
-        return {
+        image_signature: tuple[Any, ...] = ("", 0, 0)
+        try:
+            resolved = image_path.expanduser().resolve()
+            stat = resolved.stat()
+            image_signature = (str(resolved), int(stat.st_mtime_ns), int(stat.st_size))
+        except Exception:
+            image_signature = (str(image_path), 0, 0)
+        return (
+            str(row.record_id),
+            str(row.pdf_path),
+            int(row.page_number),
+            image_signature,
+            tuple(tuple(int(value) for value in box[:4]) for box in list(row.boxes or [])),
+            bool(row.reviewed),
+            str(row.layout_mode or "auto"),
+            str(row.detector_source or ""),
+        )
+
+    def _page_to_web(self, row: Any) -> dict[str, Any]:
+        cache_key = str(row.record_id)
+        signature = self._page_web_cache_signature(row)
+        cached = self._page_web_cache.get(cache_key)
+        if cached is not None and cached[0] == signature:
+            return copy.deepcopy(cached[1])
+        image_path = Path(row.image_path)
+        payload = {
             "record_id": str(row.record_id),
             "pdf_path": str(row.pdf_path),
             "page_number": int(row.page_number),
@@ -769,12 +1158,77 @@ class FactoryWebRuntime:
             "reviewed": bool(row.reviewed),
             "layout_mode": str(row.layout_mode or "auto"),
         }
+        self._page_web_cache[cache_key] = (signature, copy.deepcopy(payload))
+        return payload
 
-    def _record_to_web(self, record: StagingProblemRecord) -> dict[str, Any]:
+    def _record_web_cache_signature(self, record: StagingProblemRecord, record_path: Path | None = None) -> tuple[Any, ...]:
+        path_signature: tuple[Any, ...] = ("memory",)
+        if record_path is not None:
+            try:
+                resolved = Path(record_path).expanduser().resolve()
+                stat = resolved.stat()
+                path_signature = (str(resolved), int(stat.st_mtime_ns), int(stat.st_size))
+            except Exception:
+                path_signature = (str(record_path), 0, 0)
+        crop_signature: tuple[Any, ...] = ("", 0, 0)
+        if record.crop_path:
+            try:
+                crop_path = Path(record.crop_path).expanduser().resolve()
+                stat = crop_path.stat()
+                crop_signature = (str(crop_path), int(stat.st_mtime_ns), int(stat.st_size))
+            except Exception:
+                crop_signature = (str(record.crop_path), 0, 0)
+        segment_signatures: list[tuple[str, int, int]] = []
+        figure = record.figure_segmentation if isinstance(record.figure_segmentation, dict) else {}
+        for segment in list(figure.get("segments") or []):
+            if not isinstance(segment, dict):
+                continue
+            image_path_raw = str(segment.get("image_path") or "")
+            if not image_path_raw:
+                continue
+            try:
+                image_path = Path(image_path_raw).expanduser().resolve()
+                stat = image_path.stat()
+                segment_signatures.append((str(image_path), int(stat.st_mtime_ns), int(stat.st_size)))
+            except Exception:
+                segment_signatures.append((image_path_raw, 0, 0))
+        return (
+            path_signature,
+            crop_signature,
+            tuple(segment_signatures),
+            str(record.record_id or ""),
+            str(record.updated_at or ""),
+        )
+
+    def _record_to_web(self, record: StagingProblemRecord, *, record_path: Path | None = None) -> dict[str, Any]:
+        cache_key = ""
+        signature: tuple[Any, ...] | None = None
+        if record_path is not None:
+            cache_key = str(Path(record_path).expanduser().resolve())
+            signature = self._record_web_cache_signature(record, record_path)
+            cached = self._record_web_cache.get(cache_key)
+            if cached is not None and cached[0] == signature:
+                return copy.deepcopy(cached[1])
         payload = record.to_dict()
         crop_path = Path(record.crop_path)
         downstream = dict(dict(record.audit or {}).get("downstream_state") or {})
         crop_exists = bool(record.crop_path and crop_path.exists())
+        figure = dict(record.figure_segmentation or {})
+        structured = dict(record.structured_ocr or {})
+        payload["training_examples_total"] = len(record.training_examples or [])
+        payload["structured_ocr"] = {
+            "items_total": len(list(structured.get("items") or [])),
+            "status": str(structured.get("status") or ""),
+        }
+        payload["figure_segmentation"] = {
+            key: value
+            for key, value in figure.items()
+            if key != "segments"
+        }
+        payload.pop("training_examples", None)
+        payload.pop("trace", None)
+        payload.pop("artifacts", None)
+        payload.pop("audit", None)
         payload["crop_name"] = crop_path.name
         payload["crop_url"] = self._register_file(crop_path) if crop_exists else ""
         payload["status_label"] = StageStatus.normalize(record.status)
@@ -782,7 +1236,6 @@ class FactoryWebRuntime:
         payload["downstream_invalidated"] = downstream.get("status") == "invalidated"
         payload["source_state"] = "stale" if payload["downstream_invalidated"] and not crop_exists else "active"
         payload["source_stale"] = payload["source_state"] == "stale"
-        figure = dict(record.figure_segmentation or {})
         segments = []
         for segment in list(figure.get("segments") or []):
             if not isinstance(segment, dict):
@@ -793,12 +1246,13 @@ class FactoryWebRuntime:
             row["image_name"] = image_path.name
             segments.append(row)
         payload["figure_segments_web"] = segments
-        structured = dict(record.structured_ocr or {})
         payload["structured_items_web"] = [
             dict(item)
             for item in list(structured.get("items") or [])
             if isinstance(item, dict)
         ]
+        if cache_key and signature is not None:
+            self._record_web_cache[cache_key] = (signature, copy.deepcopy(payload))
         return payload
 
     def _record_detail(self, record_id: str) -> dict[str, Any]:
@@ -811,14 +1265,41 @@ class FactoryWebRuntime:
             "promotion_candidate": self.service.staging.build_promotion_candidate(record_id),
         }
 
+    def _summary_response(self) -> dict[str, Any]:
+        pages = self.service.load_pages()
+        records = self.service.staging.load_records()
+        summary = self.service.staging.summarize_records(records)
+        return {
+            "schema_version": "pdf_factory_web_summary_v1",
+            "summary": self._build_instance_summary_cached(pages, records, summary),
+            "timeline": self._build_stage_overview_cached(pages, records, summary),
+        }
+
+    def _record_saved_response(
+        self,
+        record: StagingProblemRecord,
+        *,
+        include_summary: bool = True,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "schema_version": "pdf_factory_web_record_saved_v1",
+            "record": self._record_to_web(record),
+        }
+        if include_summary:
+            summary = self._summary_response()
+            payload["summary"] = summary["summary"]
+            payload["timeline"] = summary["timeline"]
+        return payload
+
     def _register_file(self, path: Path) -> str:
-        if not Path(path).exists():
+        raw_path = Path(path)
+        if not raw_path.exists():
             return ""
-        resolved = Path(path).expanduser().resolve()
-        if not self._is_trusted_file(resolved):
+        try:
+            resolved = raw_path.expanduser().resolve()
+            stat = resolved.stat()
+        except Exception:
             return ""
-        token = hashlib.sha1(str(resolved).encode("utf-8")).hexdigest()
-        self._file_tokens[token] = resolved
         instance_id = ""
         try:
             raw_instance_id = int(getattr(self, "_library_instance_id", 0) or 0)
@@ -826,9 +1307,25 @@ class FactoryWebRuntime:
                 instance_id = f"?instance_id={raw_instance_id}"
         except Exception:
             instance_id = ""
-        return f"/api/file/{token}{instance_id}"
+        cache_key = str(resolved)
+        signature = (int(stat.st_mtime_ns), int(stat.st_size), instance_id)
+        cached = self._file_url_cache.get(cache_key)
+        if cached and cached[0] == signature:
+            token, url = cached[1], cached[2]
+            self._file_tokens[token] = resolved
+            return url
+        if not self._is_trusted_resolved_file(resolved):
+            return ""
+        raw = f"{resolved}|{signature[0]}|{signature[1]}"
+        token = hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:40]
+        self._file_tokens[token] = resolved
+        url = f"/api/file/{token}{instance_id}"
+        self._file_url_cache[cache_key] = (signature, token, url)
+        return url
 
     def _trusted_file_roots(self) -> list[Path]:
+        if self._trusted_file_roots_cache is not None:
+            return list(self._trusted_file_roots_cache)
         roots = [
             self.cache_root,
             self.static_root,
@@ -852,13 +1349,17 @@ class FactoryWebRuntime:
                     resolved_roots.append(Path(root).expanduser().resolve())
             except Exception:
                 continue
-        return resolved_roots
+        self._trusted_file_roots_cache = resolved_roots
+        return list(resolved_roots)
 
     def _is_trusted_file(self, path: Path) -> bool:
         try:
             resolved = Path(path).expanduser().resolve()
         except Exception:
             return False
+        return self._is_trusted_resolved_file(resolved)
+
+    def _is_trusted_resolved_file(self, resolved: Path) -> bool:
         if resolved.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".pdf"}:
             return False
         return any(self._is_relative_to(resolved, root) for root in self._trusted_file_roots())
@@ -879,7 +1380,13 @@ class FactoryWebRuntime:
         if not file_path.exists():
             self._send_json(handler, {"error": "not_found"}, status=404)
             return
-        self._send_file(handler, file_path, mimetypes.guess_type(str(file_path))[0] or "text/plain")
+        cache_control = "no-store" if file_path.name == "index.html" else "public, max-age=0, must-revalidate"
+        self._send_file(
+            handler,
+            file_path,
+            mimetypes.guess_type(str(file_path))[0] or "text/plain",
+            cache_control=cache_control,
+        )
 
     @staticmethod
     def _send_cors_headers(handler: BaseHTTPRequestHandler) -> None:
@@ -906,19 +1413,36 @@ class FactoryWebRuntime:
         handler.wfile.write(raw)
 
     @staticmethod
-    def _send_file(handler: BaseHTTPRequestHandler, path: Path, content_type: str) -> None:
+    def _send_file(
+        handler: BaseHTTPRequestHandler,
+        path: Path,
+        content_type: str,
+        *,
+        cache_control: str = "public, max-age=0, must-revalidate",
+    ) -> None:
         file_path = Path(path)
         if not file_path.exists():
             FactoryWebRuntime._send_json(handler, {"error": "file_not_found"}, status=404)
             return
-        raw = file_path.read_bytes()
+        etag, last_modified = file_cache_identity(file_path)
+        if request_etag_matches(handler, etag):
+            handler.send_response(304)
+            handler.send_header("ETag", etag)
+            handler.send_header("Last-Modified", last_modified)
+            handler.send_header("Cache-Control", cache_control)
+            FactoryWebRuntime._send_cors_headers(handler)
+            handler.end_headers()
+            return
         handler.send_response(200)
         handler.send_header("Content-Type", content_type)
-        handler.send_header("Content-Length", str(len(raw)))
-        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Content-Length", str(file_path.stat().st_size))
+        handler.send_header("ETag", etag)
+        handler.send_header("Last-Modified", last_modified)
+        handler.send_header("Cache-Control", cache_control)
         FactoryWebRuntime._send_cors_headers(handler)
         handler.end_headers()
-        handler.wfile.write(raw)
+        with file_path.open("rb") as stream:
+            shutil.copyfileobj(stream, handler.wfile)
 
     @staticmethod
     def _send_error(
@@ -1035,6 +1559,7 @@ class FactoryWebRuntime:
     def _allowed_api_methods(path: str) -> set[str]:
         exact = {
             "/api/bootstrap": {"GET"},
+            "/api/summary": {"GET"},
             "/api/app/version": {"GET"},
             "/api/app/reload-signal": {"POST"},
             "/api/pdf/page": {"GET"},
@@ -1049,6 +1574,7 @@ class FactoryWebRuntime:
             "/api/ocr/jobs/start": {"POST"},
             "/api/pages/detect": {"POST"},
             "/api/pages/boxes": {"POST"},
+            "/api/pages/delete": {"POST"},
             "/api/staging/materialize": {"POST"},
             "/api/ocr/run": {"POST"},
             "/api/ocr/raw": {"POST"},
@@ -1076,6 +1602,13 @@ class FactoryWebRuntime:
 
 
 class _FilePayload:
-    def __init__(self, path: Path, content_type: str) -> None:
+    def __init__(
+        self,
+        path: Path,
+        content_type: str,
+        *,
+        cache_control: str = "public, max-age=0, must-revalidate",
+    ) -> None:
         self.path = Path(path)
         self.content_type = content_type
+        self.cache_control = str(cache_control or "public, max-age=0, must-revalidate")

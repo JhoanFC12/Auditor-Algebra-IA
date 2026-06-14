@@ -110,6 +110,26 @@ class PdfProblemGoldenController:
             )
         return rows
 
+    def load_instance_summary(self, name: str) -> dict[str, int] | None:
+        """Read page/box counters from manifest.json without opening each page record."""
+        manifest_path = self.instance_dir(name) / "manifest.json"
+        if not manifest_path.exists():
+            return None
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        keys = ("pages_total", "boxes_total", "reviewed_pages")
+        summary: dict[str, int] = {}
+        for key in keys:
+            try:
+                summary[key] = int(payload.get(key) or 0)
+            except Exception:
+                summary[key] = 0
+        return summary
+
     def add_rendered_page(self, name: str, *, pdf_path: Path, page_number: int, rendered_path: Path) -> ProblemPageRecord:
         instance = self.instance_dir(name)
         pages_dir = instance / "pages_png"
@@ -317,6 +337,33 @@ class PdfProblemGoldenController:
             (records_dir / f"{row.record_id}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         self._rewrite_manifest(name, self.load_instance(name))
         return instance
+
+    def delete_instance_row(self, name: str, record_id: str) -> list[ProblemPageRecord]:
+        """Elimina una pagina detectada sin cambiar el estado de revision de las restantes."""
+        instance = self.instance_dir(name)
+        records_dir = instance / "records"
+        pages_dir = instance / "pages_png"
+        crops_dir = instance / "problem_crops"
+        target = str(record_id or "").strip()
+        if not target:
+            raise KeyError("record_id requerido")
+        rows = self.load_instance(name)
+        remaining = [row for row in rows if str(row.record_id) != target]
+        if len(remaining) == len(rows):
+            raise KeyError(target)
+
+        record_path = records_dir / f"{target}.json"
+        if record_path.exists():
+            record_path.unlink()
+        page_path = pages_dir / f"{target}.png"
+        if page_path.exists():
+            page_path.unlink()
+        crop_dir = crops_dir / compact_id(target, prefix="p", max_len=24)
+        if crop_dir.exists() and crop_dir.is_dir():
+            shutil.rmtree(crop_dir)
+
+        self._rewrite_manifest(name, remaining)
+        return remaining
 
     def materialize_problem_crops_for_downstream(
         self,

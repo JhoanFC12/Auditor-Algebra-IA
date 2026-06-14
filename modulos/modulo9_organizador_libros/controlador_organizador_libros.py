@@ -800,11 +800,18 @@ class BookProgressController:
         finally:
             conn.close()
 
-    def obtener_dashboard_libro(self, db_name: str, libro_id: int) -> BookProgressSummary:
-        libro = self.obtener_libro(db_name, libro_id)
+    def obtener_dashboard_libro(
+        self,
+        db_name: str,
+        libro_id: int,
+        *,
+        book: dict | None = None,
+        instance_rows: List[dict] | None = None,
+    ) -> BookProgressSummary:
+        libro = dict(book) if book is not None else self.obtener_libro(db_name, libro_id)
         if not libro:
             raise ValueError("Libro no encontrado.")
-        instance_rows = self.listar_instancias_libro(db_name, libro_id)
+        instance_rows = [dict(row) for row in instance_rows] if instance_rows is not None else self.listar_instancias_libro(db_name, libro_id)
         instance_stats = [
             self._build_instance_stats(
                 db_name,
