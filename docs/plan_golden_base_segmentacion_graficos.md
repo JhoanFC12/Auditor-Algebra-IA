@@ -15,12 +15,12 @@ Solo se considera dato de entrenamiento cuando hay correccion humana real.
 La meta inicial es:
 
 ```text
-200 imagenes corregidas
+500 imagenes corregidas
 ```
 
 `reviewed` significa que el usuario confirmo la prediccion sin cambios. Sirve como auditoria, pero no entra al dataset de entrenamiento por defecto.
 
-`corrected` significa que el usuario movio, agrego o elimino boxes. Esos registros si entran al dataset y cuentan hacia las 200 imagenes.
+`corrected` significa que el usuario movio, agrego o elimino boxes. Esos registros si entran al dataset y cuentan hacia las 500 imagenes.
 
 El flujo correcto es:
 
@@ -106,7 +106,7 @@ Cada `records/<record_id>.json` usa:
 ```json
 {
   "corrected_images": 37,
-  "target_corrected_images": 200,
+  "target_corrected_images": 500,
   "remaining_corrected_images": 163
 }
 ```
@@ -191,7 +191,7 @@ python tools/train_graph_detector_yolo.py `
 Antes de entrenar:
 
 - revisar `manifest.json`;
-- confirmar que `corrected_samples` este cerca o por encima de 200;
+- confirmar que `corrected_samples` este cerca o por encima de 500;
 - confirmar que hay positivos y negativos;
 - revisar visualmente una muestra de labels;
 - separar train/val/test si el lote crece.
@@ -234,7 +234,7 @@ Pero ese descriptor semantico no reemplaza esta golden base. Son dos tareas dist
 - positivos totales;
 - negativos totales;
 - correcciones humanas;
-- avance contra la meta de 200 correcciones;
+- avance contra la meta de 500 correcciones;
 - falsos positivos reducidos;
 - falsos negativos reducidos;
 - IoU contra boxes revisados;

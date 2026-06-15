@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 from huggingface_hub import HfApi, get_token
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from modulos.instance_factory.runtime_env import load_factory_runtime_env
 
 
 def main() -> int:
@@ -12,6 +19,7 @@ def main() -> int:
     parser.add_argument("--repo-id", required=True)
     parser.add_argument("--private", action="store_true")
     args = parser.parse_args()
+    load_factory_runtime_env(REPO_ROOT)
     token = get_token()
     if not token:
         raise RuntimeError("No se encontro token Hugging Face.")

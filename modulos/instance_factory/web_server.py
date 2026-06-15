@@ -27,6 +27,7 @@ from .library_api import LibraryApiError, LibraryWebApi
 from .runtime_env import load_factory_runtime_env
 from .hf_endpoint_manager import HfEndpointManager
 from .normalizer_training_bank import load_manifest as load_normalizer_training_manifest
+from .training_registry import load_training_cycle_status, task_by_key
 from .db_promotion import promote_staging_records_to_db
 
 
@@ -40,6 +41,7 @@ WEB_BACKEND_SOURCE_NAMES = (
     "pipeline.py",
     "staging.py",
     "db_promotion.py",
+    "training_registry.py",
     "../modulo9_organizador_libros/controlador_organizador_libros.py",
 )
 WEB_RELOAD_SIGNAL_PATH = Path(__file__).resolve().parents[2] / ".cache" / "instance_factory" / "web_reload_signal.json"
@@ -187,6 +189,7 @@ class FactoryWebRuntime:
         self._snapshot_cache: tuple[tuple[Any, ...], dict[str, Any]] | None = None
         self._summary_cache: tuple[tuple[Any, ...], dict[str, Any]] | None = None
         self._normalizer_training_status_cache: tuple[float, dict[str, Any]] | None = None
+        self._training_cycle_status_cache: tuple[float, dict[str, Any]] | None = None
         self._signature_cache: dict[str, tuple[float, tuple[Any, ...], tuple[Any, ...]]] = {}
         self._trusted_file_roots_cache: list[Path] | None = None
         self._lock = threading.RLock()
@@ -367,6 +370,8 @@ class FactoryWebRuntime:
                 return status
             if method == "GET" and path == "/api/training/normalizer/status":
                 return self._normalizer_training_status()
+            if method == "GET" and path == "/api/training/status":
+                return self._training_cycle_status()
             if method == "POST" and path == "/api/endpoint/ocr/resume":
                 return self.endpoint_manager.resume(
                     wait=self._bool(payload.get("wait"), default=True),
@@ -1020,14 +1025,18 @@ class FactoryWebRuntime:
                 return copy.deepcopy(payload)
             self._normalizer_training_status_cache = None
         manifest = load_normalizer_training_manifest()
+        cycle = self._training_cycle_status()
+        normalizer_task = task_by_key(cycle, "normalizer")
         samples_total = int(manifest.get("samples_total") or 0)
-        threshold = int(manifest.get("threshold") or 200)
+        threshold = int(normalizer_task.get("target_samples") or manifest.get("threshold") or 500)
         payload = {
             **manifest,
             "schema_version": "normalizer_training_bank_status_v1",
             "samples_total": samples_total,
             "threshold": threshold,
             "ready_to_train": samples_total >= threshold,
+            "remaining_to_threshold": max(0, threshold - samples_total),
+            "training_cycle": normalizer_task,
             "notification": (
                 f"Ya hay {samples_total} muestras listas para entrenar una primera version del normalizador."
                 if samples_total >= threshold
@@ -1035,6 +1044,17 @@ class FactoryWebRuntime:
             ),
         }
         self._normalizer_training_status_cache = (time.monotonic(), copy.deepcopy(payload))
+        return payload
+
+    def _training_cycle_status(self) -> dict[str, Any]:
+        cached = self._training_cycle_status_cache
+        if cached is not None:
+            created_at, payload = cached
+            if time.monotonic() - created_at <= NORMALIZER_TRAINING_STATUS_CACHE_TTL_S:
+                return copy.deepcopy(payload)
+            self._training_cycle_status_cache = None
+        payload = load_training_cycle_status(context=self.context)
+        self._training_cycle_status_cache = (time.monotonic(), copy.deepcopy(payload))
         return payload
 
     def _snapshot(self) -> dict[str, Any]:
@@ -1061,6 +1081,7 @@ class FactoryWebRuntime:
                 for path, record in record_entries
             ],
             "models": self.service.models.to_dict(),
+            "training_cycle": self._training_cycle_status(),
             "policy": {
                 "target": "staging_only",
                 "never_insert_directly_into_problemas": True,
@@ -1237,6 +1258,7 @@ class FactoryWebRuntime:
         self._snapshot_cache = None
         self._summary_cache = None
         self._normalizer_training_status_cache = None
+        self._training_cycle_status_cache = None
         self._signature_cache.clear()
 
     def _build_instance_summary_cached(
@@ -1872,6 +1894,7 @@ class FactoryWebRuntime:
             "/api/promotion/upload": {"POST"},
             "/api/endpoint/ocr/status": {"GET"},
             "/api/ocr/jobs/status": {"GET"},
+            "/api/training/status": {"GET"},
             "/api/training/normalizer/status": {"GET"},
             "/api/endpoint/ocr/resume": {"POST"},
             "/api/endpoint/ocr/scale-to-zero": {"POST"},

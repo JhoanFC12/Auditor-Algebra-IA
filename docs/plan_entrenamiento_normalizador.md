@@ -148,8 +148,9 @@ Reglas:
 - Solo cuentan registros principales, no registros `[CONT.]` independientes.
 - La muestra debe tener `normalized.latex_rendered_item`.
 - Las continuaciones se guardan como parte del problema padre, no como muestras separadas.
-- El umbral inicial es `200` muestras.
-- Cuando `samples_total >= 200`, la UI muestra aviso para entrenar una primera version.
+- El umbral operativo del ciclo de entrenamiento es `500` muestras.
+- Cuando `samples_total >= 500`, la UI muestra aviso para entrenar o reentrenar una version del normalizador.
+- El avance tambien se publica en el registro comun `/api/training/status`, junto con OCR, segmentacion de problemas y segmentacion de graficos.
 
 La ruta puede cambiarse con:
 

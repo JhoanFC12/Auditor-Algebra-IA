@@ -15,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BANK_ROOT = REPO_ROOT / ".cache" / "transcriptor_runs" / "datasets" / "normalizer_training_bank"
 BANK_SCHEMA_VERSION = "normalizer_training_bank_v1"
 SAMPLE_SCHEMA_VERSION = "normalizer_training_sample_v1"
-DEFAULT_THRESHOLD = 200
+DEFAULT_THRESHOLD = 500
 
 
 def _now() -> str:
@@ -29,6 +29,22 @@ def _bank_root(root: Path | None = None) -> Path:
     if configured:
         return Path(configured).expanduser().resolve()
     return DEFAULT_BANK_ROOT.expanduser().resolve()
+
+
+def _threshold(value: Any | None = None) -> int:
+    for raw in (
+        os.environ.get("NORMALIZER_TRAINING_SAMPLE_TARGET"),
+        os.environ.get("TRAINING_SAMPLE_TARGET"),
+        value,
+        DEFAULT_THRESHOLD,
+    ):
+        try:
+            parsed = int(str(raw).strip())
+        except Exception:
+            continue
+        if parsed > 0:
+            return parsed
+    return DEFAULT_THRESHOLD
 
 
 def _sample_id(context: InstancePipelineContext, record: StagingProblemRecord) -> str:
@@ -131,12 +147,13 @@ def _image_entries(
 def load_manifest(root: Path | None = None) -> dict[str, Any]:
     bank_root = _bank_root(root)
     path = bank_root / "manifest.json"
+    threshold = _threshold()
     if not path.exists():
         return {
             "schema_version": BANK_SCHEMA_VERSION,
             "root": str(bank_root),
             "manifest_path": str(path),
-            "threshold": DEFAULT_THRESHOLD,
+            "threshold": threshold,
             "samples_total": 0,
             "ready_to_train": False,
             "samples_jsonl": str(bank_root / "samples.jsonl"),
@@ -147,10 +164,19 @@ def load_manifest(root: Path | None = None) -> dict[str, Any]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         payload = {}
-    return payload if isinstance(payload, dict) else {}
+    if not isinstance(payload, dict):
+        return {}
+    samples_total = int(payload.get("samples_total") or 0)
+    threshold = _threshold()
+    payload["threshold"] = threshold
+    payload["ready_to_train"] = samples_total >= threshold
+    payload["remaining_to_threshold"] = max(0, threshold - samples_total)
+    payload["next_action"] = "train_normalizer_v1" if samples_total >= threshold else "collect_more_samples"
+    return payload
 
 
 def _rewrite_index(bank_root: Path, *, threshold: int = DEFAULT_THRESHOLD) -> dict[str, Any]:
+    threshold = _threshold(threshold)
     samples_dir = bank_root / "samples"
     rows: list[dict[str, Any]] = []
     for path in sorted(samples_dir.glob("*.json"), key=lambda item: item.name.lower()):

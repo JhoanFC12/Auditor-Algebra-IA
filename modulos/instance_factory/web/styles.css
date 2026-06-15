@@ -455,6 +455,60 @@ img, canvas { max-width: 100%; }
   white-space: nowrap;
 }
 
+.training-cycle {
+  grid-template-columns: minmax(220px, 0.8fr) minmax(320px, 1.2fr);
+}
+
+.training-cycle-main {
+  min-width: 0;
+}
+
+.training-cycle-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  min-width: 0;
+}
+
+.training-task {
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.training-task b,
+.training-task span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.training-task b {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.training-task span {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.training-task.ready {
+  border-color: var(--green-border);
+  background: var(--green-soft);
+}
+
+.training-task.ready b,
+.training-task.ready span {
+  color: var(--green);
+}
+
 .training-notice.ready {
   border-color: var(--green-border);
   background: var(--green-soft);
@@ -2774,6 +2828,8 @@ details.raw-block summary {
   .form-grid { grid-template-columns: 1fr; }
   .toolbar .field { width: 100%; }
   .toolbar button, .top-actions button, .bottombar #primaryAction { width: 100%; }
+  .training-cycle { grid-template-columns: 1fr; }
+  .training-cycle-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metrics { grid-template-columns: 1fr; }
   .stage-header { flex-direction: column; }
   .stage-actions, .batch-actions { width: 100%; justify-content: stretch; }

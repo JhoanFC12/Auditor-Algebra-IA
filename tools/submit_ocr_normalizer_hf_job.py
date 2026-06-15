@@ -3,15 +3,23 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import sys
 from pathlib import Path
 
 from huggingface_hub import HfApi, get_token
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from modulos.instance_factory.runtime_env import load_factory_runtime_env
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Lanza fine-tuning LoRA del normalizador OCR textual.")
     parser.add_argument("--config", required=True)
     args = parser.parse_args()
+    load_factory_runtime_env(REPO_ROOT)
     token = get_token()
     if not token:
         raise RuntimeError("No se encontro token Hugging Face.")
@@ -22,7 +30,7 @@ def main() -> int:
         "bash",
         "-lc",
         "python -m pip install -U 'huggingface_hub>=0.33' 'transformers>=4.49,<5' "
-        "'accelerate>=1.2' 'peft>=0.14' sentencepiece && "
+        "'datasets>=2.20' 'accelerate>=1.2' 'peft>=0.14' 'trl>=0.12' trackio sentencepiece && "
         "python - <<'PY'\n"
         "import base64, os\n"
         "open('train_ocr_normalizer_hf.py', 'wb').write(base64.b64decode(os.environ['TRAIN_SCRIPT_B64']))\n"

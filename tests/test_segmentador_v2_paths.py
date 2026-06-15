@@ -64,7 +64,7 @@ class SegmentadorV2PathTests(unittest.TestCase):
                 self.assertEqual(manifest["records_total"], 1)
                 self.assertEqual(manifest["boxes_total"], 1)
                 self.assertEqual(manifest["corrected_images"], 1)
-                self.assertEqual(manifest["remaining_corrected_images"], 199)
+                self.assertEqual(manifest["remaining_corrected_images"], 499)
                 records = list((live_root / "records").glob("*.json"))
                 self.assertEqual(len(records), 1)
                 record = json.loads(records[0].read_text(encoding="utf-8"))

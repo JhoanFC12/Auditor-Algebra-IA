@@ -471,9 +471,9 @@ print(json.dumps(out, ensure_ascii=False))
             encoding="utf-8",
         )
         try:
-            target_corrected = int((os.getenv("SEGMENT_LIVE_GOLDEN_TARGET_CORRECTED", "200") or "200").strip())
+            target_corrected = int((os.getenv("SEGMENT_LIVE_GOLDEN_TARGET_CORRECTED", "500") or "500").strip())
         except Exception:
-            target_corrected = 200
+            target_corrected = 500
         target_corrected = max(1, target_corrected)
         segment_rows: List[dict] = []
         for row in rows:

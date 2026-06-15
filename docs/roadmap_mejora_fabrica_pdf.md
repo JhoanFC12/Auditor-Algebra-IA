@@ -314,7 +314,7 @@ Regla principal:
 si el usuario corrige, agrega o elimina un box de grafico, esa revision alimenta la golden base.
 ```
 
-La meta inicial es reunir `200` imagenes corregidas. Las revisiones sin cambios se conservan como auditoria, pero no cuentan para el dataset de entrenamiento por defecto.
+La meta operativa es reunir `500` imagenes corregidas. Las revisiones sin cambios se conservan como auditoria, pero no cuentan para el dataset de entrenamiento por defecto.
 
 La salida de esta base se exporta como dataset YOLO con clase unica `grafico_problema`.
 
@@ -582,7 +582,7 @@ Luego una capa de vinculacion relacionaria problema y solucion por:
 | M-007 | Alta | Biblioteca de cursos | En curso | Mantener la biblioteca operativa solo con libros de cursos; examenes quedan fuera por ahora. |
 | M-008 | Alta | Indicadores por libro | Pendiente | Mostrar total de instancias, instancias agregadas a BD y faltantes por libro. |
 | M-009 | Futura | Descriptor semantico multimodal | Planificado | Describir problemas de texto e imagen para embeddings, similitud, dificultad y recomendacion. |
-| M-010 | Alta | Golden base segmentacion grafica | En curso | Acumular 200 imagenes corregidas de boxes de graficos y exportarlas como dataset YOLO. |
+| M-010 | Alta | Golden base segmentacion grafica | En curso | Acumular 500 imagenes corregidas de boxes de graficos y exportarlas como dataset YOLO. |
 
 ## Registro de decisiones
 

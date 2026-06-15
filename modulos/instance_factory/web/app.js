@@ -67,6 +67,8 @@ const state = {
   ocrEndpoint: null,
   ocrEndpointLoading: false,
   ocrJobPolling: false,
+  trainingCycle: null,
+  trainingCycleFetchedAt: 0,
   normalizerTraining: null,
   normalizerTrainingFetchedAt: 0,
   recordLookup: { recordsRef: null, byId: new Map(), indexById: new Map() },
@@ -536,27 +538,47 @@ function renderFactoryShell() {
 
 async function refreshNormalizerTrainingStatus({ silent = true, force = false, renderNotice = true } = {}) {
   if (state.view === "library") return null;
-  const fresh = state.normalizerTraining
-    && !state.normalizerTraining.error
-    && Date.now() - Number(state.normalizerTrainingFetchedAt || 0) <= NORMALIZER_TRAINING_CACHE_MS;
+  const fresh = state.trainingCycle
+    && !state.trainingCycle.error
+    && Date.now() - Number(state.trainingCycleFetchedAt || 0) <= NORMALIZER_TRAINING_CACHE_MS;
   if (!force && fresh) {
     if (renderNotice) renderTrainingNotice();
-    return state.normalizerTraining;
+    return state.trainingCycle;
   }
   try {
-    state.normalizerTraining = await api("/api/training/normalizer/status");
+    state.trainingCycle = await api("/api/training/status");
+    state.trainingCycleFetchedAt = Date.now();
+    const normalizer = (state.trainingCycle.tasks || []).find((task) => task.key === "normalizer") || {};
+    state.normalizerTraining = {
+      ...normalizer,
+      schema_version: "normalizer_training_bank_status_v1",
+      threshold: Number(normalizer.target_samples || 500),
+      samples_total: Number(normalizer.samples_total || 0),
+      ready_to_train: Boolean(normalizer.ready_to_train),
+      samples_jsonl: (normalizer.roots || [])[0]?.root || state.trainingCycle.datasets_root || "",
+      notification: normalizer.ready_to_train
+        ? `Ya hay ${Number(normalizer.samples_total || 0)} muestras listas para entrenar una primera version del normalizador.`
+        : "",
+    };
     state.normalizerTrainingFetchedAt = Date.now();
     if (renderNotice) renderTrainingNotice();
     if (!silent && state.normalizerTraining?.ready_to_train) {
       setStatus(state.normalizerTraining.notification || "Dataset normalizador listo para entrenar.");
     }
-    return state.normalizerTraining;
+    return state.trainingCycle;
   } catch (err) {
+    state.trainingCycle = {
+      schema_version: "pdf_factory_training_cycle_status_v1",
+      error: err.message || String(err),
+      tasks: [],
+      target_per_model: 500,
+    };
+    state.trainingCycleFetchedAt = 0;
     state.normalizerTraining = {
       schema_version: "normalizer_training_bank_status_v1",
       error: err.message || String(err),
       samples_total: 0,
-      threshold: 200,
+      threshold: 500,
       ready_to_train: false,
     };
     state.normalizerTrainingFetchedAt = 0;
@@ -568,13 +590,40 @@ async function refreshNormalizerTrainingStatus({ silent = true, force = false, r
 function renderTrainingNotice() {
   const host = $("trainingNotice");
   if (!host) return;
+  const cycle = state.trainingCycle || state.snapshot?.training_cycle || null;
+  if (cycle && !cycle.error && Array.isArray(cycle.tasks) && cycle.tasks.length) {
+    const tasks = cycle.tasks;
+    const readyCount = tasks.filter((task) => Boolean(task.ready_to_train)).length;
+    host.innerHTML = `
+      <div class="training-notice training-cycle ${readyCount ? "ready" : ""}">
+        <div class="training-cycle-main">
+          <strong>Banco de entrenamiento</strong>
+          <span>${readyCount}/${tasks.length} modelo(s) listos para reentrenar. Meta general: ${Number(cycle.target_per_model || 500)} muestras.</span>
+        </div>
+        <div class="training-cycle-grid">
+          ${tasks.map((task) => {
+            const total = Number(task.samples_total || 0);
+            const target = Number(task.target_samples || cycle.target_per_model || 500);
+            const ready = Boolean(task.ready_to_train || total >= target);
+            return `
+              <div class="training-task ${ready ? "ready" : ""}" title="${escapeAttr(task.count_policy || "")}">
+                <b>${escapeHtml(task.label || task.key)}</b>
+                <span>${total}/${target}</span>
+              </div>
+            `;
+          }).join("")}
+        </div>
+      </div>
+    `;
+    return;
+  }
   const bank = state.normalizerTraining;
   if (!bank || bank.error) {
     host.innerHTML = bank?.error ? `<div class="training-notice warning">Base normalizador: ${escapeHtml(bank.error)}</div>` : "";
     return;
   }
   const total = Number(bank.samples_total || 0);
-  const threshold = Number(bank.threshold || 200);
+  const threshold = Number(bank.threshold || 500);
   const ready = Boolean(bank.ready_to_train || total >= threshold);
   const remaining = Math.max(0, threshold - total);
   host.innerHTML = `
