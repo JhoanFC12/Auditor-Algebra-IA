@@ -103,6 +103,28 @@ Entrada opcional para problemas con imagen:
 }
 ```
 
+Entrada opcional para problemas con solucion revisada o solucionario:
+
+```json
+{
+  "solution_semantics": [
+    {
+      "schema_version": "solution_semantic_profile_v1",
+      "solution_path_id": "principal",
+      "source": "humano",
+      "solution_text_latex": "Se aplica suma de angulos y luego se despeja x.",
+      "method": "relaciones_angulares",
+      "concepts_used": ["suma de angulos", "triangulo isosceles"],
+      "skills_used": ["leer grafico", "plantear ecuacion"],
+      "steps_summary": ["identificar datos", "plantear relacion", "despejar x"],
+      "embedding_text": "Geometria. Triangulos. Solucion por relaciones angulares, suma de angulos y despeje."
+    }
+  ]
+}
+```
+
+Un problema puede tener mas de una ruta de solucion. En ese caso cada ruta debe conservar su propio `solution_path_id`, metodo, conceptos y texto para embedding.
+
 ## Salida Principal: `problem_semantic_profile_v1`
 
 Schema versionado:
@@ -126,6 +148,9 @@ docs/schemas/problem_semantic_profile_v1.schema.json
     "traducir relaciones geometricas",
     "plantear ecuacion simple"
   ],
+  "solution_methods": ["relaciones_angulares"],
+  "solution_concepts": ["suma de angulos", "triangulo isosceles"],
+  "alternative_solution_paths": [],
   "objects": {
     "geometry": ["triangulo", "angulo"],
     "algebra": ["ecuacion lineal"],
@@ -138,6 +163,9 @@ docs/schemas/problem_semantic_profile_v1.schema.json
   "unknowns": ["x"],
   "representation": {
     "embedding_text": "Geometria. Triangulos. Angulos. Calcular x con suma de angulos y relaciones visibles.",
+    "statement_embedding_text": "Geometria. Triangulos. Enunciado pide calcular x.",
+    "figure_embedding_text": "Grafico con triangulo, angulos marcados y x.",
+    "solution_embedding_text": "Solucion usa suma de angulos y relaciones en triangulo.",
     "search_keywords": ["geometria", "triangulos", "angulos", "x"],
     "canonical_problem_type": "calculo_de_angulo"
   },
@@ -363,7 +391,7 @@ dificultad_calibrada = dificultad_inicial + resultados reales de alumnos
 
 ## Embeddings Y Similitud
 
-El embedding no debe generarse desde el OCR crudo ni desde rutas de archivo. Debe generarse desde `representation.embedding_text`.
+El embedding no debe generarse desde el OCR crudo ni desde rutas de archivo. Debe generarse desde textos limpios y versionados dentro de `representation`.
 
 Texto recomendado:
 
@@ -377,10 +405,87 @@ Ejemplo:
 Geometria. Triangulos. Angulos. Calculo de angulo con grafico. Leer relaciones angulares y plantear ecuacion simple.
 ```
 
+### Vectorizacion Por Capas
+
+No usaremos un solo vector para decidir similitud. Cada problema puede tener varias evidencias:
+
+| Vector | Fuente | Para que sirve |
+| --- | --- | --- |
+| `statement_embedding` | Enunciado normalizado | Buscar problemas con planteamiento parecido. |
+| `semantic_embedding` | Perfil semantico completo | Buscar por conceptos, habilidades y tipo canonico. |
+| `figure_embedding` | Descriptor del grafico | Buscar graficos o configuraciones visuales parecidas. |
+| `solution_embedding` | Solucion o rutas de solucion | Buscar problemas que usan la misma propiedad o estrategia. |
+
+Regla:
+
+```text
+La similitud pedagogica sale de combinar vectores, conceptos y filtros.
+No se decide solo por el texto visible.
+```
+
+### Diferencias Por Curso
+
+Cada curso tiene desafios distintos.
+
+| Curso | Desafio | Evidencia mas importante |
+| --- | --- | --- |
+| Aritmetica | Detectar estructura del razonamiento detras de numeros distintos. | Conceptos, operaciones, solucion. |
+| Algebra | Reconocer transformaciones equivalentes. | Forma algebraica, metodo de solucion. |
+| Geometria | El grafico contiene datos que el texto no dice. | Descriptor del grafico + solucion. |
+| Trigonometria | La identidad usada puede no ser evidente en el enunciado. | Solucion y conceptos usados. |
+| Razonamiento matematico | El patron suele estar oculto. | Estrategia y pasos de solucion. |
+
+### Geometria Con Grafico
+
+En Geometria Plana debemos separar tres cosas:
+
+1. Texto del problema: que se pide.
+2. Descriptor del grafico: que se ve y que marcas existen.
+3. Solucion: que propiedad o construccion se usa.
+
+```mermaid
+flowchart LR
+  A["Enunciado"] --> D["Perfil semantico"]
+  B["Grafico"] --> E["Descriptor visible"]
+  C["Solucion"] --> F["Perfil de solucion"]
+  D --> G["Similitud final"]
+  E --> G
+  F --> G
+```
+
+El descriptor del grafico no debe inventar propiedades por apariencia. Por ejemplo, no debe decir que dos rectas son paralelas si no hay marca, texto o evidencia clara. La solucion revisada si puede declarar que se uso una propiedad, porque ahi ya estamos en la capa de razonamiento.
+
+### Multiples Caminos De Solucion
+
+Un problema puede tener varias soluciones validas. Para similitud, eso es una ventaja:
+
+```json
+{
+  "solution_paths": [
+    {
+      "path_id": "principal",
+      "method": "propiedad_directa",
+      "concepts_used": ["angulo exterior"]
+    },
+    {
+      "path_id": "alternativa_1",
+      "method": "trazo_auxiliar",
+      "concepts_used": ["triangulo isosceles", "suma de angulos"]
+    }
+  ]
+}
+```
+
+Si otro problema comparte cualquiera de esas rutas, debe poder aparecer como relacionado, aunque su enunciado no sea muy parecido.
+
 La busqueda de similitud debe combinar:
 
+- vector del enunciado;
 - vector del perfil semantico;
+- vector del grafico si existe;
+- vector de la solucion si existe;
 - filtros por curso/tema/subtema;
+- conceptos y propiedades compartidas;
 - dificultad cercana;
 - modalidad del problema;
 - historial del alumno.
@@ -448,6 +553,8 @@ Separar embeddings de `problemas` evita ensuciar la tabla principal y permite re
 - Generar perfiles con reglas simples desde curso/tema/formato final.
 - Producir `embedding_text`.
 - Revisar similitud manualmente.
+- Generar relaciones semilla con `tools/populate_semantic_similarity_edges.py`
+  para evaluar top-k antes de entrenar o descargar embeddings locales.
 
 ### Fase C: Descriptor Con Modelo
 
@@ -460,6 +567,9 @@ Separar embeddings de `problemas` evita ensuciar la tabla principal y permite re
 - Elegir un modelo local de embeddings.
 - Crear embeddings desde `embedding_text`.
 - Probar busqueda por proximidad dentro de la BD local.
+- Combinar embeddings reales con el score semilla ya guardado en
+  `problem_similarity_edges`, en lugar de reemplazar de golpe la explicacion
+  revisable.
 
 ### Fase E: Dificultad Y Recomendacion
 

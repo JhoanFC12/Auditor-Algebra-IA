@@ -17,6 +17,7 @@ REPORT_SCHEMA_VERSION = "semantic_descriptor_validation_report_v1"
 SCHEMA_FILES = {
     "problem_semantic_profile_v1": Path("docs/schemas/problem_semantic_profile_v1.schema.json"),
     "geometry_figure_description_v1": Path("docs/schemas/geometry_figure_description_v1.schema.json"),
+    "solution_semantic_profile_v1": Path("docs/schemas/solution_semantic_profile_v1.schema.json"),
 }
 
 try:

@@ -11,6 +11,15 @@
     "angulos",
     "relaciones angulares"
   ],
+  "solution_methods": [
+    "relaciones angulares en triangulo"
+  ],
+  "solution_concepts": [
+    "suma de angulos internos de un triangulo"
+  ],
+  "alternative_solution_paths": [
+    "sol_path_01"
+  ],
   "skills": [
     "leer grafico",
     "identificar angulos",
@@ -38,6 +47,9 @@
   ],
   "representation": {
     "embedding_text": "Geometria. Triangulos. Angulos. Calculo de angulo x con grafico y relaciones angulares visibles.",
+    "statement_embedding_text": "Geometria. Triangulos. Enunciado pide calcular un angulo x.",
+    "figure_embedding_text": "Grafico de triangulo con puntos, segmentos y angulos marcados.",
+    "solution_embedding_text": "Solucion por suma de angulos internos y despeje de x.",
     "search_keywords": [
       "geometria",
       "triangulos",

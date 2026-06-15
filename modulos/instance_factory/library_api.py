@@ -71,11 +71,31 @@ class LibraryWebApi:
         runtime_factory: Callable[[InstancePipelineContext], Any] | None = None,
         open_url: OpenUrlCallback | None = None,
         file_url_resolver: FileUrlResolver | None = None,
+        semantic_similarity_fetcher: Callable[..., dict[str, Any]] | None = None,
+        semantic_status_fetcher: Callable[..., dict[str, Any]] | None = None,
+        semantic_similarity_reviewer: Callable[..., dict[str, Any]] | None = None,
+        semantic_practice_fetcher: Callable[..., dict[str, Any]] | None = None,
+        semantic_practice_saver: Callable[..., dict[str, Any]] | None = None,
+        semantic_practice_lister: Callable[..., dict[str, Any]] | None = None,
+        semantic_concept_fetcher: Callable[..., dict[str, Any]] | None = None,
+        semantic_concept_problem_fetcher: Callable[..., dict[str, Any]] | None = None,
+        semantic_concept_link_reviewer: Callable[..., dict[str, Any]] | None = None,
+        semantic_problem_concept_fetcher: Callable[..., dict[str, Any]] | None = None,
     ) -> None:
         self._controller = controller
         self.runtime_factory = runtime_factory or _default_runtime_factory
         self.open_url = open_url or _default_open_url
         self.file_url_resolver = file_url_resolver
+        self.semantic_similarity_fetcher = semantic_similarity_fetcher
+        self.semantic_status_fetcher = semantic_status_fetcher
+        self.semantic_similarity_reviewer = semantic_similarity_reviewer
+        self.semantic_practice_fetcher = semantic_practice_fetcher
+        self.semantic_practice_saver = semantic_practice_saver
+        self.semantic_practice_lister = semantic_practice_lister
+        self.semantic_concept_fetcher = semantic_concept_fetcher
+        self.semantic_concept_problem_fetcher = semantic_concept_problem_fetcher
+        self.semantic_concept_link_reviewer = semantic_concept_link_reviewer
+        self.semantic_problem_concept_fetcher = semantic_problem_concept_fetcher
         self._factory_runtimes: list[Any] = []
         self._factory_runtime_by_instance: dict[tuple[str, int, int], Any] = {}
         self._response_cache: dict[tuple[str, str, tuple[tuple[str, tuple[str, ...]], ...]], tuple[float, dict[str, Any]]] = {}
@@ -99,6 +119,14 @@ class LibraryWebApi:
             return {"GET"}
         if parts == ["api", "library", "books"]:
             return {"GET", "POST"}
+        if parts == ["api", "library", "practice-drafts"]:
+            return {"GET"}
+        if parts == ["api", "library", "concepts"]:
+            return {"GET"}
+        if len(parts) == 5 and parts[:3] == ["api", "library", "concepts"] and parts[4] == "problems":
+            return {"GET"}
+        if len(parts) == 7 and parts[:3] == ["api", "library", "concepts"] and parts[4] == "problems" and parts[6] == "review":
+            return {"POST"}
         if len(parts) == 4 and parts[:3] == ["api", "library", "books"]:
             return {"GET", "POST"}
         if len(parts) == 5 and parts[:3] == ["api", "library", "books"] and parts[4] == "instances":
@@ -109,6 +137,18 @@ class LibraryWebApi:
             return {"POST"}
         if len(parts) == 5 and parts[:3] == ["api", "library", "instances"] and parts[4] == "factory":
             return {"POST"}
+        if len(parts) == 5 and parts[:3] == ["api", "library", "problems"] and parts[4] == "similar":
+            return {"GET"}
+        if len(parts) == 5 and parts[:3] == ["api", "library", "problems"] and parts[4] == "concepts":
+            return {"GET"}
+        if len(parts) == 5 and parts[:3] == ["api", "library", "problems"] and parts[4] == "practice-draft":
+            return {"GET", "POST"}
+        if len(parts) == 5 and parts[:3] == ["api", "library", "problems"] and parts[4] == "practice-drafts":
+            return {"GET"}
+        if len(parts) == 7 and parts[:3] == ["api", "library", "problems"] and parts[4] == "similar" and parts[6] == "review":
+            return {"POST"}
+        if parts == ["api", "library", "semantic", "status"]:
+            return {"GET"}
         return set()
 
     def dispatch(
@@ -155,6 +195,19 @@ class LibraryWebApi:
             return self._books(query)
         if parts == ["api", "library", "books"] and method == "POST":
             return self._create_book(payload)
+        if parts == ["api", "library", "practice-drafts"]:
+            return self._practice_draft_catalog(query)
+        if parts == ["api", "library", "concepts"]:
+            return self._semantic_concepts(query)
+        if len(parts) == 5 and parts[:3] == ["api", "library", "concepts"] and parts[4] == "problems":
+            return self._semantic_concept_problems(query, _int_id(parts[3], "concept_id"))
+        if len(parts) == 7 and parts[:3] == ["api", "library", "concepts"] and parts[4] == "problems" and parts[6] == "review":
+            return self._review_semantic_concept_problem_link(
+                query,
+                payload,
+                _int_id(parts[3], "concept_id"),
+                _int_id(parts[5], "problem_id"),
+            )
         if len(parts) == 4 and parts[:3] == ["api", "library", "books"]:
             book_id = _int_id(parts[3], "book_id")
             if method == "GET":
@@ -168,6 +221,26 @@ class LibraryWebApi:
             return self._update_instance_state(payload, _int_id(parts[3], "instance_id"))
         if len(parts) == 5 and parts[:3] == ["api", "library", "instances"] and parts[4] == "factory":
             return self._prepare_factory(payload, _int_id(parts[3], "instance_id"))
+        if len(parts) == 5 and parts[:3] == ["api", "library", "problems"] and parts[4] == "similar":
+            return self._problem_similarity(query, _int_id(parts[3], "problem_id"))
+        if len(parts) == 5 and parts[:3] == ["api", "library", "problems"] and parts[4] == "concepts":
+            return self._problem_concepts(query, _int_id(parts[3], "problem_id"))
+        if len(parts) == 5 and parts[:3] == ["api", "library", "problems"] and parts[4] == "practice-draft":
+            problem_id = _int_id(parts[3], "problem_id")
+            if method == "GET":
+                return self._problem_practice_draft(query, problem_id)
+            return self._save_problem_practice_draft(query, payload, problem_id)
+        if len(parts) == 5 and parts[:3] == ["api", "library", "problems"] and parts[4] == "practice-drafts":
+            return self._problem_practice_drafts(query, _int_id(parts[3], "problem_id"))
+        if len(parts) == 7 and parts[:3] == ["api", "library", "problems"] and parts[4] == "similar" and parts[6] == "review":
+            return self._review_problem_similarity(
+                query,
+                payload,
+                _int_id(parts[3], "problem_id"),
+                _int_id(parts[5], "similar_problem_id"),
+            )
+        if parts == ["api", "library", "semantic", "status"]:
+            return self._semantic_status(query)
         raise FileNotFoundError(f"Ruta API no encontrada: {method} {path}")
 
     @staticmethod
@@ -415,6 +488,195 @@ class LibraryWebApi:
             "policy": _policy(),
         }
 
+    def _problem_similarity(self, query: dict[str, list[str]], problem_id: int) -> dict[str, Any]:
+        db_name = _required_db(query=query)
+        db_profile = _first(query, "db_profile") or "local_mirror"
+        model_id = _first(query, "model_id") or "semantic_similarity_seed_v1"
+        top_k = _query_int(query, "top_k", default=10, minimum=1, maximum=100)
+        include_reverse = _query_bool(query, "include_reverse", default=False)
+        fetcher = self.semantic_similarity_fetcher or _default_semantic_similarity_fetcher
+        return fetcher(
+            db_name=db_name,
+            db_profile=db_profile,
+            problem_id=int(problem_id),
+            top_k=top_k,
+            model_id=model_id,
+            include_reverse=include_reverse,
+        )
+
+    def _problem_concepts(self, query: dict[str, list[str]], problem_id: int) -> dict[str, Any]:
+        db_name = _required_db(query=query)
+        db_profile = _first(query, "db_profile") or "local_mirror"
+        limit = _query_int(query, "limit", default=50, minimum=1, maximum=200)
+        role = _first(query, "role") or ""
+        status = _first(query, "status") or _first(query, "estado") or ""
+        fetcher = self.semantic_problem_concept_fetcher or _default_semantic_problem_concept_fetcher
+        return fetcher(
+            db_name=db_name,
+            db_profile=db_profile,
+            problem_id=int(problem_id),
+            limit=limit,
+            role=role,
+            status=status,
+        )
+
+    def _problem_practice_draft(self, query: dict[str, list[str]], problem_id: int) -> dict[str, Any]:
+        db_name = _required_db(query=query)
+        db_profile = _first(query, "db_profile") or "local_mirror"
+        model_id = _first(query, "model_id") or "semantic_similarity_seed_v1"
+        top_k = _query_int(query, "top_k", default=20, minimum=1, maximum=100)
+        target_count = _query_int(query, "target_count", default=10, minimum=1, maximum=50)
+        include_reverse = _query_bool(query, "include_reverse", default=True)
+        include_rejected = _query_bool(query, "include_rejected", default=False)
+        fetcher = self.semantic_practice_fetcher or _default_semantic_practice_fetcher
+        return fetcher(
+            db_name=db_name,
+            db_profile=db_profile,
+            problem_id=int(problem_id),
+            top_k=top_k,
+            target_count=target_count,
+            model_id=model_id,
+            include_reverse=include_reverse,
+            include_rejected=include_rejected,
+        )
+
+    def _save_problem_practice_draft(
+        self,
+        query: dict[str, list[str]],
+        payload: dict[str, Any],
+        problem_id: int,
+    ) -> dict[str, Any]:
+        db_name = _required_db(query=query, payload=payload)
+        db_profile = _first(query, "db_profile") or str(payload.get("db_profile") or "local_mirror")
+        status = str(payload.get("status") or payload.get("estado") or "borrador")
+        review_note = str(payload.get("review_note") or payload.get("note") or payload.get("nota") or "")
+        draft = payload.get("draft") if isinstance(payload.get("draft"), dict) else payload
+        saver = self.semantic_practice_saver or _default_semantic_practice_saver
+        return saver(
+            db_name=db_name,
+            db_profile=db_profile,
+            problem_id=int(problem_id),
+            draft=draft,
+            status=status,
+            review_note=review_note,
+        )
+
+    def _problem_practice_drafts(self, query: dict[str, list[str]], problem_id: int) -> dict[str, Any]:
+        db_name = _required_db(query=query)
+        db_profile = _first(query, "db_profile") or "local_mirror"
+        limit = _query_int(query, "limit", default=20, minimum=1, maximum=100)
+        status = _first(query, "status") or ""
+        lister = self.semantic_practice_lister or _default_semantic_practice_lister
+        return lister(
+            db_name=db_name,
+            db_profile=db_profile,
+            problem_id=int(problem_id),
+            limit=limit,
+            status=status,
+        )
+
+    def _practice_draft_catalog(self, query: dict[str, list[str]]) -> dict[str, Any]:
+        db_name = _required_db(query=query)
+        db_profile = _first(query, "db_profile") or "local_mirror"
+        limit = _query_int(query, "limit", default=50, minimum=1, maximum=200)
+        status = _first(query, "status") or "revisado"
+        lister = self.semantic_practice_lister or _default_semantic_practice_lister
+        return lister(
+            db_name=db_name,
+            db_profile=db_profile,
+            problem_id=0,
+            limit=limit,
+            status=status,
+        )
+
+    def _semantic_status(self, query: dict[str, list[str]]) -> dict[str, Any]:
+        db_name = _required_db(query=query)
+        db_profile = _first(query, "db_profile") or "local_mirror"
+        model_id = _first(query, "model_id") or "semantic_similarity_seed_v1"
+        fetcher = self.semantic_status_fetcher or _default_semantic_status_fetcher
+        return fetcher(
+            db_name=db_name,
+            db_profile=db_profile,
+            model_id=model_id,
+        )
+
+    def _semantic_concepts(self, query: dict[str, list[str]]) -> dict[str, Any]:
+        db_name = _required_db(query=query)
+        db_profile = _first(query, "db_profile") or "local_mirror"
+        limit = _query_int(query, "limit", default=100, minimum=1, maximum=300)
+        search = _first(query, "q") or _first(query, "query") or ""
+        course = _first(query, "course") or _first(query, "curso") or ""
+        status = _first(query, "status") or _first(query, "estado") or ""
+        fetcher = self.semantic_concept_fetcher or _default_semantic_concept_fetcher
+        return fetcher(
+            db_name=db_name,
+            db_profile=db_profile,
+            limit=limit,
+            query=search,
+            course=course,
+            status=status,
+        )
+
+    def _semantic_concept_problems(self, query: dict[str, list[str]], concept_id: int) -> dict[str, Any]:
+        db_name = _required_db(query=query)
+        db_profile = _first(query, "db_profile") or "local_mirror"
+        limit = _query_int(query, "limit", default=50, minimum=1, maximum=200)
+        role = _first(query, "role") or ""
+        fetcher = self.semantic_concept_problem_fetcher or _default_semantic_concept_problem_fetcher
+        return fetcher(
+            db_name=db_name,
+            db_profile=db_profile,
+            concept_id=int(concept_id),
+            limit=limit,
+            role=role,
+        )
+
+    def _review_semantic_concept_problem_link(
+        self,
+        query: dict[str, list[str]],
+        payload: dict[str, Any],
+        concept_id: int,
+        problem_id: int,
+    ) -> dict[str, Any]:
+        db_name = _required_db(query=query, payload=payload)
+        db_profile = _first(query, "db_profile") or str(payload.get("db_profile") or "local_mirror")
+        role = str(payload.get("role") or _first(query, "role") or "concept").strip() or "concept"
+        status = str(payload.get("status") or payload.get("estado") or "").strip()
+        review_note = str(payload.get("review_note") or payload.get("note") or payload.get("nota") or "").strip()
+        reviewer = self.semantic_concept_link_reviewer or _default_semantic_concept_link_reviewer
+        return reviewer(
+            db_name=db_name,
+            db_profile=db_profile,
+            concept_id=int(concept_id),
+            problem_id=int(problem_id),
+            role=role,
+            status=status,
+            review_note=review_note,
+        )
+
+    def _review_problem_similarity(
+        self,
+        query: dict[str, list[str]],
+        payload: dict[str, Any],
+        problem_id: int,
+        similar_problem_id: int,
+    ) -> dict[str, Any]:
+        db_name = _required_db(query=query, payload=payload)
+        db_profile = _first(query, "db_profile") or str(payload.get("db_profile") or "local_mirror")
+        model_id = _first(query, "model_id") or str(payload.get("model_id") or "semantic_similarity_seed_v1")
+        status = str(payload.get("status") or payload.get("estado") or "").strip()
+        review_note = str(payload.get("review_note") or payload.get("note") or payload.get("nota") or "").strip()
+        reviewer = self.semantic_similarity_reviewer or _default_semantic_similarity_reviewer
+        return reviewer(
+            db_name=db_name,
+            db_profile=db_profile,
+            problem_id=int(problem_id),
+            similar_problem_id=int(similar_problem_id),
+            model_id=model_id,
+            status=status,
+            review_note=review_note,
+        )
+
     def _book_detail_payload(self, db_name: str, book_id: int) -> dict[str, Any]:
         book = self.controller.obtener_libro(db_name, book_id)
         if not book:
@@ -660,6 +922,23 @@ def _query_bool(query: dict[str, list[str]], key: str, *, default: bool = False)
     return default
 
 
+def _query_int(
+    query: dict[str, list[str]],
+    key: str,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    values = query.get(key) or []
+    raw = str(values[-1] if values else default).strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = int(default)
+    return max(int(minimum), min(int(maximum), value))
+
+
 def _required_db(*, query: dict[str, list[str]] | None = None, payload: dict[str, Any] | None = None) -> str:
     db_name = ""
     if payload is not None:
@@ -885,3 +1164,285 @@ def _default_open_url(url: str, title: str) -> None:
     from .web_launcher import _open_url
 
     _open_url(url, title)
+
+
+def _default_semantic_similarity_fetcher(
+    *,
+    db_name: str,
+    db_profile: str,
+    problem_id: int,
+    top_k: int,
+    model_id: str,
+    include_reverse: bool,
+) -> dict[str, Any]:
+    from database.connection import DatabaseManager
+    from modulos.semantic_similarity_review import fetch_problem_similarity_review
+
+    db = DatabaseManager.from_profile(db_profile or "local_mirror", db_name=db_name)
+    conn = db.get_connection(db.db_name)
+    try:
+        return fetch_problem_similarity_review(
+            conn,
+            problem_id=int(problem_id),
+            top_k=int(top_k),
+            model_id=str(model_id or "semantic_similarity_seed_v1"),
+            include_reverse=bool(include_reverse),
+        )
+    finally:
+        conn.close()
+
+
+def _default_semantic_status_fetcher(
+    *,
+    db_name: str,
+    db_profile: str,
+    model_id: str,
+) -> dict[str, Any]:
+    from database.connection import DatabaseManager
+    from modulos.semantic_profile_db import fetch_semantic_coverage_status
+
+    db = DatabaseManager.from_profile(db_profile or "local_mirror", db_name=db_name)
+    conn = db.get_connection(db.db_name)
+    try:
+        return fetch_semantic_coverage_status(
+            conn,
+            model_id=str(model_id or "semantic_similarity_seed_v1"),
+        )
+    finally:
+        conn.close()
+
+
+def _default_semantic_concept_fetcher(
+    *,
+    db_name: str,
+    db_profile: str,
+    limit: int,
+    query: str = "",
+    course: str = "",
+    status: str = "",
+) -> dict[str, Any]:
+    from database.connection import DatabaseManager
+    from modulos.semantic_profile_db import fetch_semantic_concept_catalog
+
+    db = DatabaseManager.from_profile(db_profile or "local_mirror", db_name=db_name)
+    conn = db.get_connection(db.db_name)
+    try:
+        return fetch_semantic_concept_catalog(
+            conn,
+            limit=int(limit or 100),
+            query=str(query or ""),
+            course=str(course or ""),
+            status=str(status or ""),
+        )
+    finally:
+        conn.close()
+
+
+def _default_semantic_concept_problem_fetcher(
+    *,
+    db_name: str,
+    db_profile: str,
+    concept_id: int,
+    limit: int,
+    role: str = "",
+) -> dict[str, Any]:
+    from database.connection import DatabaseManager
+    from modulos.semantic_profile_db import fetch_semantic_concept_linked_problems
+
+    db = DatabaseManager.from_profile(db_profile or "local_mirror", db_name=db_name)
+    conn = db.get_connection(db.db_name)
+    try:
+        return fetch_semantic_concept_linked_problems(
+            conn,
+            concept_id=int(concept_id),
+            limit=int(limit or 50),
+            role=str(role or ""),
+        )
+    finally:
+        conn.close()
+
+
+def _default_semantic_concept_link_reviewer(
+    *,
+    db_name: str,
+    db_profile: str,
+    concept_id: int,
+    problem_id: int,
+    role: str,
+    status: str,
+    review_note: str = "",
+) -> dict[str, Any]:
+    from database.connection import DatabaseManager
+    from modulos.semantic_profile_db import update_problem_concept_link_review
+
+    db = DatabaseManager.from_profile(db_profile or "local_mirror", db_name=db_name)
+    conn = db.get_connection(db.db_name)
+    try:
+        payload = update_problem_concept_link_review(
+            conn,
+            concept_id=int(concept_id),
+            problem_id=int(problem_id),
+            role=str(role or "concept"),
+            status=str(status or ""),
+            review_note=str(review_note or ""),
+        )
+        conn.commit()
+        return payload
+    finally:
+        conn.close()
+
+
+def _default_semantic_problem_concept_fetcher(
+    *,
+    db_name: str,
+    db_profile: str,
+    problem_id: int,
+    limit: int,
+    role: str = "",
+    status: str = "",
+) -> dict[str, Any]:
+    from database.connection import DatabaseManager
+    from modulos.semantic_profile_db import fetch_problem_concept_links
+
+    db = DatabaseManager.from_profile(db_profile or "local_mirror", db_name=db_name)
+    conn = db.get_connection(db.db_name)
+    try:
+        return fetch_problem_concept_links(
+            conn,
+            problem_id=int(problem_id),
+            limit=int(limit or 50),
+            role=str(role or ""),
+            status=str(status or ""),
+        )
+    finally:
+        conn.close()
+
+
+def _default_semantic_similarity_reviewer(
+    *,
+    db_name: str,
+    db_profile: str,
+    problem_id: int,
+    similar_problem_id: int,
+    model_id: str,
+    status: str,
+    review_note: str,
+) -> dict[str, Any]:
+    from database.connection import DatabaseManager
+    from modulos.semantic_profile_db import update_problem_similarity_edge_review
+
+    db = DatabaseManager.from_profile(db_profile or "local_mirror", db_name=db_name)
+    conn = db.get_connection(db.db_name)
+    try:
+        payload = update_problem_similarity_edge_review(
+            conn,
+            problem_id=int(problem_id),
+            similar_problem_id=int(similar_problem_id),
+            model_id=str(model_id or "semantic_similarity_seed_v1"),
+            status=str(status or ""),
+            review_note=str(review_note or ""),
+        )
+        conn.commit()
+        return payload
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def _default_semantic_practice_fetcher(
+    *,
+    db_name: str,
+    db_profile: str,
+    problem_id: int,
+    top_k: int,
+    target_count: int,
+    model_id: str,
+    include_reverse: bool,
+    include_rejected: bool,
+) -> dict[str, Any]:
+    from database.connection import DatabaseManager
+    from modulos.semantic_practice_recommendation import fetch_semantic_practice_draft
+
+    db = DatabaseManager.from_profile(db_profile or "local_mirror", db_name=db_name)
+    conn = db.get_connection(db.db_name)
+    try:
+        return fetch_semantic_practice_draft(
+            conn,
+            problem_id=int(problem_id),
+            top_k=int(top_k),
+            target_count=int(target_count),
+            model_id=str(model_id or "semantic_similarity_seed_v1"),
+            include_reverse=bool(include_reverse),
+            include_rejected=bool(include_rejected),
+        )
+    finally:
+        conn.close()
+
+
+def _default_semantic_practice_saver(
+    *,
+    db_name: str,
+    db_profile: str,
+    problem_id: int,
+    draft: dict[str, Any],
+    status: str,
+    review_note: str,
+) -> dict[str, Any]:
+    from database.connection import DatabaseManager
+    from modulos.semantic_profile_db import save_semantic_practice_draft
+
+    db = DatabaseManager.from_profile(db_profile or "local_mirror", db_name=db_name)
+    conn = db.get_connection(db.db_name)
+    try:
+        payload = save_semantic_practice_draft(
+            conn,
+            draft,
+            problem_id=int(problem_id),
+            status=str(status or "borrador"),
+            review_note=str(review_note or ""),
+        )
+        conn.commit()
+        return payload
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def _default_semantic_practice_lister(
+    *,
+    db_name: str,
+    db_profile: str,
+    problem_id: int,
+    limit: int,
+    status: str = "",
+) -> dict[str, Any]:
+    from database.connection import DatabaseManager
+    from modulos.semantic_profile_db import fetch_semantic_practice_draft_catalog, fetch_semantic_practice_drafts
+
+    db = DatabaseManager.from_profile(db_profile or "local_mirror", db_name=db_name)
+    conn = db.get_connection(db.db_name)
+    try:
+        if int(problem_id or 0) <= 0:
+            return fetch_semantic_practice_draft_catalog(
+                conn,
+                limit=int(limit or 50),
+                status=str(status or "revisado"),
+            )
+        return fetch_semantic_practice_drafts(
+            conn,
+            problem_id=int(problem_id),
+            limit=int(limit or 20),
+            status=str(status or ""),
+        )
+    finally:
+        conn.close()

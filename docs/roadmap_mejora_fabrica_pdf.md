@@ -38,6 +38,7 @@ El orden de prioridad actual es:
 - La BD final no sera solo un almacen: debe alimentar busqueda por similitud, estimacion de dificultad y recomendacion de ejercicios.
 - La descripcion semantica de un problema debe separar texto, grafico, solucion futura, habilidades y evidencias; no debe depender solo del enunciado renderizado.
 - Antes de construir fuerte la app del alumno, la BD debe poder responder: que conceptos trabaja este problema, que problemas se parecen y que dificultad tiene.
+- La similitud debe combinar enunciado, descriptor de grafico y solucion. En Geometria el grafico y la propiedad usada en la solucion pueden pesar mas que el texto del enunciado.
 
 ## Almacen y Biblioteca
 
@@ -481,6 +482,8 @@ La similitud no debe depender solo de palabras iguales. Debe considerar:
 - habilidades necesarias;
 - estructura del problema;
 - presencia o ausencia de grafico;
+- descripcion visible del grafico cuando exista;
+- propiedades y metodos usados en una o varias soluciones;
 - tipo de razonamiento;
 - nivel de dificultad.
 

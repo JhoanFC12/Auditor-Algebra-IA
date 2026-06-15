@@ -35,6 +35,46 @@ const state = {
     visibleInstancesLimit: 40,
     dataVersion: 0,
     computedCache: {},
+    similarity: {
+      problemId: "",
+      topK: 10,
+      includeReverse: false,
+      loading: false,
+      error: "",
+      result: null,
+      practiceLoading: false,
+      practiceError: "",
+      practiceDraft: null,
+      practiceSaveLoading: false,
+      practiceSaveError: "",
+      practiceSaved: null,
+      practiceDraftsLoading: false,
+      practiceDraftsError: "",
+      practiceDraftsLoaded: false,
+      savedPracticeDrafts: [],
+      savedPracticeDraftFilter: "all",
+      savedPracticeDraftScope: "problem",
+      conceptLoading: false,
+      conceptError: "",
+      conceptResult: null,
+    },
+    semanticStatus: {
+      loading: false,
+      error: "",
+      result: null,
+    },
+    concepts: {
+      query: "",
+      course: "",
+      status: "",
+      loading: false,
+      error: "",
+      result: null,
+      selectedConceptId: "",
+      problemLoading: false,
+      problemError: "",
+      problemResult: null,
+    },
   },
   stage: "pages",
   pdfPage: 1,
@@ -1463,6 +1503,17 @@ function renderLibraryFilters() {
         <span class="muted">Buscar</span>
         <input id="librarySearch" value="${escapeAttr(state.library.query)}" placeholder="Titulo, codigo, curso" />
       </label>
+      <div class="filter-stack" aria-label="Vistas de biblioteca">
+        <button class="filter-chip ${["books", "book"].includes(state.library.screen) ? "active" : ""}" data-library-screen="books" type="button">
+          <span>Libros</span><strong>LIB</strong>
+        </button>
+        <button class="filter-chip ${state.library.screen === "similarity" ? "active" : ""}" data-library-screen="similarity" type="button">
+          <span>Similitud</span><strong>SIM</strong>
+        </button>
+        <button class="filter-chip ${state.library.screen === "concepts" ? "active" : ""}" data-library-screen="concepts" type="button">
+          <span>Conceptos</span><strong>CON</strong>
+        </button>
+      </div>
       <div class="filter-stack" aria-label="Filtros por estado">
         ${[
           ["all", "Todos", counts.instances],
@@ -1483,6 +1534,8 @@ function renderLibraryFilters() {
 }
 
 function renderLibraryStage() {
+  if (state.library.screen === "similarity") return renderLibrarySimilarityStage();
+  if (state.library.screen === "concepts") return renderLibraryConceptsStage();
   if (state.library.screen === "book") return renderLibraryBookStage();
   return renderLibraryBooksStage();
 }
@@ -1672,6 +1725,625 @@ function renderBookDetail(book) {
   `;
 }
 
+function renderLibrarySimilarityStage() {
+  const similarity = state.library.similarity || {};
+  const result = similarity.result && typeof similarity.result === "object" ? similarity.result : null;
+  const rows = Array.isArray(result?.similar) ? result.similar : [];
+  return `
+    <div class="stage-header library-header">
+      <div>
+        <h2>Revision de similitud</h2>
+        <p class="muted">Consulta un problema de la base local y revisa candidatos parecidos por texto, figuras, solucion y conceptos.</p>
+      </div>
+      <div class="stage-actions">
+        <button id="semanticStatusRefresh" class="secondary" type="button">Actualizar estado</button>
+        <button id="similaritySubmitTop" class="secondary" type="button">Buscar similares</button>
+        <button id="practiceDraftBtn" class="primary" type="button">Crear borrador de practica</button>
+        <button id="savedPracticeDraftsBtn" class="secondary" type="button">Ver guardados</button>
+        <button id="reviewedPracticeCatalogBtn" class="secondary" type="button">Catalogo revisado</button>
+      </div>
+    </div>
+    ${renderSemanticStatusPanel()}
+    <form id="similarityForm" class="panel similarity-form">
+      <label>
+        <span class="muted">ID del problema</span>
+        <input id="similarityProblemId" inputmode="numeric" value="${escapeAttr(similarity.problemId || "")}" placeholder="Ej. 1250" />
+      </label>
+      <label>
+        <span class="muted">Resultados</span>
+        <input id="similarityTopK" type="number" min="1" max="100" value="${escapeAttr(similarity.topK || 10)}" />
+      </label>
+      <label class="check-field similarity-check">
+        <input id="similarityIncludeReverse" type="checkbox" ${similarity.includeReverse ? "checked" : ""} />
+        <span>Incluir relaciones inversas</span>
+      </label>
+      <button class="primary" type="submit" ${similarity.loading ? "disabled" : ""}>${similarity.loading ? "Buscando..." : "Buscar"}</button>
+    </form>
+    ${similarity.error ? `<div class="panel library-warning">${escapeHtml(similarity.error)}</div>` : ""}
+    ${similarity.practiceError ? `<div class="panel library-warning">${escapeHtml(similarity.practiceError)}</div>` : ""}
+    ${similarity.practiceSaveError ? `<div class="panel library-warning">${escapeHtml(similarity.practiceSaveError)}</div>` : ""}
+    ${similarity.practiceDraftsError ? `<div class="panel library-warning">${escapeHtml(similarity.practiceDraftsError)}</div>` : ""}
+    ${similarity.loading ? `<div class="panel muted">Consultando similitud semantica en la base local...</div>` : ""}
+    ${similarity.practiceLoading ? `<div class="panel muted">Preparando borrador de practica...</div>` : ""}
+    ${similarity.practiceSaveLoading ? `<div class="panel muted">Guardando borrador docente...</div>` : ""}
+    ${similarity.practiceDraftsLoading ? `<div class="panel muted">Leyendo borradores guardados...</div>` : ""}
+    ${similarity.practiceDraftsLoaded ? renderSavedPracticeDrafts(similarity.savedPracticeDrafts || []) : ""}
+    ${similarity.practiceDraft ? renderPracticeDraft(similarity.practiceDraft) : ""}
+    ${result ? renderSimilarityResults(result, rows) : `
+      <div class="empty-state library-empty similarity-empty">
+        <div>
+          <strong>Sin consulta todavia</strong>
+          <p>Ingresa el ID de un problema ya subido a la base de datos para ver sus vecinos semanticos.</p>
+        </div>
+      </div>
+    `}
+  `;
+}
+
+function renderLibraryConceptsStage() {
+  const conceptsState = state.library.concepts || {};
+  const result = conceptsState.result && typeof conceptsState.result === "object" ? conceptsState.result : null;
+  const rows = Array.isArray(result?.concepts) ? result.concepts : [];
+  return `
+    <div class="stage-header library-header">
+      <div>
+        <h2>Catalogo de conceptos</h2>
+        <p class="muted">Explora conceptos, propiedades y tecnicas enlazadas a problemas. Esta vista ayuda a revisar la base pedagogica antes de usarla con alumnos.</p>
+      </div>
+      <div class="stage-actions">
+        <button id="conceptsRefreshBtn" class="secondary" type="button">Actualizar catalogo</button>
+        <button id="semanticStatusRefresh" class="secondary" type="button">Actualizar estado</button>
+      </div>
+    </div>
+    ${renderSemanticStatusPanel()}
+    <form id="conceptCatalogForm" class="panel concept-filter-form">
+      <label>
+        <span class="muted">Buscar concepto</span>
+        <input id="conceptQuery" value="${escapeAttr(conceptsState.query || "")}" placeholder="Triangulos, conjuntos, despeje..." />
+      </label>
+      <label>
+        <span class="muted">Curso</span>
+        <input id="conceptCourse" value="${escapeAttr(conceptsState.course || "")}" placeholder="Geometria, Algebra..." />
+      </label>
+      <label>
+        <span class="muted">Estado</span>
+        <select id="conceptStatus">
+          <option value="" ${!conceptsState.status ? "selected" : ""}>Todos</option>
+          <option value="pendiente" ${conceptsState.status === "pendiente" ? "selected" : ""}>Pendiente</option>
+          <option value="activo" ${conceptsState.status === "activo" ? "selected" : ""}>Activo</option>
+          <option value="candidato" ${conceptsState.status === "candidato" ? "selected" : ""}>Candidato</option>
+          <option value="rechazado" ${conceptsState.status === "rechazado" ? "selected" : ""}>Rechazado</option>
+        </select>
+      </label>
+      <button class="primary" type="submit" ${conceptsState.loading ? "disabled" : ""}>${conceptsState.loading ? "Buscando..." : "Buscar"}</button>
+    </form>
+    ${conceptsState.error ? `<div class="panel library-warning">${escapeHtml(conceptsState.error)}</div>` : ""}
+    ${conceptsState.loading ? `<div class="panel muted">Leyendo catalogo de conceptos...</div>` : ""}
+    ${result ? renderConceptCatalog(result, rows) : `
+      <div class="empty-state library-empty concept-empty">
+        <div>
+          <strong>Catalogo sin consultar</strong>
+          <p>Actualiza el catalogo para ver conceptos enlazados a problemas desde el grafo semantico.</p>
+        </div>
+      </div>
+    `}
+  `;
+}
+
+function renderConceptCatalog(result, rows) {
+  const total = Number(result?.count || rows.length || 0);
+  return `
+    <section class="panel concept-catalog-panel" aria-label="Catalogo semantico de conceptos">
+      <div class="concept-catalog-head">
+        <div>
+          <span class="section-label">Grafo problema-concepto</span>
+          <strong>${total} concepto(s)</strong>
+          <p class="muted">Cada concepto conserva estado y conteo de problemas vinculados. Los enlaces siguen siendo revisables.</p>
+        </div>
+      </div>
+      <div class="concept-grid">
+        ${rows.length ? rows.map(renderConceptCard).join("") : `<div class="muted">No hay conceptos para los filtros actuales. Primero ejecuta el poblador de grafo o cambia el filtro.</div>`}
+      </div>
+      ${renderConceptProblemsPanel()}
+    </section>
+  `;
+}
+
+function renderConceptCard(concept) {
+  const labels = [concept?.curso, concept?.tema].filter(Boolean).join(" / ") || "Sin clasificacion";
+  const status = String(concept?.estado || "pendiente").trim().toLowerCase();
+  const selected = String(concept?.id || "") === String(state.library.concepts?.selectedConceptId || "");
+  return `
+    <article class="concept-card ${selected ? "active" : ""}">
+      <div class="concept-card-head">
+        <div>
+          <span class="section-label">${escapeHtml(concept?.tipo || "concepto")}</span>
+          <strong>${escapeHtml(concept?.nombre || "Concepto sin nombre")}</strong>
+        </div>
+        <span class="status-pill status-${status === "activo" ? "listo" : status === "rechazado" ? "error" : "pendiente"}">${escapeHtml(displayConceptStatus(status))}</span>
+      </div>
+      <p class="muted">${escapeHtml(labels)}</p>
+      <div class="concept-stats">
+        ${miniStat("Problemas", concept?.problem_count)}
+        ${miniStat("Revisados", concept?.reviewed_links)}
+      </div>
+      <div class="concept-card-actions">
+        <button class="secondary compact-action" type="button" data-load-concept-problems="${escapeAttr(concept?.id || "")}">Ver problemas</button>
+      </div>
+      <small class="muted concept-code">${escapeHtml(concept?.codigo || "")}</small>
+    </article>
+  `;
+}
+
+function renderConceptProblemsPanel() {
+  const conceptsState = state.library.concepts || {};
+  const result = conceptsState.problemResult && typeof conceptsState.problemResult === "object" ? conceptsState.problemResult : null;
+  const rows = Array.isArray(result?.problems) ? result.problems : [];
+  const concept = result?.concept || {};
+  if (conceptsState.problemError) {
+    return `<div class="panel library-warning">${escapeHtml(conceptsState.problemError)}</div>`;
+  }
+  if (conceptsState.problemLoading) {
+    return `<div class="panel muted">Leyendo problemas enlazados...</div>`;
+  }
+  if (!result) return "";
+  return `
+    <section class="concept-problems-panel" aria-label="Problemas enlazados al concepto">
+      <div class="concept-problems-head">
+        <div>
+          <span class="section-label">Problemas del concepto</span>
+          <strong>${escapeHtml(concept?.nombre || "Concepto seleccionado")}</strong>
+          <p class="muted">${Number(rows.length || 0)} problema(s) enlazados desde problema_concepto.</p>
+        </div>
+        <span class="status-pill status-pendiente">${escapeHtml(result?.role_filter || "all")}</span>
+      </div>
+      <div class="concept-problem-list">
+        ${rows.length ? rows.map(renderConceptProblemItem).join("") : `<div class="muted">Este concepto todavia no tiene problemas enlazados con estos filtros.</div>`}
+      </div>
+    </section>
+  `;
+}
+
+function renderConceptProblemItem(row) {
+  const link = row?.link || {};
+  const linkStatus = String(link.status || (link.reviewed ? "aceptado" : "sin_revisar")).trim().toLowerCase();
+  const conceptId = state.library.concepts?.selectedConceptId || "";
+  return `
+    <article class="concept-problem-item">
+      ${renderSimilarityProblem(row || {}, "Problema vinculado", { embedded: true })}
+      <div class="concept-link-meta">
+        <span>${escapeHtml(link.role || "concept")}</span>
+        <span>${escapeHtml(link.source || "problema_concepto")}</span>
+        <span>${formatSimilarityScore(link.confidence)}</span>
+        <span>${escapeHtml(displayConceptLinkStatus(linkStatus))}</span>
+      </div>
+      ${link.review_note ? `<p class="muted concept-review-note">${escapeHtml(link.review_note)}</p>` : ""}
+      <div class="concept-problem-actions">
+        <button class="secondary compact-action" type="button" data-concept-problem-similarity="${escapeAttr(row?.id || "")}">Buscar similares</button>
+      </div>
+      <div class="concept-link-review-actions" aria-label="Revision de relacion problema-concepto">
+        <button type="button" data-concept-link-review="${escapeAttr(row?.id || "")}" data-concept-id="${escapeAttr(conceptId)}" data-concept-link-role="${escapeAttr(link.role || "concept")}" data-concept-link-status="aceptado">Correcto</button>
+        <button type="button" data-concept-link-review="${escapeAttr(row?.id || "")}" data-concept-id="${escapeAttr(conceptId)}" data-concept-link-role="${escapeAttr(link.role || "concept")}" data-concept-link-status="dudoso">Dudoso</button>
+        <button type="button" data-concept-link-review="${escapeAttr(row?.id || "")}" data-concept-id="${escapeAttr(conceptId)}" data-concept-link-role="${escapeAttr(link.role || "concept")}" data-concept-link-status="rechazado">No corresponde</button>
+      </div>
+    </article>
+  `;
+}
+
+function displayConceptLinkStatus(value) {
+  return {
+    aceptado: "Relacion validada",
+    rechazado: "No corresponde",
+    dudoso: "Dudoso",
+    sin_revisar: "Sin revisar",
+  }[String(value || "").trim().toLowerCase()] || displayStatus(value || "sin_revisar");
+}
+
+function displayConceptStatus(value) {
+  return {
+    pendiente: "Pendiente",
+    activo: "Activo",
+    candidato: "Candidato",
+    rechazado: "Rechazado",
+  }[String(value || "").trim().toLowerCase()] || displayStatus(value || "pendiente");
+}
+
+function renderSavedPracticeDrafts(rows) {
+  const filter = state.library.similarity?.savedPracticeDraftFilter || "all";
+  const scope = state.library.similarity?.savedPracticeDraftScope || "problem";
+  const orderedRows = sortPracticeDraftRows(rows);
+  const visibleRows = filter === "all"
+    ? orderedRows
+    : orderedRows.filter((row) => String(row?.status || "borrador").trim().toLowerCase() === filter);
+  const counts = practiceDraftStatusCounts(rows);
+  return `
+    <section class="panel saved-practice-panel" aria-label="Borradores de practica guardados">
+      <div class="saved-practice-head">
+        <div>
+          <span class="section-label">Borradores guardados</span>
+          <strong>${scope === "catalog" ? "Catalogo revisado" : `${Number(rows.length || 0)} borrador(es)`}</strong>
+        </div>
+        <div class="saved-practice-filters" aria-label="Filtro de borradores guardados">
+          ${renderPracticeDraftFilterChip("all", "Todos", counts.all, filter)}
+          ${renderPracticeDraftFilterChip("revisado", "Revisados", counts.revisado, filter)}
+          ${renderPracticeDraftFilterChip("borrador", "Borradores", counts.borrador, filter)}
+          ${renderPracticeDraftFilterChip("descartado", "Descartados", counts.descartado, filter)}
+        </div>
+      </div>
+      <div class="saved-practice-list">
+        ${visibleRows.length ? visibleRows.map((row) => renderSavedPracticeDraftItem(row, row.__sourceIndex)).join("") : `<div class="muted">No hay borradores guardados con este filtro.</div>`}
+      </div>
+    </section>
+  `;
+}
+
+function renderPracticeDraftFilterChip(value, label, count, activeValue) {
+  const active = value === activeValue ? "active" : "";
+  return `
+    <button class="filter-chip compact ${active}" type="button" data-practice-draft-filter="${escapeAttr(value)}">
+      <span>${escapeHtml(label)}</span><strong>${Number(count || 0)}</strong>
+    </button>
+  `;
+}
+
+function practiceDraftStatusCounts(rows) {
+  const counts = { all: 0, revisado: 0, borrador: 0, descartado: 0 };
+  (rows || []).forEach((row) => {
+    const status = String(row?.status || "borrador").trim().toLowerCase();
+    counts.all += 1;
+    if (Object.prototype.hasOwnProperty.call(counts, status)) counts[status] += 1;
+  });
+  return counts;
+}
+
+function sortPracticeDraftRows(rows) {
+  const rank = { revisado: 0, borrador: 1, descartado: 2 };
+  return (rows || [])
+    .map((row, index) => ({ ...row, __sourceIndex: index }))
+    .sort((a, b) => {
+      const aStatus = String(a?.status || "borrador").trim().toLowerCase();
+      const bStatus = String(b?.status || "borrador").trim().toLowerCase();
+      const byStatus = (rank[aStatus] ?? 3) - (rank[bStatus] ?? 3);
+      if (byStatus) return byStatus;
+      return String(b?.updated_at || b?.created_at || "").localeCompare(String(a?.updated_at || a?.created_at || ""));
+    });
+}
+
+function renderSavedPracticeDraftItem(row, index) {
+  const title = row?.title || row?.draft?.title || "Practica guardada";
+  const updated = row?.updated_at || row?.created_at || "";
+  const status = String(row?.status || "borrador").trim().toLowerCase();
+  const statusClass = status === "revisado" ? "listo" : (status === "descartado" ? "error" : "pendiente");
+  const seed = Number(row?.seed_problem_id || row?.draft?.seed_problem_id || 0);
+  return `
+    <article class="saved-practice-item saved-practice-${escapeAttr(status)}">
+      <div>
+        <strong>${escapeHtml(title)}</strong>
+        <small class="muted">${seed ? `#${seed} - ` : ""}${Number(row?.recommendation_count || 0)} item(s)${updated ? ` - ${escapeHtml(updated)}` : ""}</small>
+      </div>
+      <div class="saved-practice-actions">
+        <span class="status-pill status-${statusClass}">${escapeHtml(displayPracticeDraftStatus(status))}</span>
+        <button class="secondary" type="button" data-load-practice-draft="${Number(index)}">Cargar</button>
+        <button class="secondary" type="button" data-review-practice-draft="${Number(index)}" data-review-practice-status="revisado">Revisado</button>
+        <button class="secondary danger-soft" type="button" data-review-practice-draft="${Number(index)}" data-review-practice-status="descartado">Descartar</button>
+      </div>
+    </article>
+  `;
+}
+
+function displayPracticeDraftStatus(value) {
+  return {
+    borrador: "Borrador",
+    revisado: "Revisado",
+    descartado: "Descartado",
+  }[String(value || "").trim().toLowerCase()] || "Borrador";
+}
+
+function renderPracticeDraft(draft) {
+  const rows = Array.isArray(draft?.recommendations) ? draft.recommendations : [];
+  const latex = String(draft?.practice_latex || "").trim();
+  return `
+    <section class="panel practice-draft-panel" aria-label="Borrador de practica recomendada">
+      <div class="practice-draft-head">
+        <div>
+          <span class="section-label">Borrador de practica</span>
+          <h3>${escapeHtml(draft?.title || "Practica de refuerzo")}</h3>
+          <p class="muted">${escapeHtml(draft?.objective || "Secuencia sugerida desde problemas similares.")}</p>
+        </div>
+        <div class="practice-draft-actions">
+          <span class="similarity-score">${Number(draft?.count || rows.length || 0)} item(s)</span>
+          <button id="savePracticeDraftBtn" class="secondary" type="button">Guardar borrador</button>
+        </div>
+      </div>
+      ${state.library.similarity?.practiceSaved ? `
+        <div class="practice-save-note">
+          Guardado en semantic_practice_drafts como ${escapeHtml(state.library.similarity.practiceSaved.status || "borrador")}.
+        </div>
+      ` : ""}
+      <div class="practice-draft-list">
+        ${rows.length ? rows.map(renderPracticeDraftItem).join("") : `<div class="muted">No hay problemas suficientes para armar el borrador.</div>`}
+      </div>
+      ${latex ? `
+        <details class="practice-latex-export" open>
+          <summary>Salida LaTeX para Modulo 7</summary>
+          <div class="practice-latex-actions">
+            <button id="copyPracticeLatexBtn" class="secondary" type="button">Copiar LaTeX</button>
+          </div>
+          <textarea id="practiceLatexText" readonly rows="10">${escapeHtml(latex)}</textarea>
+        </details>
+      ` : ""}
+    </section>
+  `;
+}
+
+function renderPracticeDraftItem(item) {
+  const problem = item?.problem || {};
+  const labels = [problem.curso, problem.tema, problem.subtema].filter(Boolean).join(" / ") || "Sin clasificacion";
+  return `
+    <article class="practice-draft-item">
+      <div class="practice-draft-item-head">
+        <strong>${Number(item?.order || 0)}. #${escapeHtml(item?.problem_id || problem.id || "-")}</strong>
+        <span>${escapeHtml(displayPracticeRole(item?.role))}</span>
+      </div>
+      <small class="muted">${escapeHtml(labels)} - ${formatSimilarityScore(item?.score)}</small>
+      <div class="similarity-latex math-preview">${formatPreviewText(problem.enunciado_latex || "")}</div>
+      ${item?.reason ? `<small class="muted">${escapeHtml(item.reason)}</small>` : ""}
+    </article>
+  `;
+}
+
+function displayPracticeRole(value) {
+  return {
+    refuerzo_validado: "Validado",
+    refuerzo_directo: "Refuerzo directo",
+    practica_guiada: "Practica guiada",
+    segunda_revision: "Revisar",
+    extension: "Extension",
+  }[value] || String(value || "Sugerido").replaceAll("_", " ");
+}
+
+function renderSemanticStatusPanel() {
+  const status = state.library.semanticStatus || {};
+  const result = status.result && typeof status.result === "object" ? status.result : null;
+  if (!result && !status.loading && !status.error) {
+    return `
+      <section class="panel semantic-status-panel">
+        <div>
+          <span class="section-label">Base semantica</span>
+          <strong>Estado sin consultar</strong>
+          <p class="muted">Actualiza el estado para ver perfiles, figuras, soluciones y relaciones calculadas.</p>
+        </div>
+      </section>
+    `;
+  }
+  if (status.error) {
+    return `<div class="panel library-warning">Base semantica: ${escapeHtml(status.error)}</div>`;
+  }
+  if (status.loading && !result) {
+    return `<div class="panel muted">Leyendo estado de la base semantica...</div>`;
+  }
+  const counts = result?.counts || {};
+  const coverage = result?.coverage || {};
+  return `
+    <section class="panel semantic-status-panel">
+      <div class="semantic-status-head">
+        <div>
+          <span class="section-label">Base semantica</span>
+          <strong>${escapeHtml(displaySemanticReadiness(result?.readiness))}</strong>
+          <p class="muted">${escapeHtml(result?.next_step || "")}</p>
+        </div>
+        <span class="similarity-score">${Number(counts.problems || 0)} problema(s)</span>
+      </div>
+      <div class="semantic-status-grid">
+        ${semanticCoverageTile("Perfiles", coverage.problem_profiles, counts.problem_profile_rows)}
+        ${semanticCoverageTile("Figuras", coverage.figure_profile_problems, counts.figure_profile_rows)}
+        ${semanticCoverageTile("Soluciones", coverage.solution_profile_problems, counts.solution_profile_rows)}
+        ${semanticCoverageTile("Conceptos", coverage.concept_link_problems, counts.concept_links)}
+        ${semanticCoverageTile("Embeddings", coverage.embedding_problems, counts.embedding_rows)}
+        ${semanticCoverageTile("Relaciones", coverage.similarity_source_problems, counts.similarity_edges)}
+      </div>
+    </section>
+  `;
+}
+
+function semanticCoverageTile(label, coverage, rows) {
+  const data = coverage && typeof coverage === "object" ? coverage : {};
+  const percent = Math.max(0, Math.min(100, Number(data.percent || 0)));
+  return `
+    <div class="semantic-coverage-tile">
+      <div>
+        <strong>${escapeHtml(label)}</strong>
+        <span>${Number(data.done || 0)} de ${Number(data.total || 0)}</span>
+      </div>
+      <div class="semantic-progress" aria-label="${escapeAttr(`${label}: ${percent}%`)}">
+        <span style="width:${percent}%"></span>
+      </div>
+      <small class="muted">${Number(rows || 0)} fila(s)</small>
+    </div>
+  `;
+}
+
+function displaySemanticReadiness(value) {
+  return {
+    empty: "Sin problemas base",
+    profiles_pending: "Faltan perfiles",
+    concept_graph_pending: "Falta grafo de conceptos",
+    edges_pending: "Faltan relaciones",
+    review_ready: "Lista para revision",
+  }[value] || "Estado semantico";
+}
+
+function renderSimilarityResults(result, rows) {
+  const message = String(result?.message || "").trim();
+  return `
+    <section class="similarity-layout" aria-label="Resultados de similitud">
+      <div class="similarity-problem-column">
+        ${renderSimilarityProblem(result?.problem || {}, "Problema base")}
+        ${renderSimilarityProblemConceptsPanel()}
+        <div class="panel similarity-meta">
+          <span class="section-label">Modelo</span>
+          <strong>${escapeHtml(result?.model_id || "semantic_similarity_seed_v1")}</strong>
+          <span class="muted">${Number(rows.length || 0)} resultado(s) encontrados.</span>
+        </div>
+      </div>
+      <div class="similarity-results-column">
+        ${message ? `<div class="panel muted">${escapeHtml(message)}</div>` : ""}
+        ${rows.length ? rows.map((row, index) => renderSimilarityMatch(row, index)).join("") : `
+          <div class="panel muted">No hay relaciones calculadas para este problema todavia.</div>
+        `}
+      </div>
+    </section>
+  `;
+}
+
+function renderSimilarityProblemConceptsPanel() {
+  const similarity = state.library.similarity || {};
+  const result = similarity.conceptResult && typeof similarity.conceptResult === "object" ? similarity.conceptResult : null;
+  const rows = Array.isArray(result?.concepts) ? result.concepts : [];
+  if (similarity.conceptError) {
+    return `<div class="panel library-warning">Conceptos del problema: ${escapeHtml(similarity.conceptError)}</div>`;
+  }
+  if (similarity.conceptLoading) {
+    return `<div class="panel muted">Leyendo conceptos del problema...</div>`;
+  }
+  if (!result) {
+    return `
+      <section class="panel problem-concepts-panel">
+        <span class="section-label">Conceptos del problema</span>
+        <p class="muted">Busca similares para cargar los conceptos vinculados al problema base.</p>
+      </section>
+    `;
+  }
+  return `
+    <section class="panel problem-concepts-panel" aria-label="Conceptos vinculados al problema">
+      <div class="problem-concepts-head">
+        <div>
+          <span class="section-label">Conceptos del problema</span>
+          <strong>${Number(rows.length || 0)} enlace(s)</strong>
+        </div>
+        <button class="secondary compact-action" type="button" data-refresh-problem-concepts="${escapeAttr(result.problem_id || "")}">Actualizar</button>
+      </div>
+      <div class="problem-concept-list">
+        ${rows.length ? rows.map(renderSimilarityProblemConceptItem).join("") : `<div class="muted">Este problema todavia no tiene conceptos enlazados.</div>`}
+      </div>
+    </section>
+  `;
+}
+
+function renderSimilarityProblemConceptItem(row) {
+  const concept = row?.concept || {};
+  const link = row?.link || {};
+  const label = [concept.curso, concept.tema].filter(Boolean).join(" / ") || "Sin clasificacion";
+  return `
+    <article class="problem-concept-item">
+      <div>
+        <span class="section-label">${escapeHtml(concept.tipo || link.role || "concepto")}</span>
+        <strong>${escapeHtml(concept.nombre || "Concepto sin nombre")}</strong>
+        <small class="muted">${escapeHtml(label)}</small>
+      </div>
+      <div class="concept-link-meta">
+        <span>${escapeHtml(displayConceptLinkStatus(link.status || (link.reviewed ? "aceptado" : "sin_revisar")))}</span>
+        <span>${formatSimilarityScore(link.confidence)}</span>
+        <span>${escapeHtml(link.source || "problema_concepto")}</span>
+      </div>
+      <button class="secondary compact-action" type="button" data-open-concept-from-problem="${escapeAttr(concept.id || "")}">Ver concepto</button>
+    </article>
+  `;
+}
+
+function renderSimilarityProblem(problem, title, options = {}) {
+  const labels = [problem?.curso, problem?.tema, problem?.subtema].filter(Boolean).join(" / ") || "Sin clasificacion";
+  const embedded = Boolean(options.embedded);
+  return `
+    <article class="${embedded ? "similarity-problem similarity-problem-embedded" : "panel similarity-problem"}">
+      <div class="similarity-problem-head">
+        <span class="section-label">${escapeHtml(title)}</span>
+        <strong>#${escapeHtml(problem?.id || "-")}</strong>
+      </div>
+      <div class="similarity-tags">
+        <span>${escapeHtml(labels)}</span>
+        ${problem?.respuesta ? `<span>Clave: ${escapeHtml(problem.respuesta)}</span>` : ""}
+      </div>
+      <div class="similarity-latex math-preview">${formatPreviewText(problem?.enunciado_latex || "")}</div>
+      ${problem?.archivo_origen ? `<div class="muted similarity-origin">${escapeHtml(problem.archivo_origen)}</div>` : ""}
+    </article>
+  `;
+}
+
+function renderSimilarityMatch(row, index) {
+  const problem = row?.problem || {};
+  const edgeProblemId = Number(row?.edge_problem_id || row?.source_problem_id || state.library.similarity?.result?.problem_id || 0);
+  const edgeSimilarId = Number(row?.edge_similar_problem_id || row?.target_problem_id || problem.id || 0);
+  return `
+    <article class="panel similarity-match">
+      <div class="similarity-match-head">
+        <div>
+          <span class="section-label">Similar ${index + 1}</span>
+          <strong>#${escapeHtml(problem.id || row?.target_problem_id || "-")}</strong>
+        </div>
+        <span class="similarity-score">${formatSimilarityScore(row?.score)}</span>
+      </div>
+      ${renderSimilarityProblem(problem, "Candidato", { embedded: true })}
+      <div class="similarity-review-state">
+        <span class="status-pill status-${row?.human_verified ? "listo" : "pendiente"}">${escapeHtml(displaySimilarityReviewStatus(row?.status, row?.human_verified))}</span>
+        ${row?.review_note ? `<span class="muted">${escapeHtml(row.review_note)}</span>` : ""}
+      </div>
+      ${row?.reason ? `<p class="muted similarity-reason">${escapeHtml(row.reason)}</p>` : ""}
+      ${renderSimilarityComponents(row?.score_components || {})}
+      <div class="similarity-review-actions" aria-label="Revision humana de similitud">
+        <button data-sim-review-source="${escapeAttr(edgeProblemId)}" data-sim-review-target="${escapeAttr(edgeSimilarId)}" data-sim-review-status="aceptado" type="button">Si se parece</button>
+        <button data-sim-review-source="${escapeAttr(edgeProblemId)}" data-sim-review-target="${escapeAttr(edgeSimilarId)}" data-sim-review-status="rechazado" type="button">No se parece</button>
+        <button data-sim-review-source="${escapeAttr(edgeProblemId)}" data-sim-review-target="${escapeAttr(edgeSimilarId)}" data-sim-review-status="dudoso" type="button">Dudoso</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderSimilarityComponents(components) {
+  const entries = Object.entries(components || {})
+    .filter(([, value]) => Number.isFinite(Number(value)))
+    .sort((a, b) => Number(b[1]) - Number(a[1]));
+  if (!entries.length) return "";
+  return `
+    <div class="similarity-components" aria-label="Componentes de similitud">
+      ${entries.map(([key, value]) => `
+        <span>
+          <b>${escapeHtml(displaySimilarityComponent(key))}</b>
+          <em>${formatSimilarityScore(value)}</em>
+        </span>
+      `).join("")}
+    </div>
+  `;
+}
+
+function displaySimilarityComponent(key) {
+  return {
+    statement: "Enunciado",
+    figure: "Figura",
+    solution: "Solucion",
+    concepts: "Conceptos",
+    canonical_type: "Tipo",
+    difficulty: "Dificultad",
+  }[key] || String(key || "").replaceAll("_", " ");
+}
+
+function formatSimilarityScore(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "-";
+  return `${Math.round(number * 100)}%`;
+}
+
+function displaySimilarityReviewStatus(status, verified) {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (!verified && (!normalized || normalized === "sin_revisar")) return "Sin revisar";
+  return {
+    aceptado: "Validado similar",
+    rechazado: "Rechazado",
+    dudoso: "Dudoso",
+    sin_revisar: "Sin revisar",
+  }[normalized] || displayStatus(normalized || "pendiente");
+}
+
 function windowLibraryRows(rows, limit, selectedId, fallbackLimit) {
   const items = Array.isArray(rows) ? rows : [];
   const baseLimit = Math.max(1, Number(fallbackLimit || 1));
@@ -1744,6 +2416,10 @@ function renderLibraryInspector() {
   const book = selectedLibraryBook();
   const instance = selectedLibraryInstance();
   const counts = libraryCounts();
+  const similarity = state.library.similarity || {};
+  const similarityResult = similarity.result && typeof similarity.result === "object" ? similarity.result : null;
+  const conceptState = state.library.concepts || {};
+  const conceptResult = conceptState.result && typeof conceptState.result === "object" ? conceptState.result : null;
   return `
     <div class="panel">
       <h2>Estados</h2>
@@ -1754,6 +2430,28 @@ function renderLibraryInspector() {
         <div class="metric"><span class="metric-label">Llenas</span><strong>${counts.llena}</strong></div>
       </div>
     </div>
+    ${state.library.screen === "similarity" ? `
+      <div class="panel">
+        <h2>Similitud</h2>
+        <div id="inspector" class="inspector-body">
+          <div class="inspector-line"><strong>Base</strong><span>${escapeHtml(state.library.selectedDb || "-")}</span></div>
+          <div class="inspector-line"><strong>Problema</strong><span>${escapeHtml(similarity.problemId || "Sin consulta")}</span></div>
+          <div class="inspector-line"><strong>Resultados</strong><span>${escapeHtml(similarityResult ? String(similarityResult.count || 0) : "-")}</span></div>
+          <div class="inspector-line"><strong>Modelo</strong><span>${escapeHtml(similarityResult?.model_id || "semantic_similarity_seed_v1")}</span></div>
+        </div>
+      </div>
+    ` : state.library.screen === "concepts" ? `
+      <div class="panel">
+        <h2>Conceptos</h2>
+        <div id="inspector" class="inspector-body">
+          <div class="inspector-line"><strong>Base</strong><span>${escapeHtml(state.library.selectedDb || "-")}</span></div>
+          <div class="inspector-line"><strong>Resultados</strong><span>${escapeHtml(conceptResult ? String(conceptResult.count || 0) : "-")}</span></div>
+          <div class="inspector-line"><strong>Busqueda</strong><span>${escapeHtml(conceptState.query || "Sin filtro")}</span></div>
+          <div class="inspector-line"><strong>Curso</strong><span>${escapeHtml(conceptState.course || "Todos")}</span></div>
+          <div class="inspector-line"><strong>Estado</strong><span>${escapeHtml(conceptState.status || "Todos")}</span></div>
+        </div>
+      </div>
+    ` : `
     <div class="panel">
       <h2>Seleccion</h2>
       <div id="inspector" class="inspector-body">
@@ -1770,6 +2468,7 @@ function renderLibraryInspector() {
         ` : `<span class="muted">Sin libro seleccionado.</span>`}
       </div>
     </div>
+    `}
   `;
 }
 
@@ -1792,6 +2491,8 @@ function bindLibrarySidebarEvents() {
       state.library.selectedBookId = "";
       state.library.selectedInstanceId = "";
       state.library.screen = "books";
+      state.library.semanticStatus = { loading: false, error: "", result: null };
+      state.library.concepts = { ...state.library.concepts, loading: false, error: "", result: null };
       loadLibrary("Base de datos cambiada.").catch((err) => setStatus(`Error de biblioteca: ${err.message}`));
     };
   }
@@ -1801,6 +2502,29 @@ function bindLibrarySidebarEvents() {
     state.library.showInstanceForm = false;
     scheduleLibrarySearchRender();
   };
+  document.querySelectorAll("[data-library-screen]").forEach((btn) => {
+    btn.onclick = () => {
+      cancelLibrarySearchRender();
+      const screen = String(btn.dataset.libraryScreen || "books");
+      state.library.screen = ["similarity", "concepts"].includes(screen) ? screen : "books";
+      state.library.showBookForm = false;
+      state.library.showInstanceForm = false;
+      state.library.editingBookId = "";
+      state.library.editingInstanceId = "";
+      renderLibrary();
+      if (state.library.screen === "similarity" && !state.library.semanticStatus.result) {
+        loadSemanticStatus({ silent: true }).catch((err) => setStatus(`Error de estado semantico: ${err.message}`));
+      }
+      if (state.library.screen === "concepts") {
+        if (!state.library.semanticStatus.result) {
+          loadSemanticStatus({ silent: true }).catch((err) => setStatus(`Error de estado semantico: ${err.message}`));
+        }
+        if (!state.library.concepts.result) {
+          loadConceptCatalog({ silent: true }).catch((err) => setStatus(`Error de conceptos: ${err.message}`));
+        }
+      }
+    };
+  });
   document.querySelectorAll("[data-library-status]").forEach((btn) => {
     btn.onclick = () => {
       cancelLibrarySearchRender();
@@ -1840,6 +2564,8 @@ function cancelLibrarySearchRender() {
 }
 
 function bindLibraryContentEvents() {
+  bindSimilarityEvents();
+  bindConceptEvents();
   if ($("loadMoreBooks")) $("loadMoreBooks").onclick = () => {
     state.library.visibleBooksLimit = Math.max(state.library.visibleBooksLimit || 0, LIBRARY_BOOKS_INITIAL_LIMIT) + LIBRARY_BOOKS_LIMIT_STEP;
     renderLibraryContent();
@@ -1937,9 +2663,682 @@ function bindLibraryContentEvents() {
   };
 }
 
+function bindSimilarityEvents() {
+  const form = $("similarityForm");
+  const submitTop = $("similaritySubmitTop");
+  const refreshStatus = $("semanticStatusRefresh");
+  const practiceDraftBtn = $("practiceDraftBtn");
+  const savedPracticeDraftsBtn = $("savedPracticeDraftsBtn");
+  const reviewedPracticeCatalogBtn = $("reviewedPracticeCatalogBtn");
+  const copyPracticeLatexBtn = $("copyPracticeLatexBtn");
+  const savePracticeDraftBtn = $("savePracticeDraftBtn");
+  const problemInput = $("similarityProblemId");
+  const topInput = $("similarityTopK");
+  const reverseInput = $("similarityIncludeReverse");
+  if (problemInput) {
+    problemInput.oninput = (event) => {
+      state.library.similarity.problemId = event.target.value;
+    };
+  }
+  if (topInput) {
+    topInput.oninput = (event) => {
+      const value = Math.max(1, Math.min(100, Number(event.target.value || 10)));
+      state.library.similarity.topK = Number.isFinite(value) ? value : 10;
+    };
+  }
+  if (reverseInput) {
+    reverseInput.onchange = (event) => {
+      state.library.similarity.includeReverse = Boolean(event.target.checked);
+    };
+  }
+  if (form) {
+    form.onsubmit = (event) => {
+      event.preventDefault();
+      loadProblemSimilarity().catch((err) => setStatus(`Error de similitud: ${err.message}`));
+    };
+  }
+  if (submitTop) {
+    submitTop.onclick = () => loadProblemSimilarity().catch((err) => setStatus(`Error de similitud: ${err.message}`));
+  }
+  if (refreshStatus) {
+    refreshStatus.onclick = () => loadSemanticStatus().catch((err) => setStatus(`Error de estado semantico: ${err.message}`));
+  }
+  if (practiceDraftBtn) {
+    practiceDraftBtn.onclick = () => loadPracticeDraft().catch((err) => setStatus(`Error creando borrador: ${err.message}`));
+  }
+  if (savedPracticeDraftsBtn) {
+    savedPracticeDraftsBtn.onclick = () => loadSavedPracticeDrafts().catch((err) => setStatus(`Error leyendo borradores: ${err.message}`));
+  }
+  if (reviewedPracticeCatalogBtn) {
+    reviewedPracticeCatalogBtn.onclick = () => loadReviewedPracticeCatalog().catch((err) => setStatus(`Error leyendo catalogo: ${err.message}`));
+  }
+  if (copyPracticeLatexBtn) {
+    copyPracticeLatexBtn.onclick = () => copyPracticeDraftLatex().catch((err) => setStatus(`Error copiando LaTeX: ${err.message}`));
+  }
+  if (savePracticeDraftBtn) {
+    savePracticeDraftBtn.onclick = () => savePracticeDraft().catch((err) => setStatus(`Error guardando borrador: ${err.message}`));
+  }
+  document.querySelectorAll("[data-load-practice-draft]").forEach((btn) => {
+    btn.onclick = () => loadSavedPracticeDraft(Number(btn.dataset.loadPracticeDraft || -1));
+  });
+  document.querySelectorAll("[data-practice-draft-filter]").forEach((btn) => {
+    btn.onclick = () => {
+      state.library.similarity.savedPracticeDraftFilter = btn.dataset.practiceDraftFilter || "all";
+      renderLibraryContent();
+    };
+  });
+  document.querySelectorAll("[data-review-practice-draft]").forEach((btn) => {
+    btn.onclick = () => reviewSavedPracticeDraft(
+      Number(btn.dataset.reviewPracticeDraft || -1),
+      btn.dataset.reviewPracticeStatus,
+    ).catch((err) => setStatus(`Error revisando borrador: ${err.message}`));
+  });
+  document.querySelectorAll("[data-sim-review-status]").forEach((btn) => {
+    btn.onclick = () => {
+      reviewSimilarityEdge(
+        btn.dataset.simReviewSource,
+        btn.dataset.simReviewTarget,
+        btn.dataset.simReviewStatus,
+      ).catch((err) => setStatus(`Error guardando revision: ${err.message}`));
+    };
+  });
+  document.querySelectorAll("[data-refresh-problem-concepts]").forEach((btn) => {
+    btn.onclick = () => loadSimilarityProblemConcepts(btn.dataset.refreshProblemConcepts)
+      .catch((err) => setStatus(`Error leyendo conceptos del problema: ${err.message}`));
+  });
+  document.querySelectorAll("[data-open-concept-from-problem]").forEach((btn) => {
+    btn.onclick = () => {
+      const conceptId = String(btn.dataset.openConceptFromProblem || "").trim();
+      state.library.screen = "concepts";
+      state.library.concepts.selectedConceptId = conceptId;
+      renderLibraryContent();
+      if (!state.library.concepts.result) {
+        loadConceptCatalog({ silent: true }).catch((err) => setStatus(`Error de conceptos: ${err.message}`));
+      }
+      if (conceptId) {
+        loadConceptProblems(conceptId).catch((err) => setStatus(`Error de problemas por concepto: ${err.message}`));
+      }
+    };
+  });
+}
+
+function bindConceptEvents() {
+  const form = $("conceptCatalogForm");
+  const refreshBtn = $("conceptsRefreshBtn");
+  const queryInput = $("conceptQuery");
+  const courseInput = $("conceptCourse");
+  const statusInput = $("conceptStatus");
+  if (queryInput) {
+    queryInput.oninput = (event) => {
+      state.library.concepts.query = event.target.value;
+    };
+  }
+  if (courseInput) {
+    courseInput.oninput = (event) => {
+      state.library.concepts.course = event.target.value;
+    };
+  }
+  if (statusInput) {
+    statusInput.onchange = (event) => {
+      state.library.concepts.status = event.target.value;
+    };
+  }
+  if (form) {
+    form.onsubmit = (event) => {
+      event.preventDefault();
+      loadConceptCatalog().catch((err) => setStatus(`Error de conceptos: ${err.message}`));
+    };
+  }
+  if (refreshBtn) {
+    refreshBtn.onclick = () => loadConceptCatalog().catch((err) => setStatus(`Error de conceptos: ${err.message}`));
+  }
+  document.querySelectorAll("[data-load-concept-problems]").forEach((btn) => {
+    btn.onclick = () => loadConceptProblems(btn.dataset.loadConceptProblems)
+      .catch((err) => setStatus(`Error de problemas por concepto: ${err.message}`));
+  });
+  document.querySelectorAll("[data-concept-problem-similarity]").forEach((btn) => {
+    btn.onclick = () => {
+      const problemId = String(btn.dataset.conceptProblemSimilarity || "").trim();
+      state.library.screen = "similarity";
+      state.library.similarity.problemId = problemId;
+      renderLibraryContent();
+      loadProblemSimilarity().catch((err) => setStatus(`Error de similitud: ${err.message}`));
+    };
+  });
+  document.querySelectorAll("[data-concept-link-review]").forEach((btn) => {
+    btn.onclick = () => reviewConceptLink(
+      btn.dataset.conceptId,
+      btn.dataset.conceptLinkReview,
+      btn.dataset.conceptLinkRole,
+      btn.dataset.conceptLinkStatus,
+    ).catch((err) => setStatus(`Error revisando relacion: ${err.message}`));
+  });
+}
+
+async function loadSemanticStatus({ silent = false } = {}) {
+  const status = state.library.semanticStatus;
+  status.error = "";
+  if (!state.library.selectedDb) {
+    status.error = "Selecciona una base de datos antes de consultar el estado semantico.";
+    if (!silent) renderLibraryContent();
+    return;
+  }
+  status.loading = true;
+  if (!silent) renderLibraryContent();
+  try {
+    const params = new URLSearchParams({
+      db_name: state.library.selectedDb,
+      model_id: "semantic_similarity_seed_v1",
+      no_cache: "1",
+      _: String(Date.now()),
+    });
+    const payload = await api(`/api/library/semantic/status?${params.toString()}`);
+    status.result = payload;
+    status.error = "";
+    setStatus(`Base semantica: ${displaySemanticReadiness(payload.readiness)}.`);
+  } catch (err) {
+    status.error = err.message || "No se pudo consultar el estado semantico.";
+    setStatus(`Error de estado semantico: ${status.error}`);
+  } finally {
+    status.loading = false;
+    if (state.view === "library" && state.library.screen === "similarity") renderLibraryContent();
+  }
+}
+
+async function loadConceptCatalog({ silent = false } = {}) {
+  const concepts = state.library.concepts;
+  concepts.error = "";
+  if (!state.library.selectedDb) {
+    concepts.error = "Selecciona una base de datos antes de consultar conceptos.";
+    if (!silent) renderLibraryContent();
+    return;
+  }
+  concepts.loading = true;
+  if (!silent) renderLibraryContent();
+  try {
+    const params = new URLSearchParams({
+      db_name: state.library.selectedDb,
+      q: String(concepts.query || ""),
+      course: String(concepts.course || ""),
+      status: String(concepts.status || ""),
+      limit: "100",
+      no_cache: "1",
+      _: String(Date.now()),
+    });
+    const payload = await api(`/api/library/concepts?${params.toString()}`);
+    concepts.result = payload;
+    const knownIds = new Set((payload.concepts || []).map((item) => String(item?.id || "")));
+    if (concepts.selectedConceptId && !knownIds.has(String(concepts.selectedConceptId))) {
+      concepts.selectedConceptId = "";
+      concepts.problemResult = null;
+      concepts.problemError = "";
+      concepts.problemLoading = false;
+    }
+    concepts.error = "";
+    setStatus(`Catalogo de conceptos: ${Number(payload.count || 0)} concepto(s).`);
+  } catch (err) {
+    concepts.error = err.message || "No se pudo consultar el catalogo de conceptos.";
+    setStatus(`Error de conceptos: ${concepts.error}`);
+  } finally {
+    concepts.loading = false;
+    if (state.view === "library" && state.library.screen === "concepts") {
+      renderLibraryContent();
+      window.setTimeout(() => typesetMath($("stageHost")), 0);
+    }
+  }
+}
+
+async function loadConceptProblems(conceptId, { silent = false } = {}) {
+  const concepts = state.library.concepts;
+  const id = Number(conceptId || 0);
+  concepts.problemError = "";
+  concepts.selectedConceptId = Number.isFinite(id) && id > 0 ? String(Math.trunc(id)) : "";
+  if (!concepts.selectedConceptId) {
+    concepts.problemError = "Selecciona un concepto valido.";
+    if (!silent) renderLibraryContent();
+    return;
+  }
+  if (!state.library.selectedDb) {
+    concepts.problemError = "Selecciona una base de datos antes de consultar problemas.";
+    if (!silent) renderLibraryContent();
+    return;
+  }
+  concepts.problemLoading = true;
+  if (!silent) renderLibraryContent();
+  try {
+    const params = new URLSearchParams({
+      db_name: state.library.selectedDb,
+      limit: "50",
+      no_cache: "1",
+      _: String(Date.now()),
+    });
+    const payload = await api(`/api/library/concepts/${concepts.selectedConceptId}/problems?${params.toString()}`);
+    concepts.problemResult = payload;
+    concepts.problemError = "";
+    setStatus(`Concepto: ${Number(payload.count || 0)} problema(s) enlazados.`);
+  } catch (err) {
+    concepts.problemError = err.message || "No se pudieron consultar los problemas del concepto.";
+    setStatus(`Error de problemas por concepto: ${concepts.problemError}`);
+  } finally {
+    concepts.problemLoading = false;
+    if (state.view === "library" && state.library.screen === "concepts") {
+      renderLibraryContent();
+      window.setTimeout(() => typesetMath($("stageHost")), 0);
+    }
+  }
+}
+
+async function reviewConceptLink(conceptId, problemId, role, status) {
+  const concepts = state.library.concepts;
+  const selectedConcept = Number(conceptId || concepts.selectedConceptId || 0);
+  const selectedProblem = Number(problemId || 0);
+  if (!Number.isFinite(selectedConcept) || selectedConcept <= 0 || !Number.isFinite(selectedProblem) || selectedProblem <= 0) {
+    setStatus("Selecciona una relacion problema-concepto valida.");
+    return;
+  }
+  if (!state.library.selectedDb) {
+    setStatus("Selecciona una base de datos antes de revisar relaciones.");
+    return;
+  }
+  const params = new URLSearchParams({
+    db_name: state.library.selectedDb,
+    no_cache: "1",
+    _: String(Date.now()),
+  });
+  const payload = await api(`/api/library/concepts/${Math.trunc(selectedConcept)}/problems/${Math.trunc(selectedProblem)}/review?${params.toString()}`, {
+    method: "POST",
+    body: {
+      role: String(role || "concept"),
+      status: String(status || ""),
+    },
+  });
+  setStatus(`Relacion concepto-problema: ${displayConceptLinkStatus(payload.status)}.`);
+  await loadConceptProblems(Math.trunc(selectedConcept), { silent: true });
+}
+
+async function loadSimilarityProblemConcepts(problemId, { silent = false } = {}) {
+  const similarity = state.library.similarity;
+  const id = Number(problemId || similarity.problemId || similarity.result?.problem_id || 0);
+  similarity.conceptError = "";
+  if (!Number.isFinite(id) || id <= 0) {
+    similarity.conceptError = "Ingresa un ID de problema valido.";
+    if (!silent) renderLibraryContent();
+    return;
+  }
+  if (!state.library.selectedDb) {
+    similarity.conceptError = "Selecciona una base de datos antes de consultar conceptos.";
+    if (!silent) renderLibraryContent();
+    return;
+  }
+  similarity.conceptLoading = true;
+  if (!silent) renderLibraryContent();
+  try {
+    const params = new URLSearchParams({
+      db_name: state.library.selectedDb,
+      limit: "50",
+      no_cache: "1",
+      _: String(Date.now()),
+    });
+    const payload = await api(`/api/library/problems/${encodeURIComponent(Math.trunc(id))}/concepts?${params.toString()}`);
+    similarity.conceptResult = payload;
+    similarity.conceptError = "";
+  } catch (err) {
+    similarity.conceptError = err.message || "No se pudieron leer los conceptos del problema.";
+  } finally {
+    similarity.conceptLoading = false;
+    if (state.view === "library" && state.library.screen === "similarity") {
+      renderLibraryContent();
+      window.setTimeout(() => typesetMath($("stageHost")), 0);
+    }
+  }
+}
+
+async function loadProblemSimilarity() {
+  const similarity = state.library.similarity;
+  const problemId = Number($("similarityProblemId")?.value || similarity.problemId || 0);
+  const topK = Math.max(1, Math.min(100, Number($("similarityTopK")?.value || similarity.topK || 10)));
+  const includeReverse = Boolean($("similarityIncludeReverse")?.checked ?? similarity.includeReverse);
+  similarity.problemId = Number.isFinite(problemId) && problemId > 0 ? String(Math.trunc(problemId)) : String(similarity.problemId || "");
+  similarity.topK = Number.isFinite(topK) ? Math.trunc(topK) : 10;
+  similarity.includeReverse = includeReverse;
+  similarity.error = "";
+  if (!Number.isFinite(problemId) || problemId <= 0) {
+    similarity.error = "Ingresa un ID de problema valido.";
+    renderLibraryContent();
+    return;
+  }
+  if (!state.library.selectedDb) {
+    similarity.error = "Selecciona una base de datos antes de consultar similitud.";
+    renderLibraryContent();
+    return;
+  }
+  similarity.loading = true;
+  similarity.conceptError = "";
+  similarity.conceptResult = null;
+  renderLibraryContent();
+  try {
+    const params = new URLSearchParams({
+      db_name: state.library.selectedDb,
+      top_k: String(similarity.topK),
+      include_reverse: similarity.includeReverse ? "1" : "0",
+    });
+    const payload = await api(`/api/library/problems/${encodeURIComponent(Math.trunc(problemId))}/similar?${params.toString()}`);
+    similarity.result = payload;
+    similarity.error = "";
+    setStatus(`Similitud lista: ${Number(payload.count || 0)} resultado(s).`);
+    loadSimilarityProblemConcepts(Math.trunc(problemId), { silent: true })
+      .catch((err) => setStatus(`Error leyendo conceptos del problema: ${err.message}`));
+  } catch (err) {
+    similarity.error = err.message || "No se pudo consultar la similitud.";
+    setStatus(`Error de similitud: ${similarity.error}`);
+  } finally {
+    similarity.loading = false;
+    renderLibraryContent();
+    window.setTimeout(() => typesetMath($("stageHost")), 0);
+  }
+}
+
+async function loadPracticeDraft() {
+  const similarity = state.library.similarity;
+  const problemId = Number($("similarityProblemId")?.value || similarity.problemId || similarity.result?.problem_id || 0);
+  if (!Number.isFinite(problemId) || problemId <= 0) {
+    similarity.practiceError = "Ingresa un ID de problema valido antes de crear una practica.";
+    renderLibraryContent();
+    return;
+  }
+  if (!state.library.selectedDb) {
+    similarity.practiceError = "Selecciona una base de datos antes de crear el borrador.";
+    renderLibraryContent();
+    return;
+  }
+  similarity.problemId = String(Math.trunc(problemId));
+  similarity.practiceLoading = true;
+  similarity.practiceError = "";
+  renderLibraryContent();
+  try {
+    const params = new URLSearchParams({
+      db_name: state.library.selectedDb,
+      top_k: "30",
+      target_count: "10",
+      include_reverse: "1",
+    });
+    const payload = await api(`/api/library/problems/${encodeURIComponent(Math.trunc(problemId))}/practice-draft?${params.toString()}`);
+    similarity.practiceDraft = payload;
+    similarity.practiceError = "";
+    similarity.practiceSaveError = "";
+    similarity.practiceSaved = null;
+    setStatus(`Borrador de practica listo: ${Number(payload.count || 0)} item(s).`);
+  } catch (err) {
+    similarity.practiceError = err.message || "No se pudo crear el borrador de practica.";
+    setStatus(`Error creando borrador: ${similarity.practiceError}`);
+  } finally {
+    similarity.practiceLoading = false;
+    renderLibraryContent();
+    window.setTimeout(() => typesetMath($("stageHost")), 0);
+  }
+}
+
+async function loadSavedPracticeDrafts({ silent = false } = {}) {
+  const similarity = state.library.similarity;
+  const problemId = Number($("similarityProblemId")?.value || similarity.problemId || similarity.practiceDraft?.seed_problem_id || similarity.result?.problem_id || 0);
+  if (!Number.isFinite(problemId) || problemId <= 0) {
+    similarity.practiceDraftsError = "Ingresa un ID de problema valido para ver sus borradores.";
+    similarity.practiceDraftsLoaded = true;
+    if (!silent) renderLibraryContent();
+    return;
+  }
+  if (!state.library.selectedDb) {
+    similarity.practiceDraftsError = "Selecciona una base de datos antes de consultar borradores.";
+    similarity.practiceDraftsLoaded = true;
+    if (!silent) renderLibraryContent();
+    return;
+  }
+  similarity.problemId = String(Math.trunc(problemId));
+  similarity.practiceDraftsLoading = true;
+  similarity.practiceDraftsError = "";
+  if (!silent) renderLibraryContent();
+  try {
+    const params = new URLSearchParams({
+      db_name: state.library.selectedDb,
+      limit: "20",
+      no_cache: "1",
+      _: String(Date.now()),
+    });
+    const payload = await api(`/api/library/problems/${encodeURIComponent(Math.trunc(problemId))}/practice-drafts?${params.toString()}`);
+    similarity.savedPracticeDrafts = Array.isArray(payload?.drafts) ? payload.drafts : [];
+    similarity.savedPracticeDraftScope = "problem";
+    similarity.practiceDraftsLoaded = true;
+    similarity.practiceDraftsError = "";
+    if (!silent) setStatus(`Borradores guardados: ${Number(payload.count || 0)}.`);
+  } catch (err) {
+    similarity.practiceDraftsError = err.message || "No se pudieron leer los borradores guardados.";
+    similarity.practiceDraftsLoaded = true;
+    setStatus(`Error leyendo borradores: ${similarity.practiceDraftsError}`);
+  } finally {
+    similarity.practiceDraftsLoading = false;
+    if (!silent) renderLibraryContent();
+  }
+}
+
+async function loadReviewedPracticeCatalog({ silent = false } = {}) {
+  const similarity = state.library.similarity;
+  if (!state.library.selectedDb) {
+    similarity.practiceDraftsError = "Selecciona una base de datos antes de consultar el catalogo revisado.";
+    similarity.practiceDraftsLoaded = true;
+    if (!silent) renderLibraryContent();
+    return;
+  }
+  similarity.practiceDraftsLoading = true;
+  similarity.practiceDraftsError = "";
+  similarity.savedPracticeDraftFilter = "revisado";
+  if (!silent) renderLibraryContent();
+  try {
+    const params = new URLSearchParams({
+      db_name: state.library.selectedDb,
+      status: "revisado",
+      limit: "50",
+      no_cache: "1",
+      _: String(Date.now()),
+    });
+    const payload = await api(`/api/library/practice-drafts?${params.toString()}`);
+    similarity.savedPracticeDrafts = Array.isArray(payload?.drafts) ? payload.drafts : [];
+    similarity.savedPracticeDraftScope = "catalog";
+    similarity.practiceDraftsLoaded = true;
+    similarity.practiceDraftsError = "";
+    if (!silent) setStatus(`Catalogo revisado: ${Number(payload.count || 0)} practica(s).`);
+  } catch (err) {
+    similarity.practiceDraftsError = err.message || "No se pudo leer el catalogo revisado.";
+    similarity.practiceDraftsLoaded = true;
+    setStatus(`Error leyendo catalogo: ${similarity.practiceDraftsError}`);
+  } finally {
+    similarity.practiceDraftsLoading = false;
+    if (!silent) renderLibraryContent();
+  }
+}
+
+function loadSavedPracticeDraft(index) {
+  const similarity = state.library.similarity;
+  const row = (similarity.savedPracticeDrafts || [])[Number(index)];
+  if (!row) {
+    setStatus("No se pudo cargar ese borrador guardado.");
+    return;
+  }
+  const draft = row.draft && typeof row.draft === "object" ? { ...row.draft } : {};
+  if (!draft.schema_version) draft.schema_version = row.schema_version || "semantic_practice_draft_v1";
+  if (!draft.seed_problem_id) draft.seed_problem_id = row.seed_problem_id || similarity.problemId;
+  if (!draft.title) draft.title = row.title || "Practica guardada";
+  if (!draft.objective) draft.objective = row.objective || "";
+  if (!draft.model_id) draft.model_id = row.model_id || "semantic_similarity_seed_v1";
+  if (!draft.practice_latex) draft.practice_latex = row.practice_latex || "";
+  similarity.practiceDraft = draft;
+  similarity.practiceSaved = row;
+  similarity.problemId = String(row.seed_problem_id || draft.seed_problem_id || similarity.problemId || "");
+  similarity.practiceSaveError = "";
+  setStatus("Borrador guardado cargado en pantalla.");
+  renderLibraryContent();
+  window.setTimeout(() => typesetMath($("stageHost")), 0);
+}
+
+async function savePracticeDraft() {
+  const similarity = state.library.similarity;
+  const draft = similarity.practiceDraft;
+  const problemId = Number(draft?.seed_problem_id || similarity.problemId || 0);
+  if (!draft || typeof draft !== "object") {
+    similarity.practiceSaveError = "Primero crea un borrador de practica.";
+    renderLibraryContent();
+    return;
+  }
+  if (!Number.isFinite(problemId) || problemId <= 0) {
+    similarity.practiceSaveError = "No se pudo identificar el problema semilla del borrador.";
+    renderLibraryContent();
+    return;
+  }
+  if (!state.library.selectedDb) {
+    similarity.practiceSaveError = "Selecciona una base de datos antes de guardar.";
+    renderLibraryContent();
+    return;
+  }
+  similarity.practiceSaveLoading = true;
+  similarity.practiceSaveError = "";
+  renderLibraryContent();
+  try {
+    const params = new URLSearchParams({ db_name: state.library.selectedDb });
+    const payload = await api(`/api/library/problems/${encodeURIComponent(Math.trunc(problemId))}/practice-draft?${params.toString()}`, {
+      method: "POST",
+      body: {
+        draft,
+        status: "borrador",
+      },
+    });
+    similarity.practiceSaved = payload;
+    similarity.practiceSaveError = "";
+    if (similarity.savedPracticeDraftScope === "catalog") {
+      await loadReviewedPracticeCatalog({ silent: true });
+    } else {
+      await loadSavedPracticeDrafts({ silent: true });
+    }
+    setStatus(`Borrador guardado: ${Number(payload.recommendation_count || 0)} item(s).`);
+  } catch (err) {
+    similarity.practiceSaveError = err.message || "No se pudo guardar el borrador de practica.";
+    setStatus(`Error guardando borrador: ${similarity.practiceSaveError}`);
+  } finally {
+    similarity.practiceSaveLoading = false;
+    renderLibraryContent();
+  }
+}
+
+async function reviewSavedPracticeDraft(index, status) {
+  const similarity = state.library.similarity;
+  const row = (similarity.savedPracticeDrafts || [])[Number(index)];
+  const nextStatus = String(status || "").trim().toLowerCase();
+  if (!row) {
+    setStatus("No se pudo identificar el borrador guardado.");
+    return;
+  }
+  const draft = row.draft && typeof row.draft === "object" ? row.draft : null;
+  if (!draft) {
+    setStatus("Este borrador no tiene JSON completo para actualizar su revision.");
+    return;
+  }
+  const problemId = Number(row.seed_problem_id || draft.seed_problem_id || similarity.problemId || 0);
+  if (!Number.isFinite(problemId) || problemId <= 0) {
+    setStatus("No se pudo identificar el problema semilla del borrador.");
+    return;
+  }
+  if (!state.library.selectedDb) {
+    setStatus("Selecciona una base de datos antes de revisar borradores.");
+    return;
+  }
+  similarity.practiceSaveLoading = true;
+  similarity.practiceSaveError = "";
+  renderLibraryContent();
+  try {
+    const params = new URLSearchParams({ db_name: state.library.selectedDb });
+    const payload = await api(`/api/library/problems/${encodeURIComponent(Math.trunc(problemId))}/practice-draft?${params.toString()}`, {
+      method: "POST",
+      body: {
+        draft,
+        status: nextStatus,
+      },
+    });
+    similarity.practiceSaved = payload;
+    if (similarity.savedPracticeDraftScope === "catalog") {
+      await loadReviewedPracticeCatalog({ silent: true });
+    } else {
+      await loadSavedPracticeDrafts({ silent: true });
+    }
+    setStatus(`Borrador marcado como ${displayPracticeDraftStatus(payload.status)}.`);
+  } catch (err) {
+    similarity.practiceSaveError = err.message || "No se pudo revisar el borrador.";
+    setStatus(`Error revisando borrador: ${similarity.practiceSaveError}`);
+  } finally {
+    similarity.practiceSaveLoading = false;
+    renderLibraryContent();
+  }
+}
+
+async function copyPracticeDraftLatex() {
+  const textarea = $("practiceLatexText");
+  const text = String(textarea?.value || state.library.similarity?.practiceDraft?.practice_latex || "").trim();
+  if (!text) {
+    setStatus("No hay LaTeX de practica para copiar.");
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    setStatus("LaTeX de practica copiado.");
+  } catch (_) {
+    if (textarea) {
+      textarea.focus();
+      textarea.select();
+    }
+    setStatus("No pude copiar automaticamente; selecciona el bloque LaTeX.");
+  }
+}
+
+async function reviewSimilarityEdge(sourceProblemId, targetProblemId, status) {
+  const sourceId = Number(sourceProblemId || 0);
+  const targetId = Number(targetProblemId || 0);
+  const nextStatus = String(status || "").trim();
+  const result = state.library.similarity?.result || {};
+  if (!sourceId || !targetId || !nextStatus) {
+    setStatus("No se pudo identificar la relacion de similitud.");
+    return;
+  }
+  const params = new URLSearchParams({
+    db_name: state.library.selectedDb,
+    model_id: result.model_id || "semantic_similarity_seed_v1",
+  });
+  const payload = await api(`/api/library/problems/${encodeURIComponent(sourceId)}/similar/${encodeURIComponent(targetId)}/review?${params.toString()}`, {
+    method: "POST",
+    body: {
+      status: nextStatus,
+      review_note: "",
+    },
+  });
+  const rows = Array.isArray(result.similar) ? result.similar : [];
+  rows.forEach((row) => {
+    const edgeSource = Number(row?.edge_problem_id || row?.source_problem_id || 0);
+    const edgeTarget = Number(row?.edge_similar_problem_id || row?.target_problem_id || 0);
+    if (edgeSource === sourceId && edgeTarget === targetId) {
+      row.status = payload.status || nextStatus;
+      row.human_verified = Boolean(payload.human_verified);
+      row.review_note = payload.review_note || "";
+    }
+  });
+  setStatus(`Revision guardada: ${displaySimilarityReviewStatus(payload.status, payload.human_verified)}.`);
+  renderLibraryContent();
+}
+
 function syncLibraryBottomAction() {
   const book = selectedLibraryBook();
   const instance = selectedLibraryInstance();
+  if (state.library.screen === "similarity") {
+    $("actionHint").textContent = "Consulta un problema de la base local para revisar parecidos.";
+    $("primaryAction").textContent = "Buscar similares";
+    $("primaryAction").onclick = () => loadProblemSimilarity().catch((err) => setStatus(`Error de similitud: ${err.message}`));
+    return;
+  }
   $("actionHint").textContent = state.library.screen === "book"
     ? "Selecciona una instancia para abrir su flujo PDF revisable."
     : "Selecciona un libro para ver sus instancias.";

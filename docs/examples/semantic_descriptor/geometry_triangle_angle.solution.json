@@ -1,0 +1,61 @@
+{
+  "schema_version": "solution_semantic_profile_v1",
+  "problem_id": "example_text_image_geometry_001",
+  "solution_path_id": "sol_path_01",
+  "source": {
+    "kind": "human_solution",
+    "problem_source": "text_image_geometry_angle.profile.json",
+    "solution_source": "manual_example"
+  },
+  "method": "relaciones angulares en triangulo",
+  "concepts_used": [
+    "triangulos",
+    "angulos",
+    "suma de angulos"
+  ],
+  "skills_used": [
+    "leer marcas del grafico",
+    "traducir angulos a ecuacion",
+    "despejar angulo desconocido"
+  ],
+  "steps_summary": [
+    "Identificar los angulos marcados en el triangulo.",
+    "Relacionar las medidas visibles con la suma de angulos internos.",
+    "Resolver la ecuacion simple para hallar x."
+  ],
+  "properties_used": [
+    {
+      "name": "suma de angulos internos de un triangulo",
+      "role": "central",
+      "notes": "La propiedad conecta las medidas visibles con el valor pedido."
+    },
+    {
+      "name": "lectura de angulos marcados",
+      "role": "supporting",
+      "notes": "La informacion relevante viene del grafico."
+    }
+  ],
+  "representation": {
+    "embedding_text": "Geometria. Triangulos. Solucion por suma de angulos internos y lectura de angulos marcados en el grafico para despejar x.",
+    "canonical_solution_type": "suma_de_angulos_y_despeje",
+    "search_keywords": [
+      "geometria",
+      "triangulos",
+      "suma de angulos",
+      "despeje",
+      "grafico"
+    ]
+  },
+  "evidence": {
+    "solution_text_latex": "Se leen los angulos del grafico y se aplica la suma de angulos internos del triangulo para despejar $x$.",
+    "uses_figure": true,
+    "figure_tags": [
+      "img-15"
+    ]
+  },
+  "review": {
+    "status": "sin_revisar",
+    "human_verified": false,
+    "notes": "Ejemplo de contrato; no corresponde a una solucion completa de produccion."
+  }
+}

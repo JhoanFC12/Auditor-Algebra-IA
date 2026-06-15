@@ -60,6 +60,33 @@
       },
       "uniqueItems": true
     },
+    "solution_methods": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true,
+      "default": []
+    },
+    "solution_concepts": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true,
+      "default": []
+    },
+    "alternative_solution_paths": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true,
+      "default": []
+    },
     "skills": {
       "type": "array",
       "items": {
@@ -141,6 +168,18 @@
         "canonical_problem_type": {
           "type": "string",
           "minLength": 1
+        },
+        "statement_embedding_text": {
+          "type": "string",
+          "default": ""
+        },
+        "figure_embedding_text": {
+          "type": "string",
+          "default": ""
+        },
+        "solution_embedding_text": {
+          "type": "string",
+          "default": ""
         }
       }
     },

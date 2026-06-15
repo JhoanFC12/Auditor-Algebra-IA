@@ -229,6 +229,8 @@ class LibraryWebRuntime:
             self._send_error(handler, exc, status=exc.status, code=exc.code)
         except FileNotFoundError as exc:
             self._send_error(handler, exc, status=404, code="not_found")
+        except KeyError as exc:
+            self._send_error(handler, exc, status=404, code="not_found")
         except (ValueError, json.JSONDecodeError) as exc:
             self._send_error(handler, exc, status=400, code="bad_request")
         except Exception as exc:
@@ -294,7 +296,31 @@ class LibraryWebRuntime:
         runtime = runtime or self._factory_runtime_for_request(handler, query, payload)
         if runtime is None:
             raise FileNotFoundError(f"Ruta API no encontrada: {method} {path}")
-        return runtime._dispatch_api(method, path, query, payload)
+        try:
+            return runtime._dispatch_api(method, path, query, payload)
+        except KeyError:
+            fallback = self._factory_runtime_for_record(payload, preferred=runtime)
+            if fallback is not None:
+                return fallback._dispatch_api(method, path, query, payload)
+            raise
+
+    def _factory_runtime_for_record(self, payload: dict[str, Any], *, preferred: Any | None = None) -> Any | None:
+        record_id = str(payload.get("record_id") or "").strip()
+        if not record_id:
+            return None
+        for runtime in reversed(self._all_factory_runtimes()):
+            if runtime is preferred:
+                continue
+            try:
+                service = getattr(runtime, "service", None)
+                staging = getattr(service, "staging", None)
+                get_record = getattr(staging, "get_record", None)
+                if callable(get_record) and get_record(record_id) is not None:
+                    self._remember_factory_runtime(runtime)
+                    return runtime
+            except Exception:
+                continue
+        return None
 
     def _dispatch_factory_file(self, path: str, query: dict[str, list[str]]) -> _FilePayload:
         token = urllib.parse.unquote(path.rsplit("/", 1)[-1])

@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from modulos.instance_factory.library_api import LibraryWebApi, _timeline_stage_from_counts
 from modulos.instance_factory.library_web_server import LibraryWebRuntime
-from modulos.instance_factory.models import InstancePipelineContext
+from modulos.instance_factory.models import InstancePipelineContext, StagingProblemRecord
 from modulos.instance_factory.staging import InstanceStagingStore
 from modulos.instance_factory.web_server import FactoryWebRuntime, _FilePayload
 
@@ -328,6 +328,400 @@ class LibraryWebApiTests(unittest.TestCase):
 
         self.assertEqual(controller.book_list_calls, [("demo_db", False), ("demo_db", True), ("demo_db", False), ("demo_db", False)])
         self.assertEqual(refreshed["books"][0]["status"], "en_progreso")
+
+    def test_library_api_exposes_problem_similarity_review(self) -> None:
+        calls = []
+
+        def fake_fetcher(**kwargs):
+            calls.append(kwargs)
+            return {
+                "schema_version": "problem_similarity_review_v1",
+                "problem_id": kwargs["problem_id"],
+                "similar": [{"target_problem_id": 23, "score": 0.75}],
+                "count": 1,
+            }
+
+        api = LibraryWebApi(controller=_FakeController(), semantic_similarity_fetcher=fake_fetcher)
+
+        payload = api.dispatch(
+            "GET",
+            "/api/library/problems/22/similar",
+            {
+                "db_name": ["demo_db"],
+                "db_profile": ["local_mirror"],
+                "top_k": ["7"],
+                "include_reverse": ["1"],
+            },
+            {},
+        )
+
+        self.assertEqual(payload["schema_version"], "problem_similarity_review_v1")
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(calls[0]["db_name"], "demo_db")
+        self.assertEqual(calls[0]["problem_id"], 22)
+        self.assertEqual(calls[0]["top_k"], 7)
+        self.assertTrue(calls[0]["include_reverse"])
+
+    def test_library_api_lists_problem_concepts(self) -> None:
+        calls = []
+
+        def fake_problem_concept_fetcher(**kwargs):
+            calls.append(kwargs)
+            return {
+                "schema_version": "semantic_problem_concept_links_v1",
+                "problem_id": kwargs["problem_id"],
+                "count": 1,
+                "concepts": [{"concept": {"id": 1, "nombre": "Triangulos"}, "link": {"status": "aceptado"}}],
+            }
+
+        api = LibraryWebApi(
+            controller=_FakeController(),
+            semantic_problem_concept_fetcher=fake_problem_concept_fetcher,
+        )
+
+        payload = api.dispatch(
+            "GET",
+            "/api/library/problems/22/concepts",
+            {"db_name": ["demo_db"], "db_profile": ["local_mirror"], "role": ["concept"], "status": ["aceptado"], "limit": ["20"]},
+            {},
+        )
+
+        self.assertEqual(payload["schema_version"], "semantic_problem_concept_links_v1")
+        self.assertEqual(payload["problem_id"], 22)
+        self.assertEqual(payload["concepts"][0]["concept"]["nombre"], "Triangulos")
+        self.assertEqual(calls[0]["db_name"], "demo_db")
+        self.assertEqual(calls[0]["db_profile"], "local_mirror")
+        self.assertEqual(calls[0]["problem_id"], 22)
+        self.assertEqual(calls[0]["role"], "concept")
+        self.assertEqual(calls[0]["status"], "aceptado")
+        self.assertEqual(calls[0]["limit"], 20)
+
+    def test_library_api_exposes_problem_practice_draft(self) -> None:
+        calls = []
+
+        def fake_practice_fetcher(**kwargs):
+            calls.append(kwargs)
+            return {
+                "schema_version": "semantic_practice_draft_v1",
+                "seed_problem_id": kwargs["problem_id"],
+                "recommendations": [{"problem_id": 23, "role": "refuerzo_directo"}],
+                "count": 1,
+            }
+
+        api = LibraryWebApi(controller=_FakeController(), semantic_practice_fetcher=fake_practice_fetcher)
+
+        payload = api.dispatch(
+            "GET",
+            "/api/library/problems/22/practice-draft",
+            {
+                "db_name": ["demo_db"],
+                "top_k": ["12"],
+                "target_count": ["6"],
+                "include_reverse": ["1"],
+            },
+            {},
+        )
+
+        self.assertEqual(payload["schema_version"], "semantic_practice_draft_v1")
+        self.assertEqual(payload["seed_problem_id"], 22)
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(calls[0]["db_name"], "demo_db")
+        self.assertEqual(calls[0]["top_k"], 12)
+        self.assertEqual(calls[0]["target_count"], 6)
+        self.assertTrue(calls[0]["include_reverse"])
+
+    def test_library_api_saves_problem_practice_draft(self) -> None:
+        calls = []
+
+        def fake_practice_saver(**kwargs):
+            calls.append(kwargs)
+            return {
+                "schema_version": "semantic_practice_draft_saved_v1",
+                "seed_problem_id": kwargs["problem_id"],
+                "status": kwargs["status"],
+                "recommendation_count": len(kwargs["draft"].get("recommendations") or []),
+                "policy": {"does_not_modify_problemas": True},
+            }
+
+        api = LibraryWebApi(controller=_FakeController(), semantic_practice_saver=fake_practice_saver)
+        draft = {
+            "schema_version": "semantic_practice_draft_v1",
+            "seed_problem_id": 22,
+            "model_id": "semantic_similarity_seed_v1",
+            "recommendations": [{"problem_id": 23}],
+            "practice_latex": r"\begin{enumerate}\item[\textbf{1.}] Halle $x$.\end{enumerate}",
+        }
+
+        payload = api.dispatch(
+            "POST",
+            "/api/library/problems/22/practice-draft",
+            {"db_name": ["demo_db"]},
+            {"draft": draft, "status": "borrador"},
+        )
+
+        self.assertEqual(payload["schema_version"], "semantic_practice_draft_saved_v1")
+        self.assertEqual(payload["seed_problem_id"], 22)
+        self.assertEqual(payload["recommendation_count"], 1)
+        self.assertTrue(payload["policy"]["does_not_modify_problemas"])
+        self.assertEqual(calls[0]["db_name"], "demo_db")
+        self.assertEqual(calls[0]["problem_id"], 22)
+        self.assertEqual(calls[0]["status"], "borrador")
+
+    def test_library_api_saves_reviewed_problem_practice_draft_status(self) -> None:
+        calls = []
+
+        def fake_practice_saver(**kwargs):
+            calls.append(kwargs)
+            return {
+                "schema_version": "semantic_practice_draft_saved_v1",
+                "seed_problem_id": kwargs["problem_id"],
+                "status": kwargs["status"],
+                "human_verified": kwargs["status"] == "revisado",
+            }
+
+        api = LibraryWebApi(controller=_FakeController(), semantic_practice_saver=fake_practice_saver)
+        draft = {
+            "schema_version": "semantic_practice_draft_v1",
+            "seed_problem_id": 22,
+            "model_id": "semantic_similarity_seed_v1",
+            "recommendations": [{"problem_id": 23}],
+        }
+
+        payload = api.dispatch(
+            "POST",
+            "/api/library/problems/22/practice-draft",
+            {"db_name": ["demo_db"]},
+            {"draft": draft, "status": "revisado", "review_note": "Lista para alumnos."},
+        )
+
+        self.assertEqual(payload["status"], "revisado")
+        self.assertTrue(payload["human_verified"])
+        self.assertEqual(calls[0]["status"], "revisado")
+        self.assertEqual(calls[0]["review_note"], "Lista para alumnos.")
+
+    def test_library_api_lists_saved_problem_practice_drafts(self) -> None:
+        calls = []
+
+        def fake_practice_lister(**kwargs):
+            calls.append(kwargs)
+            return {
+                "schema_version": "semantic_practice_draft_list_v1",
+                "seed_problem_id": kwargs["problem_id"],
+                "count": 1,
+                "drafts": [{"id": 7, "title": "Practica guardada"}],
+            }
+
+        api = LibraryWebApi(controller=_FakeController(), semantic_practice_lister=fake_practice_lister)
+
+        payload = api.dispatch(
+            "GET",
+            "/api/library/problems/22/practice-drafts",
+            {"db_name": ["demo_db"], "limit": ["5"], "status": ["revisado"]},
+            {},
+        )
+
+        self.assertEqual(payload["schema_version"], "semantic_practice_draft_list_v1")
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["drafts"][0]["title"], "Practica guardada")
+        self.assertEqual(calls[0]["db_name"], "demo_db")
+        self.assertEqual(calls[0]["problem_id"], 22)
+        self.assertEqual(calls[0]["limit"], 5)
+        self.assertEqual(calls[0]["status"], "revisado")
+
+    def test_library_api_lists_reviewed_practice_draft_catalog(self) -> None:
+        calls = []
+
+        def fake_practice_lister(**kwargs):
+            calls.append(kwargs)
+            return {
+                "schema_version": "semantic_practice_draft_catalog_v1",
+                "status_filter": kwargs["status"],
+                "count": 1,
+                "drafts": [{"id": 9, "seed_problem_id": 30, "title": "Practica revisada"}],
+            }
+
+        api = LibraryWebApi(controller=_FakeController(), semantic_practice_lister=fake_practice_lister)
+
+        payload = api.dispatch(
+            "GET",
+            "/api/library/practice-drafts",
+            {"db_name": ["demo_db"], "status": ["revisado"], "limit": ["15"]},
+            {},
+        )
+
+        self.assertEqual(payload["schema_version"], "semantic_practice_draft_catalog_v1")
+        self.assertEqual(payload["status_filter"], "revisado")
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["drafts"][0]["seed_problem_id"], 30)
+        self.assertEqual(calls[0]["db_name"], "demo_db")
+        self.assertEqual(calls[0]["problem_id"], 0)
+        self.assertEqual(calls[0]["limit"], 15)
+        self.assertEqual(calls[0]["status"], "revisado")
+
+    def test_library_api_exposes_semantic_status(self) -> None:
+        calls = []
+
+        def fake_status_fetcher(**kwargs):
+            calls.append(kwargs)
+            return {
+                "schema_version": "semantic_coverage_status_v1",
+                "model_id": kwargs["model_id"],
+                "counts": {"problems": 12, "similarity_edges": 40},
+                "coverage": {},
+                "readiness": "review_ready",
+                "next_step": "Revisar similitud.",
+            }
+
+        api = LibraryWebApi(controller=_FakeController(), semantic_status_fetcher=fake_status_fetcher)
+
+        payload = api.dispatch(
+            "GET",
+            "/api/library/semantic/status",
+            {
+                "db_name": ["demo_db"],
+                "db_profile": ["local_mirror"],
+                "model_id": ["semantic_similarity_seed_v1"],
+            },
+            {},
+        )
+
+        self.assertEqual(payload["schema_version"], "semantic_coverage_status_v1")
+        self.assertEqual(payload["counts"]["problems"], 12)
+        self.assertEqual(calls[0]["db_name"], "demo_db")
+        self.assertEqual(calls[0]["db_profile"], "local_mirror")
+        self.assertEqual(calls[0]["model_id"], "semantic_similarity_seed_v1")
+
+    def test_library_api_lists_semantic_concepts(self) -> None:
+        calls = []
+
+        def fake_concept_fetcher(**kwargs):
+            calls.append(kwargs)
+            return {
+                "schema_version": "semantic_concept_catalog_v1",
+                "filters": {"query": kwargs["query"], "course": kwargs["course"], "status": kwargs["status"]},
+                "count": 1,
+                "concepts": [{"id": 1, "nombre": "Triangulos", "problem_count": 12}],
+            }
+
+        api = LibraryWebApi(controller=_FakeController(), semantic_concept_fetcher=fake_concept_fetcher)
+
+        payload = api.dispatch(
+            "GET",
+            "/api/library/concepts",
+            {"db_name": ["demo_db"], "q": ["tri"], "course": ["geo"], "status": ["pendiente"], "limit": ["25"]},
+            {},
+        )
+
+        self.assertEqual(payload["schema_version"], "semantic_concept_catalog_v1")
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["concepts"][0]["nombre"], "Triangulos")
+        self.assertEqual(calls[0]["db_name"], "demo_db")
+        self.assertEqual(calls[0]["query"], "tri")
+        self.assertEqual(calls[0]["course"], "geo")
+        self.assertEqual(calls[0]["status"], "pendiente")
+        self.assertEqual(calls[0]["limit"], 25)
+
+    def test_library_api_lists_semantic_concept_problems(self) -> None:
+        calls = []
+
+        def fake_concept_problem_fetcher(**kwargs):
+            calls.append(kwargs)
+            return {
+                "schema_version": "semantic_concept_linked_problems_v1",
+                "concept_id": kwargs["concept_id"],
+                "concept": {"id": kwargs["concept_id"], "nombre": "Triangulos"},
+                "role_filter": kwargs["role"] or "all",
+                "count": 1,
+                "problems": [{"id": 22, "enunciado_latex": "Calcular $x$.", "link": {"role": "concept"}}],
+            }
+
+        api = LibraryWebApi(
+            controller=_FakeController(),
+            semantic_concept_problem_fetcher=fake_concept_problem_fetcher,
+        )
+
+        payload = api.dispatch(
+            "GET",
+            "/api/library/concepts/5/problems",
+            {"db_name": ["demo_db"], "db_profile": ["local_mirror"], "role": ["concept"], "limit": ["30"]},
+            {},
+        )
+
+        self.assertEqual(payload["schema_version"], "semantic_concept_linked_problems_v1")
+        self.assertEqual(payload["concept_id"], 5)
+        self.assertEqual(payload["problems"][0]["id"], 22)
+        self.assertEqual(calls[0]["db_name"], "demo_db")
+        self.assertEqual(calls[0]["db_profile"], "local_mirror")
+        self.assertEqual(calls[0]["concept_id"], 5)
+        self.assertEqual(calls[0]["role"], "concept")
+        self.assertEqual(calls[0]["limit"], 30)
+
+    def test_library_api_reviews_semantic_concept_link(self) -> None:
+        calls = []
+
+        def fake_concept_link_reviewer(**kwargs):
+            calls.append(kwargs)
+            return {
+                "schema_version": "semantic_concept_link_review_v1",
+                "concept_id": kwargs["concept_id"],
+                "problem_id": kwargs["problem_id"],
+                "role": kwargs["role"],
+                "status": kwargs["status"],
+                "reviewed": True,
+                "review_note": kwargs["review_note"],
+            }
+
+        api = LibraryWebApi(
+            controller=_FakeController(),
+            semantic_concept_link_reviewer=fake_concept_link_reviewer,
+        )
+
+        payload = api.dispatch(
+            "POST",
+            "/api/library/concepts/5/problems/22/review",
+            {"db_name": ["demo_db"], "db_profile": ["local_mirror"]},
+            {"role": "concept", "status": "rechazado", "review_note": "Solo comparte tema."},
+        )
+
+        self.assertEqual(payload["schema_version"], "semantic_concept_link_review_v1")
+        self.assertEqual(payload["concept_id"], 5)
+        self.assertEqual(payload["problem_id"], 22)
+        self.assertEqual(payload["status"], "rechazado")
+        self.assertEqual(calls[0]["db_name"], "demo_db")
+        self.assertEqual(calls[0]["db_profile"], "local_mirror")
+        self.assertEqual(calls[0]["role"], "concept")
+        self.assertEqual(calls[0]["review_note"], "Solo comparte tema.")
+
+    def test_library_api_reviews_problem_similarity_edge(self) -> None:
+        calls = []
+
+        def fake_reviewer(**kwargs):
+            calls.append(kwargs)
+            return {
+                "schema_version": "problem_similarity_edge_review_v1",
+                "problem_id": kwargs["problem_id"],
+                "similar_problem_id": kwargs["similar_problem_id"],
+                "model_id": kwargs["model_id"],
+                "status": kwargs["status"],
+                "human_verified": True,
+                "review_note": kwargs["review_note"],
+            }
+
+        api = LibraryWebApi(controller=_FakeController(), semantic_similarity_reviewer=fake_reviewer)
+
+        payload = api.dispatch(
+            "POST",
+            "/api/library/problems/22/similar/23/review",
+            {"db_name": ["demo_db"]},
+            {"status": "rechazado", "review_note": "Comparte tema, pero no propiedad."},
+        )
+
+        self.assertEqual(payload["schema_version"], "problem_similarity_edge_review_v1")
+        self.assertEqual(payload["status"], "rechazado")
+        self.assertEqual(calls[0]["db_name"], "demo_db")
+        self.assertEqual(calls[0]["problem_id"], 22)
+        self.assertEqual(calls[0]["similar_problem_id"], 23)
+        self.assertEqual(calls[0]["review_note"], "Comparte tema, pero no propiedad.")
 
     def test_library_books_response_compacts_instance_health_payload(self) -> None:
         controller = _FakeController()
@@ -830,6 +1224,66 @@ class LibraryWebApiTests(unittest.TestCase):
         self.assertIs(library._runtime_by_instance_id(12), runtime_two)
         self.assertIs(library._factory_runtime_by_instance_id[12], runtime_two)
         self.assertIs(library._runtime_by_instance_id(12), runtime_two)
+
+    def test_library_runtime_falls_back_to_runtime_that_owns_record_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            class RawOcrService:
+                def __init__(self, context: InstancePipelineContext, store: InstanceStagingStore) -> None:
+                    self.context = context
+                    self.staging = store
+                    self.models = type("FakeModels", (), {"to_dict": lambda _self: {}})()
+
+                def build_instance_summary(self):
+                    return self.staging.summarize_records()
+
+                def build_stage_overview(self):
+                    return []
+
+                def load_pages(self):
+                    return []
+
+                def update_raw_ocr(self, record_id, raw_ocr):
+                    record = self.staging.get_record(record_id)
+                    if record is None:
+                        raise KeyError(record_id)
+                    record.raw_ocr = str(raw_ocr or "")
+                    self.staging.upsert_record(record)
+                    return record
+
+            context_one = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(root / "book1.pdf"))
+            store_one = InstanceStagingStore(context_one, root=root / "staging_one")
+            runtime_one = FactoryWebRuntime(context_one, service=RawOcrService(context_one, store_one))
+            setattr(runtime_one, "_library_instance_id", 11)
+
+            context_two = InstancePipelineContext(book_code="ALG02", instance_type="S02", pdf_path=str(root / "book2.pdf"))
+            store_two = InstanceStagingStore(context_two, root=root / "staging_two")
+            store_two.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_002",
+                    crop_id="crop_002",
+                    crop_path=str(root / "crop_002.png"),
+                    source={"page_number": 1},
+                )
+            )
+            runtime_two = FactoryWebRuntime(context_two, service=RawOcrService(context_two, store_two))
+            setattr(runtime_two, "_library_instance_id", 12)
+
+            library = LibraryWebRuntime(controller=_FakeController())
+            library._factory_runtimes.extend([runtime_one, runtime_two])
+
+            response = library._dispatch_factory_api(
+                type("Handler", (), {"headers": {}})(),
+                "POST",
+                "/api/ocr/raw",
+                {},
+                {"record_id": "crop_002", "raw_ocr": "texto corregido", "compact": True, "include_summary": False},
+                runtime=runtime_one,
+            )
+
+            self.assertEqual(response["record"]["record_id"], "crop_002")
+            self.assertEqual(store_two.get_record("crop_002").raw_ocr, "texto corregido")
 
     def test_library_runtime_serves_library_boot_shell(self) -> None:
         runtime = LibraryWebRuntime(controller=_FakeController())
