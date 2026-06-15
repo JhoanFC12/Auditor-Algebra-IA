@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import tempfile
@@ -48,8 +49,8 @@ class _FakeService:
         self.calls.append(("resolve_page_selection", raw))
         return [int(part) for part in str(raw).split(",") if part.strip()]
 
-    def detect_pdf_pages(self, pages, *, dpi=300, confidence=0.25, detector_model=""):
-        self.calls.append(("detect_pdf_pages", list(pages), dpi, confidence, detector_model))
+    def detect_pdf_pages(self, pages, *, dpi=300, confidence=0.25, detector_model="", replace_existing=False):
+        self.calls.append(("detect_pdf_pages", list(pages), dpi, confidence, detector_model, replace_existing))
         return list(self.pages)
 
     def update_page_boxes(self, record_id, boxes, *, layout_mode="auto", reviewed=True, reorder=False):
@@ -177,6 +178,38 @@ class _CountingStagingStore(InstanceStagingStore):
         return super().load_records()
 
 
+class _CountingSignatureStaging:
+    def __init__(self, records_dir: Path) -> None:
+        self.calls = 0
+        self.records_dir = records_dir
+        self.records_dir.mkdir(parents=True, exist_ok=True)
+
+    def _records_dir_signature(self) -> tuple[tuple[str, int, int], ...]:
+        self.calls += 1
+        return (("record.json", self.calls, 10),)
+
+
+class _CountingSignatureGolden:
+    def __init__(self, instance_root: Path) -> None:
+        self.instance_root = instance_root
+        (self.instance_root / "records").mkdir(parents=True, exist_ok=True)
+
+    def instance_dir(self, _name: str) -> Path:
+        return self.instance_root
+
+
+class _CountingSignatureService:
+    def __init__(self, root: Path) -> None:
+        self.page_calls = 0
+        self.golden = _CountingSignatureGolden(root / "golden" / "instancia")
+        self.staging = _CountingSignatureStaging(root / "staging" / "records")
+        self.models = _FakeModels()
+
+    def _page_records_signature(self) -> tuple[tuple[str, int, int], ...]:
+        self.page_calls += 1
+        return (("page.json", self.page_calls, 10),)
+
+
 def _post_json(base: str, path: str, body: dict) -> dict:
     request = urllib.request.Request(
         base + path,
@@ -198,6 +231,37 @@ def _read_http_error(exc: urllib.error.HTTPError) -> dict:
 
 
 class InstanceFactoryWebServerTests(unittest.TestCase):
+    def test_web_runtime_gzips_large_json_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            crop = root / "crop.png"
+            crop.write_bytes(b"\x89PNG\r\n\x1a\n")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(crop),
+                    raw_ocr="texto OCR " * 300,
+                )
+            )
+            runtime = FactoryWebRuntime(context, service=_FakeService(context, store))
+            try:
+                base = runtime.start()
+                request = urllib.request.Request(
+                    base + "api/bootstrap",
+                    headers={"Accept-Encoding": "gzip"},
+                )
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    self.assertEqual(response.headers.get("Content-Encoding"), "gzip")
+                    payload = json.loads(gzip.decompress(response.read()).decode("utf-8"))
+            finally:
+                runtime.stop()
+
+        self.assertEqual(payload["schema_version"], "pdf_factory_web_snapshot_v1")
+        self.assertEqual(payload["records"][0]["record_id"], "crop_001")
+
     def test_snapshot_reuses_loaded_pages_and_records(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -309,9 +373,9 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
             register_count = {"calls": 0}
             original_register_file = runtime._register_file
 
-            def counting_register_file(path: Path) -> str:
+            def counting_register_file(path: Path, **kwargs) -> str:
                 register_count["calls"] += 1
-                return original_register_file(path)
+                return original_register_file(path, **kwargs)
 
             runtime._register_file = counting_register_file  # type: ignore[method-assign]
 
@@ -330,6 +394,42 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
             third = runtime._snapshot()
 
             self.assertEqual(third["records"][0]["raw_ocr"], "OCR actualizado")
+            self.assertEqual(register_count["calls"], 2)
+
+    def test_memory_record_web_payload_cache_reuses_compact_records_until_content_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            crop = root / "crop.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(root / "book.pdf"))
+            runtime = FactoryWebRuntime(context, service=_FakeService(context, InstanceStagingStore(context, root=root / "staging")))
+            record = StagingProblemRecord(
+                record_id="crop_001",
+                crop_id="crop_001",
+                crop_path=str(crop),
+                raw_ocr="OCR inicial",
+            )
+            register_count = {"calls": 0}
+            original_register_file = runtime._register_file
+
+            def counting_register_file(path: Path, **kwargs) -> str:
+                register_count["calls"] += 1
+                return original_register_file(path, **kwargs)
+
+            runtime._register_file = counting_register_file  # type: ignore[method-assign]
+
+            first = runtime._record_to_web(record)
+            second = runtime._record_to_web(record)
+
+            self.assertEqual(first["raw_ocr"], "OCR inicial")
+            self.assertEqual(second["raw_ocr"], "OCR inicial")
+            self.assertEqual(register_count["calls"], 1)
+
+            record.raw_ocr = "OCR corregido"
+            record.touch()
+            third = runtime._record_to_web(record)
+
+            self.assertEqual(third["raw_ocr"], "OCR corregido")
             self.assertEqual(register_count["calls"], 2)
 
     def test_snapshot_reuses_page_web_payload_cache_until_boxes_change(self) -> None:
@@ -877,6 +977,29 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                 finally:
                     runtime.stop()
 
+    def test_normalizer_training_status_is_cached_until_invalidation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(Path(tmp) / "book.pdf"))
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            runtime = FactoryWebRuntime(context, service=_FakeService(context, store))
+            calls: list[int] = []
+
+            def fake_manifest() -> dict[str, object]:
+                calls.append(len(calls) + 1)
+                return {"samples_total": len(calls), "threshold": 200}
+
+            with patch.object(web_server_module, "load_normalizer_training_manifest", side_effect=fake_manifest):
+                first = runtime._normalizer_training_status()
+                second = runtime._normalizer_training_status()
+                self.assertEqual(first["samples_total"], 1)
+                self.assertEqual(second["samples_total"], 1)
+                self.assertEqual(calls, [1])
+
+                runtime._invalidate_response_caches()
+                third = runtime._normalizer_training_status()
+                self.assertEqual(third["samples_total"], 2)
+                self.assertEqual(calls, [1, 2])
+
     def test_web_runtime_exposes_snapshot_review_and_disabled_promotion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(Path(tmp) / "book.pdf"))
@@ -1119,7 +1242,20 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                 base = runtime.start()
                 snapshot = _post_json(base, "api/pages/detect", {"pages": "1", "dpi": 150, "confidence": 0.4})
                 self.assertEqual(snapshot["pages"][0]["record_id"], "page_001")
-                self.assertEqual(service.calls[-2:], [("resolve_page_selection", "1"), ("detect_pdf_pages", [1], 150, 0.4, "")])
+                self.assertEqual(service.calls[-2:], [("resolve_page_selection", "1"), ("detect_pdf_pages", [1], 150, 0.4, "", False)])
+
+                compact_replacing = _post_json(
+                    base,
+                    "api/pages/detect",
+                    {
+                        "pages": "1",
+                        "compact": True,
+                        "include_summary": False,
+                        "replace_existing": True,
+                    },
+                )
+                self.assertEqual(compact_replacing["schema_version"], "pdf_factory_web_pages_detected_v1")
+                self.assertEqual(service.calls[-2:], [("resolve_page_selection", "1"), ("detect_pdf_pages", [1], 300, 0.25, "", True)])
 
                 detected_compact = _post_json(
                     base,
@@ -1320,6 +1456,259 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                 self.assertEqual(detail["promotion_candidate"]["write_operations"], [])
             finally:
                 runtime.stop()
+
+    def test_web_runtime_reuses_snapshot_and_summary_until_files_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pdf = root / "book.pdf"
+            pdf.write_bytes(b"%PDF-1.4 placeholder")
+            context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(pdf))
+            golden = PdfProblemGoldenController(golden_root=root / "golden")
+            instance_dir = golden.instance_dir(context.instance_name)
+            pages_dir = instance_dir / "pages_png"
+            records_dir = instance_dir / "records"
+            pages_dir.mkdir(parents=True, exist_ok=True)
+            records_dir.mkdir(parents=True, exist_ok=True)
+            page_image = pages_dir / "page_001.png"
+            page_image.write_bytes(b"page")
+            (records_dir / "page_001.json").write_text(
+                json.dumps(
+                    {
+                        "record_id": "page_001",
+                        "pdf_path": str(pdf),
+                        "page_number": 1,
+                        "image_rel": "pages_png/page_001.png",
+                        "boxes_px": [[1, 2, 30, 40]],
+                        "detector_source": "pdf_factory:test",
+                        "reviewed": False,
+                        "layout_mode": "auto",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            store = InstanceStagingStore(context, root=root / "staging")
+            crop = root / "crop.png"
+            crop.write_bytes(b"crop")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(crop),
+                    status=StageStatus.NEEDS_REVIEW,
+                    raw_ocr="ocr inicial",
+                    source={"page_number": 1, "bbox_px": [1, 2, 30, 40]},
+                )
+            )
+            service = InstancePdfPipelineService(context, golden_controller=golden, staging_store=store)
+            runtime = FactoryWebRuntime(context, service=service)
+
+            first = runtime._snapshot()
+            first_summary = runtime._summary_response()
+            self.assertEqual(first["records"][0]["raw_ocr"], "ocr inicial")
+            self.assertEqual(first_summary["summary"]["ocr_done"], 1)
+
+            original_record_to_web = runtime._record_to_web
+            original_summary_builder = runtime._build_instance_summary_cached
+
+            def _fail_record_to_web(*_args, **_kwargs):
+                raise AssertionError("El segundo snapshot debe salir del cache completo.")
+
+            def _fail_summary_builder(*_args, **_kwargs):
+                raise AssertionError("El segundo summary debe salir del cache completo.")
+
+            runtime._record_to_web = _fail_record_to_web  # type: ignore[method-assign]
+            runtime._build_instance_summary_cached = _fail_summary_builder  # type: ignore[method-assign]
+            try:
+                second = runtime._snapshot()
+                second_summary = runtime._summary_response()
+            finally:
+                runtime._record_to_web = original_record_to_web  # type: ignore[method-assign]
+                runtime._build_instance_summary_cached = original_summary_builder  # type: ignore[method-assign]
+
+            self.assertEqual(second["records"][0]["raw_ocr"], "ocr inicial")
+            self.assertEqual(second_summary["summary"], first_summary["summary"])
+
+            record = store.get_record("crop_001")
+            assert record is not None
+            record.raw_ocr = "ocr actualizado"
+            store.upsert_record(record)
+
+            third = runtime._snapshot()
+            self.assertEqual(third["records"][0]["raw_ocr"], "ocr actualizado")
+
+    def test_snapshot_signature_cache_reuses_short_lived_file_signatures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = _CountingSignatureService(Path(tmp))
+            runtime = FactoryWebRuntime(
+                InstancePipelineContext(book_code="ALG01", instance_type="S01"),
+                service=service,
+            )
+
+            first = runtime._state_cache_signature()
+            second = runtime._state_cache_signature()
+
+            self.assertEqual(first, second)
+            self.assertEqual(service.page_calls, 1)
+            self.assertEqual(service.staging.calls, 1)
+
+            runtime._invalidate_response_caches()
+            third = runtime._state_cache_signature()
+
+            self.assertNotEqual(second, third)
+            self.assertEqual(service.page_calls, 2)
+            self.assertEqual(service.staging.calls, 2)
+
+    def test_snapshot_reuses_known_record_signature_when_loading_entries(self) -> None:
+        class CountingStore(InstanceStagingStore):
+            def __init__(self, context: InstancePipelineContext, root: Path) -> None:
+                super().__init__(context, root=root)
+                self.signature_scans = 0
+
+            def _scan_records_dir_signature(self) -> tuple[tuple[str, int, int], ...]:
+                self.signature_scans += 1
+                return super()._scan_records_dir_signature()
+
+        class SnapshotService(_FakeService):
+            def _page_records_signature(self) -> tuple[tuple[str, int, int], ...]:
+                return ()
+
+            def build_instance_summary(self, *, pages=None, records=None, summary=None):
+                return {"records_total": len(records or []), **dict(summary or {})}
+
+            def build_stage_overview(self, *, pages=None, records=None, summary=None):
+                return [{"stage": "Staging", "status": StageStatus.NEEDS_REVIEW, "detail": f"{len(records or [])} registro(s)"}]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(root / "book.pdf"))
+            store = CountingStore(context, root=root / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(root / "crop.png"),
+                    raw_ocr="ocr",
+                    status=StageStatus.NEEDS_REVIEW,
+                )
+            )
+            store.signature_scans = 0
+            runtime = FactoryWebRuntime(context, service=SnapshotService(context, store))
+
+            snapshot = runtime._snapshot()
+
+            self.assertEqual(snapshot["records"][0]["record_id"], "crop_001")
+            self.assertEqual(store.signature_scans, 1)
+
+    def test_snapshot_reuses_file_stat_signature_for_summary_and_record_payload(self) -> None:
+        class CountingRuntime(FactoryWebRuntime):
+            def __init__(self, *args, **kwargs) -> None:
+                super().__init__(*args, **kwargs)
+                self.file_stat_misses: dict[str, int] = {}
+
+            def _file_stat_signature(self, path: Path, cache=None):
+                key = str(Path(path))
+                if cache is None or key not in cache:
+                    self.file_stat_misses[key] = self.file_stat_misses.get(key, 0) + 1
+                return super()._file_stat_signature(path, cache)
+
+        class SnapshotService(_FakeService):
+            def _page_records_signature(self) -> tuple[tuple[str, int, int], ...]:
+                return ()
+
+            def build_instance_summary(self, *, pages=None, records=None, summary=None):
+                return {"records_total": len(records or []), **dict(summary or {})}
+
+            def build_stage_overview(self, *, pages=None, records=None, summary=None):
+                return [{"stage": "Staging", "status": StageStatus.NEEDS_REVIEW, "detail": f"{len(records or [])} registro(s)"}]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            crop = root / "crop.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(crop),
+                    raw_ocr="ocr",
+                    status=StageStatus.NEEDS_REVIEW,
+                )
+            )
+            runtime = CountingRuntime(context, service=SnapshotService(context, store))
+
+            snapshot = runtime._snapshot()
+
+            self.assertEqual(snapshot["summary"]["crops_found"], 1)
+            self.assertTrue(snapshot["records"][0]["crop_url"])
+            self.assertEqual(runtime.file_stat_misses.get(str(crop)), 1)
+
+    def test_compact_page_save_warms_summary_cache_for_followup_summary(self) -> None:
+        class SummaryCacheService(_FakeService):
+            def _page_records_signature(self) -> tuple[tuple[str, int, int], ...]:
+                rows = []
+                for page in self.pages:
+                    rows.append((str(page.record_id), int(page.page_number or 0), len(page.boxes or []), int(bool(page.reviewed))))
+                return tuple(rows)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pdf = root / "book.pdf"
+            pdf.write_bytes(b"%PDF")
+            page_image = root / "page.png"
+            page_image.write_bytes(b"png")
+            crop = root / "crop.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(pdf))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(crop),
+                    raw_ocr="ocr",
+                    status=StageStatus.NEEDS_REVIEW,
+                )
+            )
+            service = SummaryCacheService(context, store)
+            service.pages = [
+                ProblemPageRecord(
+                    record_id="page_001",
+                    pdf_path=str(pdf),
+                    page_number=1,
+                    image_path=page_image,
+                    boxes=[(1, 2, 3, 4)],
+                    reviewed=False,
+                )
+            ]
+            runtime = FactoryWebRuntime(context, service=service)
+
+            runtime._dispatch_api(
+                "POST",
+                "/api/pages/boxes",
+                {},
+                {
+                    "record_id": "page_001",
+                    "boxes": [[1, 2, 40, 50]],
+                    "compact": True,
+                    "include_summary": True,
+                },
+            )
+
+            original_load_records = store.load_records
+
+            def fail_load_records(*_args, **_kwargs):
+                raise AssertionError("El summary posterior debe salir del cache calentado por la respuesta compacta.")
+
+            store.load_records = fail_load_records  # type: ignore[method-assign]
+            try:
+                summary = runtime._dispatch_api("GET", "/api/summary", {}, None)
+            finally:
+                store.load_records = original_load_records  # type: ignore[method-assign]
+
+            self.assertEqual(summary["summary"]["records_total"], 1)
 
     def test_web_runtime_returns_client_errors_without_tracebacks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

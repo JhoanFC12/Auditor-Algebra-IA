@@ -1,15 +1,30 @@
 from pathlib import Path
+import unittest
 
-from modulos.modulo9_organizador_libros.controlador_organizador_libros import (
-    BookInstanceUpdateInput,
-    BookProgressController,
-)
+try:
+    from modulos.modulo9_organizador_libros.controlador_organizador_libros import (
+        BookInstanceUpdateInput,
+        BookProgressController,
+    )
+    _CONTROLLER_IMPORT_ERROR = None
+except ModuleNotFoundError as exc:
+    if exc.name != "psycopg2":
+        raise
+    BookInstanceUpdateInput = None
+    BookProgressController = None
+    _CONTROLLER_IMPORT_ERROR = exc
+
+
+def _skip_if_controller_unavailable():
+    if _CONTROLLER_IMPORT_ERROR is not None:
+        raise unittest.SkipTest("psycopg2 no disponible para pruebas del controlador de biblioteca.")
 
 
 class _FakeCursor:
-    def __init__(self, fetches=None, rowcounts=None):
+    def __init__(self, fetches=None, rowcounts=None, fetchalls=None):
         self._fetches = list(fetches or [])
         self._rowcounts = list(rowcounts or [])
+        self._fetchalls = list(fetchalls or [])
         self.executed = []
         self.rowcount = 0
         self.description = []
@@ -22,6 +37,11 @@ class _FakeCursor:
         if self._fetches:
             return self._fetches.pop(0)
         return None
+
+    def fetchall(self):
+        if self._fetchalls:
+            return self._fetchalls.pop(0)
+        return []
 
 
 class _FakeConnection:
@@ -52,12 +72,14 @@ class _FakeDb:
 
 
 def _controller_with_conn(conn):
+    _skip_if_controller_unavailable()
     controller = BookProgressController.__new__(BookProgressController)
     controller.db = _FakeDb(conn)
     controller._ensured_dbs = set()
     controller._ensure_schema = lambda _db_name: None
     controller._instance_column_name = lambda _conn: "codigo_instancia"
     controller._problem_instance_column_name = lambda _conn: "codigo_instancia"
+    controller._problem_consistency_column_name = lambda _conn: "estado_consistencia"
     controller._touch_book = lambda cur, libro_id: cur.execute(
         "UPDATE libros_escaneo SET updated_at = NOW() WHERE id = %s",
         (int(libro_id),),
@@ -147,3 +169,79 @@ def test_actualizar_instancia_renames_problem_and_pending_references():
     assert cursor.executed[2][1] == ("problemas_resueltos", "impecus-book", "problemas_propuestos")
     assert "UPDATE problema_pending_changes SET codigo_instancia = %s" in cursor.executed[3][0]
     assert cursor.executed[3][1] == ("problemas_resueltos", "impecus-book", "problemas_propuestos")
+
+
+class BookProgressDashboardTests(unittest.TestCase):
+    def test_lightweight_books_health_summary_counts_only_real_problem_rows(self):
+        _skip_if_controller_unavailable()
+        cursor = _FakeCursor(fetchalls=[[(8, 1, 1, 2, 1, 0)]])
+        conn = _FakeConnection(cursor)
+        controller = _controller_with_conn(conn)
+        controller._pg_table_exists = lambda _conn, table: table in {"libro_instancias_escaneo", "libros_escaneo", "problemas"}
+
+        summary = controller._query_books_instance_health_summary(conn)
+
+        self.assertEqual(summary[8]["instances_in_db_total"], 1)
+        self.assertEqual(summary[8]["instances_with_errors_total"], 1)
+        query = cursor.executed[0][0]
+        self.assertIn("COUNT(p.id) FILTER", query)
+        self.assertNotIn("COUNT(*) FILTER ( WHERE LOWER(COALESCE(p.", query)
+
+    def test_obtener_dashboard_uses_batched_uploaded_stats_for_instances(self):
+        _skip_if_controller_unavailable()
+        controller = BookProgressController.__new__(BookProgressController)
+        controller._normalize_instance_type = lambda value: str(value or "").strip().lower()
+        controller._normalize_resource_path_text = lambda value, prefer_existing=False: str(value or "").strip()
+        controller._path_exists = lambda _raw_path: False
+        controller._resource_status_label = lambda raw_path, exists: "OK" if raw_path and exists else ("Falta" if raw_path else "-")
+        controller._extract_session_instance_stats = lambda _path: {
+            "items_count": 2,
+            "con_clave": 1,
+            "con_solucion": 0,
+            "sin_clave": 1,
+            "sin_solucion": 2,
+            "status": "OK",
+            "numeros": {1, 2},
+        }
+        batch_calls = []
+
+        def _batch(_db_name, *, libro_codigo, instancia_tipos):
+            batch_calls.append((libro_codigo, list(instancia_tipos)))
+            return {
+                "s01": {
+                    "subidos_bd": 3,
+                    "subidos_bd_con_solucion": 1,
+                    "subidos_bd_sin_solucion": 2,
+                    "subidos_bd_consistentes": 3,
+                    "subidos_bd_inconsistentes": 0,
+                    "subidos_bd_sin_revisar": 0,
+                },
+                "s02": {
+                    "subidos_bd": 4,
+                    "subidos_bd_con_solucion": 2,
+                    "subidos_bd_sin_solucion": 2,
+                    "subidos_bd_consistentes": 3,
+                    "subidos_bd_inconsistentes": 1,
+                    "subidos_bd_sin_revisar": 0,
+                },
+            }
+
+        controller._query_uploaded_problem_stats_by_instance = _batch
+        controller._query_uploaded_problem_stats = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("No debe consultar subidos por instancia si existe batch.")
+        )
+
+        dashboard = controller.obtener_dashboard_libro(
+            "demo_db",
+            7,
+            book={"id": 7, "codigo": "ALG01", "titulo": "Algebra", "estado": "pendiente", "pdf_path": ""},
+            instance_rows=[
+                {"id": 11, "tipo": "S01", "total_esperado": 5, "session_path": "s01.json", "soluciones_dir": ""},
+                {"id": 12, "tipo": "S02", "total_esperado": 5, "session_path": "s02.json", "soluciones_dir": ""},
+            ],
+        )
+
+        self.assertEqual(batch_calls, [("ALG01", ["S01", "S02"])])
+        self.assertEqual(dashboard.subidos_bd_total, 7)
+        self.assertEqual(dashboard.subidos_bd_con_solucion_total, 3)
+        self.assertEqual(dashboard.subidos_bd_inconsistentes_total, 1)

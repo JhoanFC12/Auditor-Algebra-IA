@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import gzip
 import json
 import os
 import tempfile
@@ -15,7 +16,7 @@ from modulos.instance_factory.library_api import LibraryWebApi, _timeline_stage_
 from modulos.instance_factory.library_web_server import LibraryWebRuntime
 from modulos.instance_factory.models import InstancePipelineContext
 from modulos.instance_factory.staging import InstanceStagingStore
-from modulos.instance_factory.web_server import FactoryWebRuntime
+from modulos.instance_factory.web_server import FactoryWebRuntime, _FilePayload
 
 
 def _post_json(base: str, path: str, body: dict) -> dict:
@@ -93,8 +94,8 @@ class _FakeController:
     def listar_bases_datos(self):
         return ["demo_db"]
 
-    def listar_libros(self, _db_name):
-        self.book_list_calls.append(str(_db_name))
+    def listar_libros(self, _db_name, *, include_instance_health=True):
+        self.book_list_calls.append((str(_db_name), bool(include_instance_health)))
         return [dict(row) for row in self.books.values()]
 
     def obtener_libro(self, _db_name, libro_id):
@@ -309,7 +310,7 @@ class LibraryWebApiTests(unittest.TestCase):
         first["books"][0]["title"] = "mutado en cliente"
         second = api.dispatch("GET", "/api/library/books", {"db_name": ["demo_db"]}, {})
 
-        self.assertEqual(controller.book_list_calls, ["demo_db"])
+        self.assertEqual(controller.book_list_calls, [("demo_db", False)])
         self.assertEqual(second["books"][0]["title"], "Algebra")
 
         with_instances = api.dispatch("GET", "/api/library/books", {"db_name": ["demo_db"], "include_instances": ["1"]}, {})
@@ -320,13 +321,71 @@ class LibraryWebApiTests(unittest.TestCase):
 
         forced = api.dispatch("GET", "/api/library/books", {"db_name": ["demo_db"], "no_cache": ["1"]}, {})
         self.assertEqual(forced["books"][0]["title"], "Algebra")
-        self.assertEqual(controller.book_list_calls, ["demo_db", "demo_db", "demo_db"])
+        self.assertEqual(controller.book_list_calls, [("demo_db", False), ("demo_db", True), ("demo_db", False)])
 
         api.dispatch("POST", "/api/library/books/1/state", {}, {"db_name": "demo_db", "estado": "en_progreso"})
         refreshed = api.dispatch("GET", "/api/library/books", {"db_name": ["demo_db"]}, {})
 
-        self.assertEqual(controller.book_list_calls, ["demo_db", "demo_db", "demo_db", "demo_db"])
+        self.assertEqual(controller.book_list_calls, [("demo_db", False), ("demo_db", True), ("demo_db", False), ("demo_db", False)])
         self.assertEqual(refreshed["books"][0]["status"], "en_progreso")
+
+    def test_library_books_response_compacts_instance_health_payload(self) -> None:
+        controller = _FakeController()
+        controller.books[1]["instances_total"] = 2
+        controller.books[1]["instances_health"] = [
+            {"tipo": "S01", "total": 4, "sin_revisar": 0, "inconsistentes": 0, "consistentes": 4, "status": "complete"},
+            {"tipo": "S02", "total": 3, "sin_revisar": 0, "inconsistentes": 1, "consistentes": 2, "status": "complete_with_inconsistencies"},
+        ]
+        controller.books[1]["instances_health_json"] = json.dumps(controller.books[1]["instances_health"], ensure_ascii=False)
+        controller.books[1]["instances_names"] = "S01, S02"
+        controller.instances[1].append(
+            {
+                "id": 12,
+                "libro_id": 1,
+                "tipo": "S02",
+                "total_esperado": 10,
+                "session_path": "",
+                "soluciones_dir": "",
+                "activo": True,
+                "notas": "",
+            }
+        )
+        api = LibraryWebApi(controller=controller)
+
+        books = api.dispatch("GET", "/api/library/books", {"db_name": ["demo_db"]}, {})
+        book = books["books"][0]
+
+        self.assertEqual(controller.book_list_calls[-1], ("demo_db", False))
+        self.assertNotIn("instances_health", book)
+        self.assertNotIn("instances_health_json", book)
+        self.assertNotIn("instances_names", book)
+        self.assertEqual(book["indicators"]["instancias_en_bd"], 2)
+        self.assertEqual(book["indicators"]["errores_total"], 1)
+
+        books_with_instances = api.dispatch("GET", "/api/library/books", {"db_name": ["demo_db"], "include_instances": ["1"]}, {})
+        self.assertEqual(controller.book_list_calls[-1], ("demo_db", True))
+        instances = {row["tipo"]: row for row in books_with_instances["books"][0]["instances"]}
+        self.assertEqual(instances["S02"]["indicators"]["inconsistentes"], 1)
+
+    def test_library_runtime_snapshot_compacts_instance_health_payload(self) -> None:
+        controller = _FakeController()
+        controller.books[1]["instances_health"] = [
+            {"tipo": "S01", "total": 4, "sin_revisar": 0, "inconsistentes": 0, "consistentes": 4, "status": "complete"},
+            {"tipo": "S02", "total": 2, "sin_revisar": 0, "inconsistentes": 1, "consistentes": 1, "status": "complete_with_inconsistencies"},
+        ]
+        controller.books[1]["instances_health_json"] = json.dumps(controller.books[1]["instances_health"], ensure_ascii=False)
+        controller.books[1]["instances_names"] = "S01, S02"
+        runtime = LibraryWebRuntime(controller=controller)
+
+        snapshot = runtime._snapshot("demo_db")
+        book = snapshot["books"][0]
+
+        self.assertEqual(controller.book_list_calls[-1], ("demo_db", False))
+        self.assertNotIn("instances_health", book)
+        self.assertNotIn("instances_health_json", book)
+        self.assertNotIn("instances_names", book)
+        self.assertEqual(book["indicators"]["instancias_en_bd"], 2)
+        self.assertEqual(book["indicators"]["errores_total"], 1)
 
     def test_library_mutations_return_lightweight_payloads_without_dashboard_scan(self) -> None:
         controller = _FakeController()
@@ -398,6 +457,32 @@ class LibraryWebApiTests(unittest.TestCase):
                 self.assertEqual(raised.exception.code, 304)
             finally:
                 runtime.stop()
+
+    def test_library_runtime_gzips_large_json_when_requested(self) -> None:
+        controller = _FakeController()
+        for index in range(2, 45):
+            controller.books[index] = {
+                **controller.books[1],
+                "id": index,
+                "codigo": f"ALG{index:02d}",
+                "titulo": f"Algebra volumen {index:02d} " + ("con metadata extensa " * 4),
+            }
+            controller.instances[index] = []
+        runtime = LibraryWebRuntime(controller=controller)
+        try:
+            base = runtime.start()
+            request = urllib.request.Request(
+                base + "api/library/books?db_name=demo_db",
+                headers={"Accept-Encoding": "gzip"},
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                self.assertEqual(response.headers.get("Content-Encoding"), "gzip")
+                payload = json.loads(gzip.decompress(response.read()).decode("utf-8"))
+        finally:
+            runtime.stop()
+
+        self.assertEqual(payload["schema_version"], "library_books_v1")
+        self.assertGreaterEqual(payload["count"], 40)
 
     def test_library_runtime_pastes_cover_into_central_store_and_attaches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -598,6 +683,50 @@ class LibraryWebApiTests(unittest.TestCase):
         self.assertEqual(second["pages_total"], 2)
         self.assertEqual(second["records_total"], 5)
 
+    def test_local_timeline_counts_reuses_golden_controller_across_instances(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            book = {
+                "id": 1,
+                "codigo": "ALG01",
+                "titulo": "Algebra",
+                "workspace_dir": str(root),
+                "pdf_path": str(root / "book.pdf"),
+            }
+            first_instance = {"id": 11, "libro_id": 1, "tipo": "S01", "total_esperado": 10}
+            second_instance = {"id": 12, "libro_id": 1, "tipo": "S02", "total_esperado": 10}
+
+            class _GoldenCounter:
+                def __init__(self):
+                    self.calls = 0
+
+                def load_instance_summary(self, _name):
+                    self.calls += 1
+                    return {"pages_total": 2, "reviewed_pages": 1, "boxes_total": 5}
+
+                def load_instance(self, _name):
+                    raise AssertionError("No debe leer paginas si existe resumen.")
+
+            golden = _GoldenCounter()
+            created = []
+
+            def _factory():
+                created.append(golden)
+                return golden
+
+            api = LibraryWebApi(controller=_FakeController())
+            with patch(
+                "modulos.modulo13_laboratorio_pdf_segmentacion.controlador_laboratorio_pdf.PdfProblemGoldenController",
+                side_effect=_factory,
+            ):
+                first = api._cached_local_timeline_counts("demo_db", book, first_instance)
+                second = api._cached_local_timeline_counts("demo_db", book, second_instance)
+
+        self.assertEqual(len(created), 1)
+        self.assertEqual(golden.calls, 2)
+        self.assertEqual(first["pages_total"], 2)
+        self.assertEqual(second["boxes_total"], 5)
+
     def test_library_runtime_serves_factory_file_token_from_non_active_instance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -650,6 +779,57 @@ class LibraryWebApiTests(unittest.TestCase):
                     self.assertEqual(response.headers.get_content_type(), "image/png")
             finally:
                 library.stop()
+
+    def test_library_runtime_serves_factory_file_from_preferred_instance_first(self) -> None:
+        class _PreferredRuntime:
+            _library_instance_id = 11
+
+            def __init__(self):
+                self.calls = 0
+
+            def _dispatch_api(self, method, path, query, payload):
+                self.calls += 1
+                self.seen = (method, path, query, payload)
+                return _FilePayload(Path("preferred.png"), "image/png")
+
+        class _BadRuntime:
+            _library_instance_id = 12
+
+            @property
+            def _file_tokens(self):
+                raise AssertionError("No debe escanear runtimes no preferidos cuando instance_id resuelve.")
+
+            def _dispatch_api(self, method, path, query, payload):
+                raise AssertionError("No debe despachar archivos desde otro runtime.")
+
+        library = LibraryWebRuntime(controller=_FakeController())
+        preferred = _PreferredRuntime()
+        library._factory_runtime_by_instance_id[11] = preferred
+        library._factory_runtimes.extend([_BadRuntime()])
+
+        payload = library._dispatch_factory_file("/api/file/token123", {"instance_id": ["11"]})
+
+        self.assertEqual(payload.path, Path("preferred.png"))
+        self.assertEqual(payload.content_type, "image/png")
+        self.assertEqual(preferred.calls, 1)
+        self.assertEqual(preferred.seen[0], "GET")
+
+    def test_library_runtime_indexes_factory_runtime_by_instance_id(self) -> None:
+        class _Runtime:
+            def __init__(self, instance_id):
+                self._library_instance_id = instance_id
+
+            def stop(self):
+                return None
+
+        library = LibraryWebRuntime(controller=_FakeController())
+        runtime_one = _Runtime(11)
+        runtime_two = _Runtime(12)
+        library._factory_runtimes.extend([runtime_one, runtime_two])
+
+        self.assertIs(library._runtime_by_instance_id(12), runtime_two)
+        self.assertIs(library._factory_runtime_by_instance_id[12], runtime_two)
+        self.assertIs(library._runtime_by_instance_id(12), runtime_two)
 
     def test_library_runtime_serves_library_boot_shell(self) -> None:
         runtime = LibraryWebRuntime(controller=_FakeController())
@@ -784,7 +964,14 @@ class LibraryWebApiTests(unittest.TestCase):
                 "api/library/instances/11/factory",
                 {"db_name": "demo_db", "book_id": 1, "open": False},
             )
+            opened_again = _post_json(
+                base,
+                "api/library/instances/11/factory",
+                {"db_name": "demo_db", "book_id": 1, "open": False},
+            )
             self.assertEqual(opened["schema_version"], "library_instance_factory_prepared_v1")
+            self.assertEqual(opened_again["schema_version"], "library_instance_factory_prepared_v1")
+            self.assertEqual(len(proxies), 1)
             payload = _post_json(base, "api/ocr/raw", {"record_id": "crop_001", "raw_ocr": "texto"})
 
             self.assertEqual(payload["schema_version"], "proxied_factory_v1")

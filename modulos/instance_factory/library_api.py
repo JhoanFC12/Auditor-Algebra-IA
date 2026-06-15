@@ -77,10 +77,12 @@ class LibraryWebApi:
         self.open_url = open_url or _default_open_url
         self.file_url_resolver = file_url_resolver
         self._factory_runtimes: list[Any] = []
+        self._factory_runtime_by_instance: dict[tuple[str, int, int], Any] = {}
         self._response_cache: dict[tuple[str, str, tuple[tuple[str, tuple[str, ...]], ...]], tuple[float, dict[str, Any]]] = {}
         self._response_cache_ttl_s = 2.0
         self._local_timeline_cache: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
         self._local_timeline_cache_ttl_s = 8.0
+        self._timeline_golden_controller: Any | None = None
 
     @property
     def controller(self) -> Any:
@@ -224,12 +226,13 @@ class LibraryWebApi:
         db_name = _required_db(query=query)
         include_instances = _query_bool(query, "include_instances", default=False)
         books = []
-        for row in self.controller.listar_libros(db_name):
-            book = self._book_summary(db_name, dict(row))
+        for row in self._list_books(db_name, include_instance_health=include_instances):
+            raw_book = dict(row)
+            book = self._book_summary(db_name, raw_book)
             book_id = int(book.get("id") or 0)
             if include_instances and book_id > 0:
                 try:
-                    book["instances"] = self._lightweight_instances(db_name, book_id, book)
+                    book["instances"] = self._lightweight_instances(db_name, book_id, raw_book)
                 except Exception:
                     book["instances"] = []
             books.append(book)
@@ -240,6 +243,14 @@ class LibraryWebApi:
             "count": len(books),
             "policy": _policy(),
         }
+
+    def _list_books(self, db_name: str, *, include_instance_health: bool = False) -> list[dict[str, Any]]:
+        try:
+            return [dict(row) for row in self.controller.listar_libros(db_name, include_instance_health=include_instance_health)]
+        except TypeError as exc:
+            if "include_instance_health" not in str(exc):
+                raise
+            return [dict(row) for row in self.controller.listar_libros(db_name)]
 
     def _lightweight_instances(self, db_name: str, book_id: int, book: dict[str, Any]) -> list[dict[str, Any]]:
         health_by_type = {
@@ -354,6 +365,7 @@ class LibraryWebApi:
         if incoming_name:
             merged["tipo"] = incoming_name
         self.controller.actualizar_instancia(db_name, instance_id, _instance_update_input(asdict(_instance_input(merged, book_id=book_id))))
+        self._factory_runtime_by_instance.pop((db_name, int(book_id), int(instance_id)), None)
         book = self.controller.obtener_libro(db_name, book_id) or {"id": book_id}
         updated = self._instance_by_id(db_name, book_id, instance_id) or merged
         updated = self._lightweight_instance(db_name, dict(book), dict(updated))
@@ -377,13 +389,18 @@ class LibraryWebApi:
         if instance is None:
             raise FileNotFoundError("Instancia no encontrada.")
         context = InstancePipelineContext.from_library_instance(book, instance, db_name=db_name)
-        runtime = self.runtime_factory(context)
-        setattr(runtime, "_library_db_name", db_name)
-        setattr(runtime, "_library_book_id", int(book_id))
-        setattr(runtime, "_library_instance_id", int(instance_id))
+        runtime_key = (db_name, int(book_id), int(instance_id))
+        runtime = self._factory_runtime_by_instance.get(runtime_key)
+        if runtime is None:
+            runtime = self.runtime_factory(context)
+            setattr(runtime, "_library_db_name", db_name)
+            setattr(runtime, "_library_book_id", int(book_id))
+            setattr(runtime, "_library_instance_id", int(instance_id))
+            self._factory_runtime_by_instance[runtime_key] = runtime
+            if runtime not in self._factory_runtimes:
+                self._factory_runtimes.append(runtime)
         embedded = bool(payload.get("embedded") or payload.get("stable") or payload.get("use_library_server"))
         url = "" if embedded else runtime.start()
-        self._factory_runtimes.append(runtime)
         opened = bool(payload.get("open") or payload.get("abrir"))
         if opened and self.open_url is not None:
             self.open_url(url, f"Fabrica PDF - {context.book_code} / {context.instance_type}")
@@ -442,6 +459,7 @@ class LibraryWebApi:
 
     def _book_summary(self, db_name: str, book: dict[str, Any], *, dashboard: dict[str, Any] | None = None) -> dict[str, Any]:
         row = dict(book)
+        health = _parse_instances_health(row)
         row["db_name"] = db_name
         row["code"] = str(row.get("code") or row.get("codigo") or "").strip()
         row["title"] = str(row.get("title") or row.get("titulo") or "").strip()
@@ -467,13 +485,32 @@ class LibraryWebApi:
                 "porcentaje_total": float(dashboard.get("porcentaje_total") or 0.0),
             }
         else:
+            health_in_db = (
+                sum(1 for item in health if int(item.get("total") or item.get("subidos_bd") or 0) > 0)
+                if health
+                else int(row.get("instances_in_db_total") or row.get("instances_en_bd_total") or 0)
+            )
+            health_errors = (
+                sum(
+                    1
+                    for item in health
+                    if int(item.get("inconsistentes") or 0) > 0
+                    or str(item.get("status") or "") == "complete_with_inconsistencies"
+                )
+                if health
+                else int(row.get("instances_with_errors_total") or row.get("instances_error_total") or 0)
+            )
             row["indicators"] = {
                 "total_instancias": int(row.get("instances_total") or 0),
                 "total_esperado": int(row.get("instances_expected_total") or 0),
+                "instancias_en_bd": health_in_db,
                 "consistentes_total": int(row.get("consistency_consistentes_total") or 0),
                 "inconsistentes_total": int(row.get("consistency_inconsistentes_total") or 0),
                 "sin_revisar_total": int(row.get("consistency_sin_revisar_total") or 0),
+                "errores_total": health_errors,
             }
+        for heavy_key in ("instances_health", "instances_health_json", "instances_names"):
+            row.pop(heavy_key, None)
         return row
 
     def _instance_by_id(self, db_name: str, book_id: int, instance_id: int) -> dict[str, Any] | None:
@@ -507,9 +544,16 @@ class LibraryWebApi:
             if time.monotonic() - created_at <= self._local_timeline_cache_ttl_s:
                 return copy.deepcopy(payload)
             self._local_timeline_cache.pop(key, None)
-        counts = self._local_timeline_counts(db_name, book, instance)
+        counts = self._local_timeline_counts(db_name, book, instance, golden=self._timeline_golden())
         self._local_timeline_cache[key] = (time.monotonic(), copy.deepcopy(counts))
         return counts
+
+    def _timeline_golden(self) -> Any:
+        if self._timeline_golden_controller is None:
+            from modulos.modulo13_laboratorio_pdf_segmentacion.controlador_laboratorio_pdf import PdfProblemGoldenController
+
+            self._timeline_golden_controller = PdfProblemGoldenController()
+        return self._timeline_golden_controller
 
     @staticmethod
     def _local_timeline_cache_key(db_name: str, book: dict[str, Any], instance: dict[str, Any]) -> tuple[str, str, str]:
@@ -532,15 +576,22 @@ class LibraryWebApi:
         return (str(db_name or ""), book_key, instance_key)
 
     @staticmethod
-    def _local_timeline_counts(db_name: str, book: dict[str, Any], instance: dict[str, Any]) -> dict[str, Any]:
+    def _local_timeline_counts(
+        db_name: str,
+        book: dict[str, Any],
+        instance: dict[str, Any],
+        *,
+        golden: Any | None = None,
+    ) -> dict[str, Any]:
         counts: dict[str, Any] = {}
         try:
-            from modulos.modulo13_laboratorio_pdf_segmentacion.controlador_laboratorio_pdf import PdfProblemGoldenController
-
             from .staging import InstanceStagingStore
 
             context = InstancePipelineContext.from_library_instance(book, instance, db_name=db_name)
-            golden = PdfProblemGoldenController()
+            if golden is None:
+                from modulos.modulo13_laboratorio_pdf_segmentacion.controlador_laboratorio_pdf import PdfProblemGoldenController
+
+                golden = PdfProblemGoldenController()
             page_summary = golden.load_instance_summary(context.instance_name)
             if page_summary is not None:
                 counts["pages_total"] = int(page_summary.get("pages_total") or 0)

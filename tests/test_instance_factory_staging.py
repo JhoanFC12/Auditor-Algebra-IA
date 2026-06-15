@@ -161,6 +161,43 @@ class InstanceFactoryStagingTests(unittest.TestCase):
         finally:
             staging_module._STATIC_MANIFEST_PAYLOAD_CACHE.clear()
 
+    def test_load_record_entries_can_reuse_known_signature_without_hiding_external_changes(self) -> None:
+        class CountingStore(InstanceStagingStore):
+            def __init__(self, context: InstancePipelineContext, root: Path) -> None:
+                super().__init__(context, root=root)
+                self.signature_scans = 0
+
+            def _scan_records_dir_signature(self) -> tuple[tuple[str, int, int], ...]:
+                self.signature_scans += 1
+                return super()._scan_records_dir_signature()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s01")
+            store = CountingStore(context, root=Path(tmp) / "staging")
+            record = StagingProblemRecord(
+                record_id="crop_001",
+                crop_id="crop_001",
+                crop_path=str(Path(tmp) / "crop.png"),
+                status=StageStatus.PENDING,
+            )
+            store.upsert_record(record)
+
+            store.signature_scans = 0
+            known_signature = store._records_dir_signature()
+            entries = store.load_record_entries(signature=known_signature)
+
+            self.assertEqual(entries[0][1].record_id, "crop_001")
+            self.assertEqual(store.signature_scans, 1)
+
+            path = store._record_path("crop_001")
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["raw_ocr"] = "externo inmediato"
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            store.signature_scans = 0
+            self.assertEqual(store.load_records()[0].raw_ocr, "externo inmediato")
+            self.assertEqual(store.signature_scans, 1)
+
     def test_record_steps_are_normalized_and_manifest_counts_by_step(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = InstancePipelineContext(book_code="ALG01", instance_type="s01")

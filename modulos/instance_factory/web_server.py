@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import gzip
 import hashlib
 import json
 import mimetypes
@@ -30,6 +31,8 @@ from .db_promotion import promote_staging_records_to_db
 
 
 WEB_APP_ASSET_NAMES = ("index.html", "app.js", "styles.css")
+SNAPSHOT_SIGNATURE_CACHE_TTL_S = 0.75
+NORMALIZER_TRAINING_STATUS_CACHE_TTL_S = 5.0
 WEB_BACKEND_SOURCE_NAMES = (
     "web_server.py",
     "library_web_server.py",
@@ -181,6 +184,10 @@ class FactoryWebRuntime:
         self._file_url_cache: dict[str, tuple[tuple[int, int, str], str, str]] = {}
         self._page_web_cache: dict[str, tuple[tuple[Any, ...], dict[str, Any]]] = {}
         self._record_web_cache: dict[str, tuple[tuple[Any, ...], dict[str, Any]]] = {}
+        self._snapshot_cache: tuple[tuple[Any, ...], dict[str, Any]] | None = None
+        self._summary_cache: tuple[tuple[Any, ...], dict[str, Any]] | None = None
+        self._normalizer_training_status_cache: tuple[float, dict[str, Any]] | None = None
+        self._signature_cache: dict[str, tuple[float, tuple[Any, ...], tuple[Any, ...]]] = {}
         self._trusted_file_roots_cache: list[Path] | None = None
         self._lock = threading.RLock()
         self._job_lock = threading.RLock()
@@ -281,6 +288,8 @@ class FactoryWebRuntime:
             if path.startswith("/api/library/"):
                 return self.library_api.dispatch(method, path, query, payload)
             self._ensure_allowed_method(method, path)
+            if method == "POST":
+                self._invalidate_response_caches()
             if method == "GET" and path == "/api/bootstrap":
                 return self._snapshot()
             if method == "GET" and path == "/api/summary":
@@ -343,9 +352,9 @@ class FactoryWebRuntime:
                     if self._bool(payload.get("include_summary"), default=True):
                         all_records = self.service.staging.load_records()
                         pages = self.service.load_pages()
-                        summary = self.service.staging.summarize_records(all_records)
-                        report["summary"] = self._build_instance_summary_cached(pages, all_records, summary)
-                        report["timeline"] = self._build_stage_overview_cached(pages, all_records, summary)
+                        summary_payload = self._summary_payload(pages=pages, records=all_records, cacheable=True)
+                        report["summary"] = summary_payload["summary"]
+                        report["timeline"] = summary_payload["timeline"]
                 return report
             if method == "GET" and path == "/api/endpoint/ocr/status":
                 status = dict(self.endpoint_manager.status())
@@ -379,18 +388,26 @@ class FactoryWebRuntime:
                     dpi=dpi,
                     confidence=confidence,
                     detector_model=str(payload.get("detector_model") or ""),
+                    replace_existing=self._bool(payload.get("replace_existing"), default=False),
                 )
                 if self._bool(payload.get("compact"), default=False):
+                    invalidated_count = int(getattr(self.service, "_last_pages_detect_invalidated_count", 0) or 0)
+                    removed_count = int(getattr(self.service, "_last_pages_detect_removed_count", 0) or 0)
+                    invalidated_records = list(getattr(self.service, "_last_pages_detect_invalidated_records", []) or [])
                     response: dict[str, Any] = {
                         "schema_version": "pdf_factory_web_pages_detected_v1",
                         "selected_pages": selected,
                         "pages": [self._page_to_web(row) for row in detected_pages],
+                        "removed_pages": removed_count,
+                        "invalidated_records": invalidated_count,
                     }
+                    if invalidated_records:
+                        response["updated_records"] = [self._record_to_web(record) for record in invalidated_records]
                     if self._bool(payload.get("include_summary"), default=False):
                         records = self.service.staging.load_records()
-                        summary = self.service.staging.summarize_records(records)
-                        response["summary"] = self._build_instance_summary_cached(detected_pages, records, summary)
-                        response["timeline"] = self._build_stage_overview_cached(detected_pages, records, summary)
+                        summary_payload = self._summary_payload(pages=detected_pages, records=records, cacheable=True)
+                        response["summary"] = summary_payload["summary"]
+                        response["timeline"] = summary_payload["timeline"]
                     return response
                 return self._snapshot()
             if method == "POST" and path == "/api/pages/boxes":
@@ -418,9 +435,9 @@ class FactoryWebRuntime:
                     if include_summary:
                         records = self.service.staging.load_records()
                         pages = self.service.load_pages()
-                        summary = self.service.staging.summarize_records(records)
-                        response["summary"] = self._build_instance_summary_cached(pages, records, summary)
-                        response["timeline"] = self._build_stage_overview_cached(pages, records, summary)
+                        summary_payload = self._summary_payload(pages=pages, records=records, cacheable=True)
+                        response["summary"] = summary_payload["summary"]
+                        response["timeline"] = summary_payload["timeline"]
                     return response
                 return self._snapshot()
             if method == "POST" and path == "/api/pages/delete":
@@ -440,18 +457,18 @@ class FactoryWebRuntime:
                         response["updated_records"] = [self._record_to_web(record) for record in invalidated_records]
                     if include_summary:
                         records = self.service.staging.load_records()
-                        summary = self.service.staging.summarize_records(records)
-                        response["summary"] = self._build_instance_summary_cached(pages, records, summary)
-                        response["timeline"] = self._build_stage_overview_cached(pages, records, summary)
+                        summary_payload = self._summary_payload(pages=pages, records=records, cacheable=True)
+                        response["summary"] = summary_payload["summary"]
+                        response["timeline"] = summary_payload["timeline"]
                     return response
                 records = self.service.staging.load_records()
-                summary = self.service.staging.summarize_records(records)
+                summary_payload = self._summary_payload(pages=pages, records=records, cacheable=True)
                 return {
                     "schema_version": "pdf_factory_web_page_deleted_v1",
                     "record_id": deleted_id,
                     "pages": [self._page_to_web(row) for row in pages],
-                    "summary": self._build_instance_summary_cached(pages, records, summary),
-                    "timeline": self._build_stage_overview_cached(pages, records, summary),
+                    "summary": summary_payload["summary"],
+                    "timeline": summary_payload["timeline"],
                     "records": [self._record_to_web(record) for record in records],
                 }
             if method == "POST" and path == "/api/staging/materialize":
@@ -459,14 +476,14 @@ class FactoryWebRuntime:
                 if self._bool(payload.get("compact"), default=False):
                     records = list(records or self.service.staging.load_records())
                     pages = self.service.load_pages()
-                    summary = self.service.staging.summarize_records(records)
                     response = {
                         "schema_version": "pdf_factory_web_staging_materialized_v1",
                         "records": [self._record_to_web(record) for record in records],
                     }
                     if self._bool(payload.get("include_summary"), default=True):
-                        response["summary"] = self._build_instance_summary_cached(pages, records, summary)
-                        response["timeline"] = self._build_stage_overview_cached(pages, records, summary)
+                        summary_payload = self._summary_payload(pages=pages, records=records, cacheable=True)
+                        response["summary"] = summary_payload["summary"]
+                        response["timeline"] = summary_payload["timeline"]
                     return response
                 return self._snapshot()
             if method == "POST" and path == "/api/ocr/run":
@@ -494,9 +511,9 @@ class FactoryWebRuntime:
                     if self._bool(payload.get("include_summary"), default=True):
                         all_records = self.service.staging.load_records()
                         pages = self.service.load_pages()
-                        summary = self.service.staging.summarize_records(all_records)
-                        response["summary"] = self._build_instance_summary_cached(pages, all_records, summary)
-                        response["timeline"] = self._build_stage_overview_cached(pages, all_records, summary)
+                        summary_payload = self._summary_payload(pages=pages, records=all_records, cacheable=True)
+                        response["summary"] = summary_payload["summary"]
+                        response["timeline"] = summary_payload["timeline"]
                     return response
                 return self._snapshot()
             if method == "POST" and path in {"/api/segments/boxes", "/api/ocr/segments/boxes"}:
@@ -996,10 +1013,16 @@ class FactoryWebRuntime:
         return "segments_total" in figure or isinstance(figure.get("segments"), list)
 
     def _normalizer_training_status(self) -> dict[str, Any]:
+        cached = self._normalizer_training_status_cache
+        if cached is not None:
+            created_at, payload = cached
+            if time.monotonic() - created_at <= NORMALIZER_TRAINING_STATUS_CACHE_TTL_S:
+                return copy.deepcopy(payload)
+            self._normalizer_training_status_cache = None
         manifest = load_normalizer_training_manifest()
         samples_total = int(manifest.get("samples_total") or 0)
         threshold = int(manifest.get("threshold") or 200)
-        return {
+        payload = {
             **manifest,
             "schema_version": "normalizer_training_bank_status_v1",
             "samples_total": samples_total,
@@ -1011,20 +1034,32 @@ class FactoryWebRuntime:
                 else ""
             ),
         }
+        self._normalizer_training_status_cache = (time.monotonic(), copy.deepcopy(payload))
+        return payload
 
     def _snapshot(self) -> dict[str, Any]:
+        signature = self._snapshot_cache_signature()
+        if signature is not None and self._snapshot_cache is not None and self._snapshot_cache[0] == signature:
+            return copy.deepcopy(self._snapshot_cache[1])
         pages = self.service.load_pages()
-        record_entries = self.service.staging.load_record_entries()
+        record_entries = self._load_record_entries_for_snapshot(signature)
         records = [record for _path, record in record_entries]
-        summary = self.service.staging.summarize_records(records)
-        return {
+        file_signature_cache: dict[str, tuple[Path, int, int] | None] = {}
+        summary = self.service.staging.summarize_records(
+            records,
+            crop_exists_resolver=lambda raw_path: self._file_stat_signature(Path(raw_path), file_signature_cache) is not None,
+        )
+        payload = {
             "schema_version": "pdf_factory_web_snapshot_v1",
             "context": self.context.to_dict(),
             "pdf": self._pdf_info(),
             "summary": self._build_instance_summary_cached(pages, records, summary),
             "timeline": self._build_stage_overview_cached(pages, records, summary),
             "pages": [self._page_to_web(row) for row in pages],
-            "records": [self._record_to_web(record, record_path=path) for path, record in record_entries],
+            "records": [
+                self._record_to_web(record, record_path=path, file_signature_cache=file_signature_cache)
+                for path, record in record_entries
+            ],
             "models": self.service.models.to_dict(),
             "policy": {
                 "target": "staging_only",
@@ -1033,6 +1068,176 @@ class FactoryWebRuntime:
                 "explicit_manual_upload_enabled": True,
             },
         }
+        if signature is not None:
+            self._snapshot_cache = (signature, copy.deepcopy(payload))
+        return payload
+
+    def _load_record_entries_for_snapshot(self, snapshot_signature: tuple[Any, ...] | None) -> list[tuple[Path, StagingProblemRecord]]:
+        record_signature = self._record_signature_from_snapshot_signature(snapshot_signature)
+        if record_signature is None:
+            return self.service.staging.load_record_entries()
+        try:
+            return self.service.staging.load_record_entries(signature=record_signature)
+        except TypeError as exc:
+            text = str(exc)
+            if "unexpected keyword" not in text and "positional" not in text and "argument" not in text:
+                raise
+            return self.service.staging.load_record_entries()
+
+    @staticmethod
+    def _record_signature_from_snapshot_signature(snapshot_signature: tuple[Any, ...] | None) -> tuple[tuple[str, int, int], ...] | None:
+        if not isinstance(snapshot_signature, tuple) or len(snapshot_signature) < 4:
+            return None
+        if snapshot_signature[0] != "snapshot":
+            return None
+        record_signature = snapshot_signature[3]
+        if not isinstance(record_signature, tuple):
+            return None
+        return record_signature
+
+    def _snapshot_cache_signature(self) -> tuple[Any, ...] | None:
+        base = self._state_cache_signature()
+        if base is None:
+            return None
+        return (
+            "snapshot",
+            *base,
+            self._pdf_file_signature(),
+            self._models_signature(),
+        )
+
+    def _summary_cache_signature(self) -> tuple[Any, ...] | None:
+        base = self._state_cache_signature()
+        if base is None:
+            return None
+        return ("summary", *base)
+
+    def _state_cache_signature(self) -> tuple[Any, ...] | None:
+        page_signature = self._page_records_signature_for_cache()
+        record_signature = self._record_entries_signature_for_cache()
+        if page_signature is None or record_signature is None:
+            return None
+        try:
+            context_signature = json.dumps(self.context.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        except Exception:
+            context_signature = repr(self.context)
+        return (context_signature, page_signature, record_signature)
+
+    def _page_records_signature_for_cache(self) -> tuple[Any, ...] | None:
+        guard = self._page_records_signature_guard()
+        cached = self._get_short_signature_cache("pages", guard)
+        if cached is not None:
+            return cached
+        page_signature = getattr(self.service, "_page_records_signature", None)
+        if not callable(page_signature):
+            return None
+        try:
+            signature = page_signature()
+        except Exception:
+            return None
+        self._set_short_signature_cache("pages", guard, signature)
+        return signature
+
+    def _record_entries_signature_for_cache(self) -> tuple[Any, ...] | None:
+        guard = self._record_entries_signature_guard()
+        cached = self._get_short_signature_cache("records", guard)
+        if cached is not None:
+            return cached
+        records_signature = getattr(getattr(self.service, "staging", None), "_records_dir_signature", None)
+        if not callable(records_signature):
+            return None
+        try:
+            signature = records_signature()
+        except Exception:
+            return None
+        self._set_short_signature_cache("records", guard, signature)
+        return signature
+
+    def _get_short_signature_cache(self, key: str, guard: tuple[Any, ...] | None) -> tuple[Any, ...] | None:
+        if guard is None:
+            return None
+        cached = self._signature_cache.get(key)
+        if cached is None:
+            return None
+        created_at, cached_guard, signature = cached
+        if cached_guard != guard:
+            self._signature_cache.pop(key, None)
+            return None
+        if time.monotonic() - created_at <= SNAPSHOT_SIGNATURE_CACHE_TTL_S:
+            return signature
+        self._signature_cache.pop(key, None)
+        return None
+
+    def _set_short_signature_cache(self, key: str, guard: tuple[Any, ...] | None, signature: tuple[Any, ...]) -> None:
+        if guard is None:
+            return
+        self._signature_cache[key] = (time.monotonic(), guard, signature)
+
+    def _page_records_signature_guard(self) -> tuple[Any, ...] | None:
+        instance_dir = getattr(getattr(self.service, "golden", None), "instance_dir", None)
+        if not callable(instance_dir):
+            return None
+        try:
+            root = Path(instance_dir(self.context.instance_name))
+            return (
+                self._directory_guard(root / "records"),
+                self._file_guard(root / "manifest.json"),
+            )
+        except Exception:
+            return None
+
+    def _record_entries_signature_guard(self) -> tuple[Any, ...] | None:
+        staging = getattr(self.service, "staging", None)
+        records_dir = getattr(staging, "records_dir", None)
+        if records_dir is None:
+            return None
+        try:
+            manifest_path = getattr(staging, "manifest_path", None)
+            return (
+                self._directory_guard(Path(records_dir)),
+                self._file_guard(Path(manifest_path)) if manifest_path is not None else ("", 0, 0),
+            )
+        except Exception:
+            return None
+
+    @staticmethod
+    def _directory_guard(path: Path) -> tuple[Any, ...]:
+        directory = Path(path)
+        try:
+            stat = directory.stat()
+            return (str(directory.expanduser().resolve()), int(stat.st_mtime_ns), int(stat.st_size))
+        except Exception:
+            return (str(directory), 0, 0)
+
+    @staticmethod
+    def _file_guard(path: Path) -> tuple[Any, ...]:
+        file_path = Path(path)
+        try:
+            stat = file_path.stat()
+            return (str(file_path.expanduser().resolve()), int(stat.st_mtime_ns), int(stat.st_size))
+        except Exception:
+            return (str(file_path), 0, 0)
+
+    def _pdf_file_signature(self) -> tuple[Any, ...]:
+        pdf_path = self.context.resolved_pdf_path()
+        try:
+            resolved = pdf_path.expanduser().resolve()
+            stat = resolved.stat()
+            return (str(resolved), int(stat.st_mtime_ns), int(stat.st_size))
+        except Exception:
+            return (str(pdf_path), 0, 0)
+
+    def _models_signature(self) -> str:
+        try:
+            return json.dumps(self.service.models.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        except Exception:
+            return repr(getattr(self.service, "models", ""))
+
+    def _invalidate_response_caches(self) -> None:
+        self._snapshot_cache = None
+        self._summary_cache = None
+        self._normalizer_training_status_cache = None
+        self._signature_cache.clear()
 
     def _build_instance_summary_cached(
         self,
@@ -1161,8 +1366,14 @@ class FactoryWebRuntime:
         self._page_web_cache[cache_key] = (signature, copy.deepcopy(payload))
         return payload
 
-    def _record_web_cache_signature(self, record: StagingProblemRecord, record_path: Path | None = None) -> tuple[Any, ...]:
+    def _record_web_cache_signature(
+        self,
+        record: StagingProblemRecord,
+        record_path: Path | None = None,
+        file_signature_cache: dict[str, tuple[Path, int, int] | None] | None = None,
+    ) -> tuple[Any, ...]:
         path_signature: tuple[Any, ...] = ("memory",)
+        content_signature = ""
         if record_path is not None:
             try:
                 resolved = Path(record_path).expanduser().resolve()
@@ -1170,13 +1381,15 @@ class FactoryWebRuntime:
                 path_signature = (str(resolved), int(stat.st_mtime_ns), int(stat.st_size))
             except Exception:
                 path_signature = (str(record_path), 0, 0)
+        else:
+            content_signature = self._record_memory_content_signature(record)
         crop_signature: tuple[Any, ...] = ("", 0, 0)
         if record.crop_path:
-            try:
-                crop_path = Path(record.crop_path).expanduser().resolve()
-                stat = crop_path.stat()
-                crop_signature = (str(crop_path), int(stat.st_mtime_ns), int(stat.st_size))
-            except Exception:
+            crop_stat = self._file_stat_signature(Path(record.crop_path), file_signature_cache)
+            if crop_stat is not None:
+                crop_path, mtime_ns, size = crop_stat
+                crop_signature = (str(crop_path), int(mtime_ns), int(size))
+            else:
                 crop_signature = (str(record.crop_path), 0, 0)
         segment_signatures: list[tuple[str, int, int]] = []
         figure = record.figure_segmentation if isinstance(record.figure_segmentation, dict) else {}
@@ -1186,11 +1399,11 @@ class FactoryWebRuntime:
             image_path_raw = str(segment.get("image_path") or "")
             if not image_path_raw:
                 continue
-            try:
-                image_path = Path(image_path_raw).expanduser().resolve()
-                stat = image_path.stat()
-                segment_signatures.append((str(image_path), int(stat.st_mtime_ns), int(stat.st_size)))
-            except Exception:
+            image_stat = self._file_stat_signature(Path(image_path_raw), file_signature_cache)
+            if image_stat is not None:
+                image_path, mtime_ns, size = image_stat
+                segment_signatures.append((str(image_path), int(mtime_ns), int(size)))
+            else:
                 segment_signatures.append((image_path_raw, 0, 0))
         return (
             path_signature,
@@ -1198,21 +1411,58 @@ class FactoryWebRuntime:
             tuple(segment_signatures),
             str(record.record_id or ""),
             str(record.updated_at or ""),
+            content_signature,
         )
 
-    def _record_to_web(self, record: StagingProblemRecord, *, record_path: Path | None = None) -> dict[str, Any]:
+    @staticmethod
+    def _record_memory_content_signature(record: StagingProblemRecord) -> str:
+        try:
+            raw = json.dumps(
+                {
+                    "status": StageStatus.normalize(record.status),
+                    "raw_ocr": record.raw_ocr,
+                    "structured_ocr": record.structured_ocr,
+                    "figure_segmentation": record.figure_segmentation,
+                    "normalized": record.normalized,
+                    "review": record.review,
+                    "steps": record.steps,
+                    "errors": record.errors,
+                    "training_examples_total": len(record.training_examples or []),
+                    "audit_downstream_state": dict(dict(record.audit or {}).get("downstream_state") or {}),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+        except Exception:
+            raw = repr((record.record_id, record.updated_at, record.raw_ocr, record.normalized, record.errors))
+        return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()
+
+    def _record_to_web(
+        self,
+        record: StagingProblemRecord,
+        *,
+        record_path: Path | None = None,
+        file_signature_cache: dict[str, tuple[Path, int, int] | None] | None = None,
+    ) -> dict[str, Any]:
         cache_key = ""
         signature: tuple[Any, ...] | None = None
         if record_path is not None:
             cache_key = str(Path(record_path).expanduser().resolve())
-            signature = self._record_web_cache_signature(record, record_path)
+        else:
+            record_key = str(record.record_id or record.crop_id or "").strip()
+            if record_key:
+                cache_key = f"memory:{record_key}"
+        if cache_key:
+            signature = self._record_web_cache_signature(record, record_path, file_signature_cache)
             cached = self._record_web_cache.get(cache_key)
             if cached is not None and cached[0] == signature:
                 return copy.deepcopy(cached[1])
         payload = record.to_dict()
         crop_path = Path(record.crop_path)
         downstream = dict(dict(record.audit or {}).get("downstream_state") or {})
-        crop_exists = bool(record.crop_path and crop_path.exists())
+        crop_exists = bool(record.crop_path and self._file_stat_signature(crop_path, file_signature_cache) is not None)
         figure = dict(record.figure_segmentation or {})
         structured = dict(record.structured_ocr or {})
         payload["training_examples_total"] = len(record.training_examples or [])
@@ -1230,7 +1480,7 @@ class FactoryWebRuntime:
         payload.pop("artifacts", None)
         payload.pop("audit", None)
         payload["crop_name"] = crop_path.name
-        payload["crop_url"] = self._register_file(crop_path) if crop_exists else ""
+        payload["crop_url"] = self._register_file(crop_path, file_signature_cache=file_signature_cache) if crop_exists else ""
         payload["status_label"] = StageStatus.normalize(record.status)
         payload["downstream_state"] = downstream
         payload["downstream_invalidated"] = downstream.get("status") == "invalidated"
@@ -1242,7 +1492,7 @@ class FactoryWebRuntime:
                 continue
             row = dict(segment)
             image_path = Path(str(row.get("image_path") or ""))
-            row["image_url"] = self._register_file(image_path) if image_path.exists() else ""
+            row["image_url"] = self._register_file(image_path, file_signature_cache=file_signature_cache)
             row["image_name"] = image_path.name
             segments.append(row)
         payload["figure_segments_web"] = segments
@@ -1266,14 +1516,42 @@ class FactoryWebRuntime:
         }
 
     def _summary_response(self) -> dict[str, Any]:
+        signature = self._summary_cache_signature()
+        if signature is not None and self._summary_cache is not None and self._summary_cache[0] == signature:
+            return copy.deepcopy(self._summary_cache[1])
         pages = self.service.load_pages()
         records = self.service.staging.load_records()
-        summary = self.service.staging.summarize_records(records)
-        return {
+        return self._summary_payload(pages=pages, records=records, cacheable=signature is not None, signature=signature)
+
+    def _summary_payload(
+        self,
+        *,
+        pages: list[Any] | None = None,
+        records: list[StagingProblemRecord] | None = None,
+        summary: dict[str, int] | None = None,
+        cacheable: bool = False,
+        signature: tuple[Any, ...] | None = None,
+    ) -> dict[str, Any]:
+        if pages is None and records is None and summary is None:
+            return self._summary_response()
+        pages = pages if pages is not None else self.service.load_pages()
+        records = records if records is not None else self.service.staging.load_records()
+        file_signature_cache: dict[str, tuple[Path, int, int] | None] = {}
+        if summary is None:
+            summary = self.service.staging.summarize_records(
+                records,
+                crop_exists_resolver=lambda raw_path: self._file_stat_signature(Path(raw_path), file_signature_cache) is not None,
+            )
+        payload = {
             "schema_version": "pdf_factory_web_summary_v1",
             "summary": self._build_instance_summary_cached(pages, records, summary),
             "timeline": self._build_stage_overview_cached(pages, records, summary),
         }
+        if cacheable:
+            signature = signature if signature is not None else self._summary_cache_signature()
+            if signature is not None:
+                self._summary_cache = (signature, copy.deepcopy(payload))
+        return payload
 
     def _record_saved_response(
         self,
@@ -1291,15 +1569,17 @@ class FactoryWebRuntime:
             payload["timeline"] = summary["timeline"]
         return payload
 
-    def _register_file(self, path: Path) -> str:
+    def _register_file(
+        self,
+        path: Path,
+        *,
+        file_signature_cache: dict[str, tuple[Path, int, int] | None] | None = None,
+    ) -> str:
         raw_path = Path(path)
-        if not raw_path.exists():
+        file_signature = self._file_stat_signature(raw_path, file_signature_cache)
+        if file_signature is None:
             return ""
-        try:
-            resolved = raw_path.expanduser().resolve()
-            stat = resolved.stat()
-        except Exception:
-            return ""
+        resolved, mtime_ns, size = file_signature
         instance_id = ""
         try:
             raw_instance_id = int(getattr(self, "_library_instance_id", 0) or 0)
@@ -1308,7 +1588,7 @@ class FactoryWebRuntime:
         except Exception:
             instance_id = ""
         cache_key = str(resolved)
-        signature = (int(stat.st_mtime_ns), int(stat.st_size), instance_id)
+        signature = (int(mtime_ns), int(size), instance_id)
         cached = self._file_url_cache.get(cache_key)
         if cached and cached[0] == signature:
             token, url = cached[1], cached[2]
@@ -1322,6 +1602,25 @@ class FactoryWebRuntime:
         url = f"/api/file/{token}{instance_id}"
         self._file_url_cache[cache_key] = (signature, token, url)
         return url
+
+    def _file_stat_signature(
+        self,
+        path: Path,
+        cache: dict[str, tuple[Path, int, int] | None] | None = None,
+    ) -> tuple[Path, int, int] | None:
+        raw_path = Path(path)
+        cache_key = str(raw_path)
+        if cache is not None and cache_key in cache:
+            return cache[cache_key]
+        try:
+            resolved = raw_path.expanduser().resolve()
+            stat = resolved.stat()
+            value: tuple[Path, int, int] | None = (resolved, int(stat.st_mtime_ns), int(stat.st_size))
+        except Exception:
+            value = None
+        if cache is not None:
+            cache[cache_key] = value
+        return value
 
     def _trusted_file_roots(self) -> list[Path]:
         if self._trusted_file_roots_cache is not None:
@@ -1404,13 +1703,18 @@ class FactoryWebRuntime:
     @staticmethod
     def _send_json(handler: BaseHTTPRequestHandler, payload: Any, *, status: int = 200) -> None:
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        accepts_gzip = "gzip" in str(handler.headers.get("Accept-Encoding") or "").lower()
+        body = gzip.compress(raw, compresslevel=5) if accepts_gzip and len(raw) >= 1024 else raw
         handler.send_response(status)
         handler.send_header("Content-Type", "application/json; charset=utf-8")
-        handler.send_header("Content-Length", str(len(raw)))
+        handler.send_header("Content-Length", str(len(body)))
+        if body is not raw:
+            handler.send_header("Content-Encoding", "gzip")
+            handler.send_header("Vary", "Accept-Encoding")
         handler.send_header("Cache-Control", "no-store")
         FactoryWebRuntime._send_cors_headers(handler)
         handler.end_headers()
-        handler.wfile.write(raw)
+        handler.wfile.write(body)
 
     @staticmethod
     def _send_file(

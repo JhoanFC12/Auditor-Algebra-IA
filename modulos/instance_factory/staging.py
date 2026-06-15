@@ -479,6 +479,9 @@ class InstanceStagingStore:
         self._records_cache_entries = None
 
     def _records_dir_signature(self) -> tuple[tuple[str, int, int], ...]:
+        return self._scan_records_dir_signature()
+
+    def _scan_records_dir_signature(self) -> tuple[tuple[str, int, int], ...]:
         signature: list[tuple[str, int, int]] = []
         for path in sorted(self.records_dir.glob("*.json"), key=lambda item: item.name.lower()):
             try:
@@ -492,8 +495,11 @@ class InstanceStagingStore:
     def _clone_record_entries(entries: list[tuple[Path, StagingProblemRecord]]) -> list[tuple[Path, StagingProblemRecord]]:
         return [(Path(path), copy.deepcopy(record)) for path, record in entries]
 
-    def _load_record_entries(self) -> list[tuple[Path, StagingProblemRecord]]:
-        signature = self._records_dir_signature()
+    def _load_record_entries(
+        self,
+        signature: tuple[tuple[str, int, int], ...] | None = None,
+    ) -> list[tuple[Path, StagingProblemRecord]]:
+        signature = signature if signature is not None else self._records_dir_signature()
         if self._records_cache_signature == signature and self._records_cache_entries is not None:
             return self._clone_record_entries(self._records_cache_entries)
         rows: list[tuple[Path, StagingProblemRecord]] = []
@@ -536,11 +542,17 @@ class InstanceStagingStore:
             str(record.record_id or record.crop_id or ""),
         )
 
-    def load_records(self) -> list[StagingProblemRecord]:
-        return sorted((record for _path, record in self._load_record_entries()), key=self._record_sort_key)
+    def load_records(
+        self,
+        signature: tuple[tuple[str, int, int], ...] | None = None,
+    ) -> list[StagingProblemRecord]:
+        return sorted((record for _path, record in self._load_record_entries(signature)), key=self._record_sort_key)
 
-    def load_record_entries(self) -> list[tuple[Path, StagingProblemRecord]]:
-        return sorted(self._load_record_entries(), key=lambda item: self._record_sort_key(item[1]))
+    def load_record_entries(
+        self,
+        signature: tuple[tuple[str, int, int], ...] | None = None,
+    ) -> list[tuple[Path, StagingProblemRecord]]:
+        return sorted(self._load_record_entries(signature), key=lambda item: self._record_sort_key(item[1]))
 
     def identity_map_for_records(
         self,
@@ -606,7 +618,12 @@ class InstanceStagingStore:
             "duplicate_records_repaired": repaired,
         }
 
-    def summarize_records(self, records: list[StagingProblemRecord] | None = None) -> dict[str, int]:
+    def summarize_records(
+        self,
+        records: list[StagingProblemRecord] | None = None,
+        *,
+        crop_exists_resolver: Any | None = None,
+    ) -> dict[str, int]:
         rows = records if records is not None else self.load_records()
         summary = {
             "records_total": len(rows),
@@ -620,7 +637,16 @@ class InstanceStagingStore:
             "errors": 0,
         }
         for row in rows:
-            if row.crop_path and Path(row.crop_path).exists():
+            crop_exists = False
+            if row.crop_path:
+                if crop_exists_resolver is not None:
+                    try:
+                        crop_exists = bool(crop_exists_resolver(row.crop_path))
+                    except Exception:
+                        crop_exists = False
+                else:
+                    crop_exists = Path(row.crop_path).exists()
+            if crop_exists:
                 summary["crops_found"] += 1
             if row.raw_ocr:
                 summary["ocr_done"] += 1

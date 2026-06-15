@@ -33,11 +33,14 @@ const state = {
     pendingBookCoverPreviewUrl: "",
     visibleBooksLimit: 60,
     visibleInstancesLimit: 40,
+    dataVersion: 0,
+    computedCache: {},
   },
   stage: "pages",
   pdfPage: 1,
   selectedPages: new Set(),
   selectedPageRecordId: "",
+  syncDetectedPages: false,
   selectedRecordId: "",
   ocrQueueIds: new Set(),
   ocrJobId: "",
@@ -65,6 +68,8 @@ const state = {
   ocrEndpointLoading: false,
   ocrJobPolling: false,
   normalizerTraining: null,
+  normalizerTrainingFetchedAt: 0,
+  recordLookup: { recordsRef: null, byId: new Map(), indexById: new Map() },
   taskProgress: null,
   promotionUploadReport: null,
 };
@@ -92,14 +97,22 @@ const LIBRARY_SEARCH_DEBOUNCE_MS = 180;
 const APP_VERSION_POLL_MS = 15000;
 const APP_VERSION_HIDDEN_POLL_MS = 60000;
 const APP_VERSION_RESTART_POLL_MS = 30000;
+const NORMALIZER_TRAINING_CACHE_MS = 20000;
 const PDF_PAGE_PREFETCH_RADIUS = 2;
 const PDF_IMAGE_CACHE_LIMIT = 28;
+const BOX_PAGE_PREFETCH_RADIUS = 2;
 
 const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
 let librarySearchTimer = null;
 const pdfImageCache = new Map();
 const lazyTechnicalDetails = new Map();
 let lazyTechnicalDetailSeq = 0;
+
+function refreshNormalizerTrainingStatusLater(options = {}) {
+  window.setTimeout(() => {
+    refreshNormalizerTrainingStatus(options).catch(() => {});
+  }, 0);
+}
 
 function currentTheme() {
   return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
@@ -417,6 +430,7 @@ function applyFactorySnapshot(payload) {
   const snapshot = payload?.snapshot || payload;
   if (snapshot && typeof snapshot === "object" && snapshot.schema_version === "pdf_factory_web_snapshot_v1") {
     state.snapshot = snapshot;
+    resetRecordLookup();
   }
   return state.snapshot;
 }
@@ -425,9 +439,9 @@ async function refresh(message = "") {
   if (state.view === "library") return loadLibrary(message || "Biblioteca actualizada.", { bypassCache: true });
   setBusy("Actualizando...");
   applyFactorySnapshot(await loadFactorySnapshot());
-  await refreshNormalizerTrainingStatus({ silent: true });
   restoreFactoryUiState({ preserveCurrentStage: true });
   render();
+  refreshNormalizerTrainingStatusLater({ silent: true, renderNotice: true });
   setStatus(message || "Listo para trabajar.");
   resumeOcrJobIfRunning({ silent: true });
 }
@@ -520,11 +534,19 @@ function renderFactoryShell() {
   }
 }
 
-async function refreshNormalizerTrainingStatus({ silent = true } = {}) {
+async function refreshNormalizerTrainingStatus({ silent = true, force = false, renderNotice = true } = {}) {
   if (state.view === "library") return null;
+  const fresh = state.normalizerTraining
+    && !state.normalizerTraining.error
+    && Date.now() - Number(state.normalizerTrainingFetchedAt || 0) <= NORMALIZER_TRAINING_CACHE_MS;
+  if (!force && fresh) {
+    if (renderNotice) renderTrainingNotice();
+    return state.normalizerTraining;
+  }
   try {
     state.normalizerTraining = await api("/api/training/normalizer/status");
-    renderTrainingNotice();
+    state.normalizerTrainingFetchedAt = Date.now();
+    if (renderNotice) renderTrainingNotice();
     if (!silent && state.normalizerTraining?.ready_to_train) {
       setStatus(state.normalizerTraining.notification || "Dataset normalizador listo para entrenar.");
     }
@@ -537,7 +559,8 @@ async function refreshNormalizerTrainingStatus({ silent = true } = {}) {
       threshold: 200,
       ready_to_train: false,
     };
-    renderTrainingNotice();
+    state.normalizerTrainingFetchedAt = 0;
+    if (renderNotice) renderTrainingNotice();
     return state.normalizerTraining;
   }
 }
@@ -626,6 +649,7 @@ function persistFactoryUiState() {
       pdfPage: state.pdfPage,
       selectedPages: [...state.selectedPages].sort((a, b) => a - b),
       selectedPageRecordId: state.selectedPageRecordId,
+      syncDetectedPages: Boolean(state.syncDetectedPages),
       selectedRecordId: state.selectedRecordId,
       ocrQueueIds: [...state.ocrQueueIds].sort(),
       ocrJobId: state.ocrJobId,
@@ -664,6 +688,7 @@ function restoreFactoryUiState({ preserveCurrentStage = false } = {}) {
     || pages[0];
   state.selectedPageRecordId = matchingPage?.record_id || "";
   if (matchingPage) state.pdfPage = Number(matchingPage.page_number || state.pdfPage || 1);
+  state.syncDetectedPages = Boolean(persisted.syncDetectedPages);
 
   const persistedRecordId = String(persisted.selectedRecordId || state.selectedRecordId || "");
   const matchingRecord = records.find((record) => record.record_id === persistedRecordId)
@@ -789,6 +814,10 @@ function recordHasOcrOutput(record) {
   ));
 }
 
+function recordHasRawOcr(record) {
+  return Boolean(record && hasText(record.raw_ocr));
+}
+
 function recordHasProcessingError(record) {
   if (!record) return false;
   if (normalizeStatus(record.status || "") === "error") return true;
@@ -800,6 +829,13 @@ function recordHasProcessingError(record) {
 function ocrErrorRecordIds(records = state.snapshot?.records || []) {
   return (records || [])
     .filter((record) => recordCanRunOcr(record) && recordHasProcessingError(record))
+    .map((record) => String(record.record_id || ""))
+    .filter(Boolean);
+}
+
+function ocrMissingRecordIds(records = state.snapshot?.records || []) {
+  return (records || [])
+    .filter((record) => recordCanRunOcr(record) && !recordHasRawOcr(record))
     .map((record) => String(record.record_id || ""))
     .filter(Boolean);
 }
@@ -886,16 +922,55 @@ function updateTaskProgressDom(type = "") {
   return true;
 }
 
+function resetRecordLookup() {
+  state.recordLookup = { recordsRef: null, byId: new Map(), indexById: new Map() };
+}
+
+function recordLookupFor(records = state.snapshot?.records || []) {
+  const rows = Array.isArray(records) ? records : [];
+  if (
+    state.recordLookup
+    && state.recordLookup.recordsRef === rows
+    && state.recordLookup.count === rows.length
+  ) {
+    return state.recordLookup;
+  }
+  const byId = new Map();
+  const indexById = new Map();
+  rows.forEach((record, index) => {
+    const id = String(record?.record_id || "");
+    if (!id || byId.has(id)) return;
+    byId.set(id, record);
+    indexById.set(id, index);
+  });
+  state.recordLookup = { recordsRef: rows, count: rows.length, byId, indexById };
+  return state.recordLookup;
+}
+
 function findRecordById(recordId, records = state.snapshot?.records || []) {
   const id = String(recordId || "");
+  if (!id) return null;
+  if (records === (state.snapshot?.records || [])) {
+    return recordLookupFor(records).byId.get(id) || null;
+  }
   return (records || []).find((record) => String(record.record_id || "") === id) || null;
+}
+
+function findRecordIndexById(recordId, records = state.snapshot?.records || []) {
+  const id = String(recordId || "");
+  if (!id) return -1;
+  if (records === (state.snapshot?.records || [])) {
+    const index = recordLookupFor(records).indexById.get(id);
+    return Number.isInteger(index) ? index : -1;
+  }
+  return (records || []).findIndex((record) => String(record.record_id || "") === id);
 }
 
 function recordLabelById(recordId) {
   const records = state.snapshot?.records || [];
   const record = findRecordById(recordId, records);
   if (!record) return String(recordId || "");
-  const index = records.findIndex((row) => String(row.record_id || "") === String(recordId || ""));
+  const index = findRecordIndexById(recordId, records);
   return recordOptionLabel(record, Math.max(0, index));
 }
 
@@ -1063,7 +1138,7 @@ function inferredStartNumberForRecord(record) {
     if (Number.isFinite(number) && number > 0) return number;
   }
   const records = state.snapshot?.records || [];
-  const index = record ? records.findIndex((row) => row.record_id === record.record_id) : -1;
+  const index = record ? findRecordIndexById(record.record_id, records) : -1;
   return index >= 0 ? index + 1 : 1;
 }
 
@@ -1071,6 +1146,7 @@ async function loadLibrary(message = "", { bypassCache = false } = {}) {
   cancelLibrarySearchRender();
   state.library.loading = true;
   state.library.error = "";
+  let statusMessage = message || "Biblioteca lista.";
   setBusy("Cargando biblioteca...");
   try {
     if (!state.library.selectedDb) {
@@ -1086,16 +1162,16 @@ async function loadLibrary(message = "", { bypassCache = false } = {}) {
     }
     const payload = await api(`/api/library/books?${params.toString()}`);
     state.library.books = normalizeLibraryBooks(payload);
+    invalidateLibraryComputedCache();
     ensureLibrarySelection();
-    renderLibrary();
-    setStatus(message || "Biblioteca lista.");
   } catch (err) {
     state.library.error = friendlyLibraryError(err);
-    renderLibrary();
-    setStatus("Biblioteca lista para conectar con /api/library/books.");
+    statusMessage = "Biblioteca lista para conectar con /api/library/books.";
   } finally {
     state.library.loading = false;
     $("busyText").textContent = "";
+    renderLibrary();
+    setStatus(statusMessage);
   }
 }
 
@@ -1110,7 +1186,10 @@ function normalizeLibraryBooks(payload) {
         title: instance.title || instance.name || instance.tipo || instance.instance_type || `Instancia ${instanceIndex + 1}`,
         summary: instance.summary || instance.metrics || instance.indicators || {},
       };
-      normalized.status = instanceWorkflowStatus(normalized);
+      normalized._workflowInfo = deriveInstanceWorkflowInfo(normalized);
+      normalized.status = normalized._workflowInfo.status;
+      normalized._timelineInfo = deriveInstanceTimelineCachedInfo(normalized);
+      normalized._naturalSortKey = instanceNaturalSortKey(normalized);
       return normalized;
     }));
     const normalizedBook = { ...book, id, instances };
@@ -1135,6 +1214,7 @@ function normalizeLibraryBooks(payload) {
       instances,
     };
     row._searchKey = buildLibrarySearchKey(row);
+    row._progressIndicators = deriveBookProgressIndicators(row);
     return row;
   });
 }
@@ -1181,6 +1261,7 @@ async function loadBookDetail(bookId) {
     book.dashboard = detail.dashboard || {};
     book.indicators = normalizeBookIndicators({ ...book, dashboard: detail.dashboard || {}, instances: book.instances });
   }
+  invalidateLibraryComputedCache();
   if (state.view === "library") {
     ensureLibrarySelection();
     renderLibraryContent();
@@ -1371,7 +1452,7 @@ function renderInstanceForm(book, instance = null) {
 
 function bookCardHtml(book) {
   const progress = bookProgressIndicators(book);
-  const visual = bookVisualStatus(book);
+  const visual = bookVisualStatus(book, progress);
   const isActive = book.id === state.library.selectedBookId;
   const isUploadingCover = String(book.id || "") === String(state.library.coverUploadingBookId || "");
   return `
@@ -1900,7 +1981,9 @@ function upsertLibraryBook(bookPayload, { dashboard = null, instances = null } =
     ...normalized,
     dashboard: nextDashboard,
   };
+  delete nextBook._progressIndicators;
   nextBook.indicators = normalizeBookIndicators({ ...nextBook, dashboard: nextDashboard, instances: nextBook.instances || [] });
+  nextBook._progressIndicators = deriveBookProgressIndicators(nextBook);
   if (index >= 0) state.library.books.splice(index, 1, nextBook);
   else state.library.books.unshift(nextBook);
   if (detail.loaded) {
@@ -1913,6 +1996,7 @@ function upsertLibraryBook(bookPayload, { dashboard = null, instances = null } =
       loading: false,
     };
   }
+  invalidateLibraryComputedCache();
   return nextBook;
 }
 
@@ -1948,6 +2032,9 @@ function upsertLibraryInstance(book, instancePayload) {
   const index = rows.findIndex((row) => String(row.id) === id);
   const previous = index >= 0 ? rows[index] : {};
   const merged = { ...previous, ...instancePayload };
+  delete merged._naturalSortKey;
+  delete merged._workflowInfo;
+  delete merged._timelineInfo;
   if (index >= 0) rows.splice(index, 1, merged);
   else rows.push(merged);
   return naturalSortInstances(rows);
@@ -2548,6 +2635,10 @@ function renderPagesStage() {
       <button id="applyRange">Usar rango</button>
       <button id="selectAllPages">Todas</button>
       <button id="clearPages">Limpiar</button>
+      <label class="toolbar-check" title="Al detectar, elimina de Boxes las paginas que no esten en la seleccion actual.">
+        <input id="syncDetectedPages" type="checkbox" ${state.syncDetectedPages ? "checked" : ""} />
+        <span>Sincronizar Boxes</span>
+      </label>
       <span class="selection-count">${state.selectedPages.size} seleccionada(s)</span>
     </div>
     ${renderModelStrip(["pdf_detector"])}
@@ -2592,6 +2683,10 @@ function renderPagesStage() {
     state.selectedPages = new Set();
     persistFactoryUiState();
     updatePagesStageSelectionUi();
+  };
+  $("syncDetectedPages").onchange = () => {
+    state.syncDetectedPages = Boolean($("syncDetectedPages").checked);
+    persistFactoryUiState();
   };
   renderPagePicker(pageCount);
   renderSelectedPagesList();
@@ -2881,6 +2976,8 @@ function captureBoxesScrollState() {
   const pagesList = $("pagesList");
   const canvasWrap = document.querySelector(".boxes-canvas-wrap");
   return {
+    windowTop: window.scrollY || document.documentElement.scrollTop || 0,
+    windowLeft: window.scrollX || document.documentElement.scrollLeft || 0,
     stageTop: stage ? stage.scrollTop : 0,
     stageLeft: stage ? stage.scrollLeft : 0,
     pagesTop: pagesList ? pagesList.scrollTop : 0,
@@ -2903,6 +3000,7 @@ function restoreBoxesScrollState(scrollState = {}, { restoreCanvas = false } = {
       canvasWrap.scrollTop = Number(scrollState.canvasTop || 0);
       canvasWrap.scrollLeft = Number(scrollState.canvasLeft || 0);
     }
+    window.scrollTo(Number(scrollState.windowLeft || 0), Number(scrollState.windowTop || 0));
   };
   restore();
   window.requestAnimationFrame(() => {
@@ -2993,7 +3091,7 @@ function syncSelectedRecord() {
     state.selectedOcrIndex = 0;
     return;
   }
-  if (!records.some((record) => record.record_id === state.selectedRecordId)) {
+  if (!findRecordById(state.selectedRecordId, records)) {
     state.selectedRecordId = records[0].record_id;
     state.selectedOcrIndex = 0;
   }
@@ -3157,15 +3255,23 @@ function setupBoxCanvas(page, { resetScroll = true } = {}) {
   const canvas = $("boxCanvas");
   const wrapper = canvas.parentElement;
   const recordId = String(page.record_id || "");
+  const src = boxPageImageSrc(page);
   canvas.dataset.recordId = recordId;
+  canvas.dataset.pendingSrc = src;
   boxCanvasState = null;
-  const img = new Image();
-  img.onload = () => {
-    if (String(state.selectedPageRecordId || "") !== recordId || canvas.dataset.recordId !== recordId) return;
+  const entry = getCachedPdfImage(src);
+  const img = entry?.img || new Image();
+  const onLoad = () => {
+    if (
+      String(state.selectedPageRecordId || "") !== recordId
+      || canvas.dataset.recordId !== recordId
+      || canvas.dataset.pendingSrc !== src
+    ) return;
     boxCanvasState = { canvas, ctx: canvas.getContext("2d"), img, wrapper, fitScale: 1, scale: 1 };
     resizeBoxCanvas({ resetScroll });
   };
-  img.onerror = () => {
+  const onError = () => {
+    if (canvas.dataset.pendingSrc !== src) return;
     const ctx = canvas.getContext("2d");
     boxCanvasState = null;
     canvas.width = Math.max(320, Math.floor((wrapper?.clientWidth || 520) - 28));
@@ -3180,7 +3286,16 @@ function setupBoxCanvas(page, { resetScroll = true } = {}) {
     ctx.fillText("No se pudo cargar la imagen de esta pagina.", 18, 42);
     syncBoxZoomControls();
   };
-  img.src = boxPageImageSrc(page);
+  if (img.complete && img.naturalWidth > 0) {
+    onLoad();
+  } else if (entry?.status === "error") {
+    onError();
+  } else {
+    img.addEventListener("load", onLoad, { once: true });
+    img.addEventListener("error", onError, { once: true });
+    if (!entry) img.src = src;
+  }
+  prefetchBoxPageImages(page);
   canvas.onmousedown = onBoxMouseDown;
   canvas.onmousemove = onBoxMouseMove;
   canvas.onmouseup = onBoxMouseUp;
@@ -3192,6 +3307,20 @@ function setupBoxCanvas(page, { resetScroll = true } = {}) {
 function boxPageImageSrc(page) {
   if (page?.image_url) return page.image_url;
   return pdfPageImageUrl(page?.page_number || 1, 300);
+}
+
+function prefetchBoxPageImages(centerPage) {
+  const pages = factoryPages();
+  if (!pages.length) return;
+  const centerId = String(centerPage?.record_id || "");
+  const index = pages.findIndex((row) => String(row.record_id || "") === centerId);
+  if (index < 0) return;
+  for (let offset = 1; offset <= BOX_PAGE_PREFETCH_RADIUS; offset += 1) {
+    [index - offset, index + offset].forEach((nextIndex) => {
+      const page = pages[nextIndex];
+      if (page) getCachedPdfImage(boxPageImageSrc(page));
+    });
+  }
 }
 
 function syncBoxListSelectionAndCoords() {
@@ -3520,6 +3649,7 @@ async function saveCurrentBoxes() {
       applySavedPagePayload(payload);
     } else {
       state.snapshot = payload;
+      resetRecordLookup();
       state.boxes = [];
       state._boxSource = "";
       state._boxSourceSignature = "";
@@ -3548,7 +3678,10 @@ function applySavedPagePayload(payload) {
   state.snapshot.pages = dedupePagesByNumber(pages);
   if (payload.summary) state.snapshot.summary = payload.summary;
   if (Array.isArray(payload.timeline)) state.snapshot.timeline = payload.timeline;
-  if (Array.isArray(payload.records)) state.snapshot.records = payload.records;
+  if (Array.isArray(payload.records)) {
+    state.snapshot.records = payload.records;
+    resetRecordLookup();
+  }
   if (Array.isArray(payload.updated_records)) mergeRecordsIntoSnapshot(payload.updated_records);
   if (!payload.summary && !payload.timeline) recomputeFactorySummaryLocally();
 
@@ -3607,7 +3740,10 @@ function applyDeletedPagePayload(payload, fallbackRecordId = "", scrollState = n
   state.snapshot.pages = dedupePagesByNumber(payload.pages || []);
   if (payload.summary) state.snapshot.summary = payload.summary;
   if (Array.isArray(payload.timeline)) state.snapshot.timeline = payload.timeline;
-  if (Array.isArray(payload.records)) state.snapshot.records = payload.records;
+  if (Array.isArray(payload.records)) {
+    state.snapshot.records = payload.records;
+    resetRecordLookup();
+  }
   if (Array.isArray(payload.updated_records)) mergeRecordsIntoSnapshot(payload.updated_records);
   if (!payload.summary && !payload.timeline) recomputeFactorySummaryLocally();
 
@@ -3642,6 +3778,9 @@ function renderCropsStage() {
   const queueBusy = isTaskRunning("ocr");
   const invalidatedCount = invalidatedRecords(records).length;
   const errorCount = ocrErrorRecordIds(records).length;
+  const missingOcrCount = ocrMissingRecordIds(records).length;
+  const completedOcrCount = Math.max(0, records.filter(recordCanRunOcr).length - missingOcrCount);
+  const queuePrimaryLabel = missingOcrCount ? `Seleccionar faltantes (${missingOcrCount})` : "Seleccionar todo";
   $("stageHost").innerHTML = `
     <div class="stage-header">
       <div>
@@ -3659,10 +3798,10 @@ function renderCropsStage() {
     <div class="queue-toolbar panel">
       <div>
         <h3>Cola OCR + segmentacion</h3>
-        <p id="cropsQueueHint" class="muted">${queuedCount ? `${queuedCount} imagen(es) seleccionada(s).` : "Selecciona una o varias imagenes para procesarlas con los modelos entrenados."}</p>
+        <p id="cropsQueueHint" class="muted">${queuedCount ? `${queuedCount} imagen(es) seleccionada(s).` : ocrQueueIdleHint(records)}</p>
       </div>
       <div class="queue-actions">
-        <button id="queueAllCrops" type="button" ${records.length && !queueBusy ? "" : "disabled"}>Seleccionar todo</button>
+        <button id="queueAllCrops" type="button" ${records.length && !queueBusy ? "" : "disabled"} title="${missingOcrCount ? `Prioriza los ${missingOcrCount} crop(s) sin OCR. ${completedOcrCount} ya tienen OCR.` : "Selecciona todos los crops ejecutables para una pasada manual."}">${queuePrimaryLabel}</button>
         <button id="queueErrorCrops" type="button" ${errorCount && !queueBusy ? "" : "disabled"}>Seleccionar errores${errorCount ? ` (${errorCount})` : ""}</button>
         <button id="clearOcrQueue" type="button" ${queuedCount && !queueBusy ? "" : "disabled"}>Limpiar cola</button>
         <button id="runOcrQueue" class="primary" type="button" ${queuedCount && !queueBusy ? "" : "disabled"}>Ejecutar cola</button>
@@ -3806,7 +3945,7 @@ function recordCardHtml(record) {
     <div class="crop-card ${record.record_id === state.selectedRecordId ? "active" : ""} ${queued ? "queued" : ""} ${stale ? "stale" : ""} ${errorComment ? "has-error" : ""}" data-record="${record.record_id}">
       <label class="queue-check" title="Incluir en cola OCR">
         <input type="checkbox" data-queue-record="${escapeAttr(record.record_id)}" ${queued ? "checked" : ""} ${queueLocked || !canQueue ? "disabled" : ""} />
-        <span data-queue-label>${queued ? "En cola" : (stale ? "Regenerar" : "Cola")}</span>
+        <span data-queue-label>${ocrQueueLabel(record, queued)}</span>
       </label>
       ${record.crop_url ? `<img src="${record.crop_url}" alt="Crop ${escapeHtml(record.record_id)}" loading="lazy" decoding="async" />` : ""}
       <strong>${escapeHtml(record.normalized?.numero || record.crop_name || record.record_id)}</strong>
@@ -3871,6 +4010,32 @@ function ocrRunnableRecordIds(records = state.snapshot.records || []) {
     .filter(Boolean);
 }
 
+function ocrDefaultRecordIds(records = state.snapshot.records || []) {
+  const missing = ocrMissingRecordIds(records);
+  return missing.length ? missing : ocrRunnableRecordIds(records);
+}
+
+function ocrQueueIdleHint(records = state.snapshot.records || []) {
+  const runnable = (records || []).filter(recordCanRunOcr);
+  const missing = ocrMissingRecordIds(runnable);
+  if (missing.length) {
+    const done = Math.max(0, runnable.length - missing.length);
+    return done
+      ? `${missing.length} faltante(s) sin OCR; ${done} ya tienen OCR y no se reprocesaran.`
+      : `${missing.length} imagen(es) listas para OCR.`;
+  }
+  const errors = ocrErrorRecordIds(runnable);
+  if (errors.length) return `No hay faltantes; puedes repetir solo ${errors.length} error(es).`;
+  return "Todos los crops ejecutables ya tienen OCR. Selecciona manualmente si quieres repetir una pasada.";
+}
+
+function ocrQueueLabel(record, queued = false) {
+  if (queued) return "En cola";
+  if (recordSourceStale(record)) return "Regenerar";
+  if (recordHasRawOcr(record)) return "Con OCR";
+  return "Cola";
+}
+
 function shouldOfferSecondOcrPass(records = state.snapshot.records || []) {
   const runnable = (records || []).filter(recordCanRunOcr);
   if (runnable.length <= 1) return false;
@@ -3884,6 +4049,9 @@ function chooseSecondPassOcrScope(targetIds, records = state.snapshot.records ||
   const targetRecords = uniqueIds
     .map((id) => findRecordById(id, records))
     .filter((record) => recordCanRunOcr(record));
+  if (targetRecords.length && targetRecords.every((record) => !recordHasRawOcr(record))) {
+    return { cancelled: false, ids: uniqueIds };
+  }
   const errorIds = targetRecords
     .filter(recordHasProcessingError)
     .map((record) => String(record.record_id || ""))
@@ -3920,9 +4088,13 @@ function bindOcrQueueControls(records = state.snapshot.records || []) {
   const clearBtn = $("clearOcrQueue");
   const runBtn = $("runOcrQueue");
   if (allBtn) allBtn.onclick = () => {
-    state.ocrQueueIds = new Set((records || []).filter(recordCanRunOcr).map((record) => String(record.record_id || "")).filter(Boolean));
+    const ids = ocrDefaultRecordIds(records);
+    state.ocrQueueIds = new Set(ids);
     persistFactoryUiState();
     updateCropsQueueUi(records);
+    setStatus(ids.length && ocrMissingRecordIds(records).length
+      ? `${ids.length} problema(s) faltante(s) en cola OCR.`
+      : `${ids.length} problema(s) en cola OCR.`);
   };
   if (errorsBtn) errorsBtn.onclick = () => {
     state.ocrQueueIds = new Set(ocrErrorRecordIds(records));
@@ -3978,6 +4150,8 @@ function updateCropsQueueUi(records = state.snapshot.records || []) {
   const queuedCount = queuedOcrRecordIds(records).length;
   const queueBusy = isTaskRunning("ocr");
   const errorCount = ocrErrorRecordIds(records).length;
+  const missingOcrCount = ocrMissingRecordIds(records).length;
+  const defaultSelectableCount = ocrDefaultRecordIds(records).length;
   const badge = $("cropsQueueBadge");
   if (badge) {
     badge.className = `status-pill status-${queuedCount ? "procesando" : (records.length ? "listo" : "pendiente")}`;
@@ -3987,13 +4161,19 @@ function updateCropsQueueUi(records = state.snapshot.records || []) {
   if (hint) {
     hint.textContent = queuedCount
       ? `${queuedCount} imagen(es) seleccionada(s).`
-      : "Selecciona una o varias imagenes para procesarlas con los modelos entrenados.";
+      : ocrQueueIdleHint(records);
   }
   const allBtn = $("queueAllCrops");
   const errorsBtn = $("queueErrorCrops");
   const clearBtn = $("clearOcrQueue");
   const runBtn = $("runOcrQueue");
-  if (allBtn) allBtn.disabled = !(records.length && !queueBusy);
+  if (allBtn) {
+    allBtn.disabled = !(defaultSelectableCount && !queueBusy);
+    allBtn.textContent = missingOcrCount ? `Seleccionar faltantes (${missingOcrCount})` : "Seleccionar todo";
+    allBtn.title = missingOcrCount
+      ? `Prioriza los ${missingOcrCount} crop(s) sin OCR.`
+      : "Selecciona todos los crops ejecutables para una pasada manual.";
+  }
   if (errorsBtn) {
     errorsBtn.disabled = !(errorCount && !queueBusy);
     errorsBtn.textContent = `Seleccionar errores${errorCount ? ` (${errorCount})` : ""}`;
@@ -4012,7 +4192,7 @@ function updateCropsQueueUi(records = state.snapshot.records || []) {
       checkbox.disabled = queueBusy || !recordCanRunOcr(record);
     }
     if (label) {
-      label.textContent = queued ? "En cola" : (recordSourceStale(record) ? "Regenerar" : "Cola");
+      label.textContent = ocrQueueLabel(record, queued);
     }
   });
   syncPrimaryAction();
@@ -4039,10 +4219,10 @@ function updateSelectedCropUi(records = state.snapshot.records || []) {
   syncPrimaryAction();
 }
 
-function recordIndex(records = state.snapshot.records || []) {
+function recordIndex(records = state.snapshot?.records || []) {
   if (!records.length) return 0;
   const currentId = selectedRecord()?.record_id || state.selectedRecordId;
-  const index = records.findIndex((record) => record.record_id === currentId);
+  const index = findRecordIndexById(currentId, records);
   return index >= 0 ? index : 0;
 }
 
@@ -5024,20 +5204,27 @@ function updateBatchProgressInline({ current, total, ok, failed, skipped, active
 function replaceRecordInSnapshot(updated) {
   if (!updated?.record_id || !state.snapshot?.records) return;
   const records = state.snapshot.records || [];
-  const index = records.findIndex((record) => String(record.record_id || "") === String(updated.record_id || ""));
+  const index = findRecordIndexById(updated.record_id, records);
   if (index >= 0) records[index] = updated;
+  resetRecordLookup();
 }
 
 function mergeRecordsIntoSnapshot(updates = []) {
   if (!state.snapshot) return;
-  if (!Array.isArray(state.snapshot.records)) state.snapshot.records = [];
+  if (!Array.isArray(state.snapshot.records)) {
+    state.snapshot.records = [];
+    resetRecordLookup();
+  }
+  let changed = false;
   for (const record of updates || []) {
     if (!record?.record_id) continue;
     const records = state.snapshot.records;
-    const index = records.findIndex((row) => String(row.record_id || "") === String(record.record_id || ""));
+    const index = findRecordIndexById(record.record_id, records);
     if (index >= 0) records[index] = record;
     else records.push(record);
+    changed = true;
   }
+  if (changed) resetRecordLookup();
 }
 
 function applyRecordSavedPayload(payload) {
@@ -5247,7 +5434,7 @@ async function saveBatchEditor(mode = state.batchMode) {
     }
     try {
       await refreshFactorySummary();
-      await refreshNormalizerTrainingStatus({ silent: true });
+      refreshNormalizerTrainingStatusLater({ silent: true, force: true });
     } catch (err) {
       results.push({ status: "error", title: "Actualizacion final", message: err.message || String(err) });
     }
@@ -5383,7 +5570,7 @@ async function saveFinalLatexBatchEditor(records, parsed, initial = {}) {
   });
   try {
     await refreshFactorySummary();
-    await refreshNormalizerTrainingStatus({ silent: true });
+    refreshNormalizerTrainingStatusLater({ silent: true, force: true });
   } catch (err) {
     results.push({ status: "error", title: "Actualizacion final", message: err.message || String(err) });
   }
@@ -5965,9 +6152,9 @@ async function saveReviewForm(event) {
     });
     applyRecordSavedPayload(result);
     state.reviewDraft = null;
-    await refreshNormalizerTrainingStatus({ silent: true });
     persistFactoryUiState();
     render();
+    refreshNormalizerTrainingStatusLater({ silent: true, force: true, renderNotice: true });
   }, "Revision guardada en staging como entrenamiento futuro.");
 }
 
@@ -6360,6 +6547,7 @@ async function uploadPromotionReady({ dryRun = false } = {}) {
         if (!report.summary && !report.timeline) await refreshFactorySummary();
       } else {
         state.snapshot = await loadFactorySnapshot();
+        resetRecordLookup();
       }
       setStatus(`Subida a BD terminada: ${Number(report.inserted || 0)} insertado(s), ${Number(report.updated || 0)} actualizado(s), ${Number(report.errors || 0)} error(es).`);
       render();
@@ -6423,15 +6611,16 @@ function syncPrimaryAction() {
     return;
   }
   const queuedCount = state.stage === "crops" ? queuedOcrRecordIds().length : 0;
-  const secondPassAvailable = state.stage === "crops" && !queuedCount && shouldOfferSecondOcrPass();
+  const missingOcrCount = state.stage === "crops" ? ocrMissingRecordIds().length : 0;
+  const secondPassAvailable = state.stage === "crops" && !queuedCount && !missingOcrCount && shouldOfferSecondOcrPass();
   const actions = {
     pages: ["Detectar con modelo", "Usa el detector entrenado sobre las paginas elegidas.", detectSelectedPages],
     boxes: ["Crear staging", "Materializa crops solo desde boxes revisados.", materializeStaging],
     crops: [
-      queuedCount ? `OCR cola (${queuedCount})` : (secondPassAvailable ? "OCR segunda pasada" : "OCR imagen actual"),
+      queuedCount ? `OCR cola (${queuedCount})` : (missingOcrCount ? `OCR faltantes (${missingOcrCount})` : (secondPassAvailable ? "OCR segunda pasada" : "OCR imagen actual")),
       queuedCount
         ? "Procesa las imagenes seleccionadas con OCR y segmentacion grafica."
-        : (secondPassAvailable ? "Pregunta si reprocesar todos o solo los problemas con error." : "Usa OCR entrenado y segmentador grafico en el crop seleccionado."),
+        : (missingOcrCount ? "Procesa solo los crops que aun no tienen OCR crudo." : (secondPassAvailable ? "Pregunta si reprocesar todos o solo los problemas con error." : "Usa OCR entrenado y segmentador grafico en el crop seleccionado.")),
       () => runOcr(),
     ],
     ocr: ["Preparar revision completa", "Crea borradores editables para todos los problemas con OCR; no ejecuta normalizador IA final.", normalizeRecords],
@@ -6457,6 +6646,7 @@ async function detectSelectedPages() {
         dpi: 300,
         confidence: 0.25,
         detector_model: models.pdf_detector,
+        replace_existing: Boolean(state.syncDetectedPages),
         compact: true,
         include_summary: false,
       },
@@ -6465,6 +6655,7 @@ async function detectSelectedPages() {
       applyDetectedPagesPayload(payload);
     } else {
       state.snapshot = payload;
+      resetRecordLookup();
     }
     state.stage = "boxes";
     state.selectedPageRecordId = "";
@@ -6477,6 +6668,12 @@ async function detectSelectedPages() {
     persistFactoryUiState();
     render();
     persistFactoryUiState();
+    const removed = Number(payload?.removed_pages || 0);
+    const invalidated = Number(payload?.invalidated_records || 0);
+    if (removed || invalidated) {
+      return `Boxes detectados. ${removed} pagina(s) quitadas y ${invalidated} registro(s) pendientes de regenerar.`;
+    }
+    return "Boxes detectados. Revisa antes de crear staging.";
   }, "Boxes detectados. Revisa antes de crear staging.");
 }
 
@@ -6485,12 +6682,14 @@ function applyDetectedPagesPayload(payload) {
   state.snapshot.pages = dedupePagesByNumber(payload.pages || []);
   if (payload.summary) state.snapshot.summary = payload.summary;
   if (Array.isArray(payload.timeline)) state.snapshot.timeline = payload.timeline;
+  if (Array.isArray(payload.updated_records)) mergeRecordsIntoSnapshot(payload.updated_records);
   if (!payload.summary && !payload.timeline) recomputeFactorySummaryLocally();
 }
 
 function applyMaterializedStagingPayload(payload) {
   if (!payload || payload.schema_version !== "pdf_factory_web_staging_materialized_v1" || !state.snapshot) return false;
   state.snapshot.records = Array.isArray(payload.records) ? payload.records : [];
+  resetRecordLookup();
   if (payload.summary) state.snapshot.summary = payload.summary;
   if (Array.isArray(payload.timeline)) state.snapshot.timeline = payload.timeline;
   if (!payload.summary && !payload.timeline) recomputeFactorySummaryLocally();
@@ -6505,6 +6704,7 @@ async function materializeStaging() {
     });
     if (!applyMaterializedStagingPayload(payload)) {
       state.snapshot = payload;
+      resetRecordLookup();
     }
     state.stage = "crops";
     restoreFactoryUiState();
@@ -6520,11 +6720,17 @@ async function runOcr(recordIds = null) {
   const records = state.snapshot.records || [];
   const explicitRecordIds = Array.isArray(recordIds);
   const queuedIds = Array.isArray(recordIds) ? recordIds : queuedOcrRecordIds(records);
+  const missingIds = ocrMissingRecordIds(records);
   const fallbackIds = record?.record_id ? [record.record_id] : [];
+  const defaultingToMissing = !queuedIds.length && !explicitRecordIds && missingIds.length;
   const targetIds = queuedIds.length
     ? queuedIds
-    : (!explicitRecordIds && shouldOfferSecondOcrPass(records) ? ocrRunnableRecordIds(records) : fallbackIds);
-  const scope = chooseSecondPassOcrScope(targetIds, records);
+    : (defaultingToMissing
+      ? missingIds
+      : (!explicitRecordIds && shouldOfferSecondOcrPass(records) ? ocrRunnableRecordIds(records) : fallbackIds));
+  const scope = defaultingToMissing
+    ? { cancelled: false, ids: targetIds }
+    : chooseSecondPassOcrScope(targetIds, records);
   if (scope.cancelled) return;
   const pending = [...new Set(targetIds.map((id) => String(id || "").trim()).filter(Boolean))]
     .filter((id) => scope.ids.includes(id))
@@ -6868,12 +7074,28 @@ function setInspector(text) {
 }
 
 function selectedRecord() {
-  return (state.snapshot.records || []).find((record) => record.record_id === state.selectedRecordId) || (state.snapshot.records || [])[0];
+  const records = state.snapshot?.records || [];
+  return findRecordById(state.selectedRecordId, records) || records[0];
+}
+
+function invalidateLibraryComputedCache() {
+  state.library.dataVersion = Number(state.library.dataVersion || 0) + 1;
+  state.library.computedCache = {};
+}
+
+function libraryComputedCache() {
+  if (!state.library.computedCache || typeof state.library.computedCache !== "object") {
+    state.library.computedCache = {};
+  }
+  return state.library.computedCache;
 }
 
 function filteredBooks(applyStatus = true) {
   const query = normalizeLibrarySearchText(state.library.query);
-  return (state.library.books || []).filter((book) => {
+  const cache = libraryComputedCache();
+  const key = `filtered:${Number(state.library.dataVersion || 0)}:${applyStatus ? "1" : "0"}:${state.library.status}:${query}`;
+  if (Array.isArray(cache[key])) return cache[key];
+  const rows = (state.library.books || []).filter((book) => {
     const haystack = book._searchKey || buildLibrarySearchKey(book);
     const matchesQuery = !query || haystack.includes(query);
     const instances = book.instances || [];
@@ -6884,18 +7106,20 @@ function filteredBooks(applyStatus = true) {
         : bookWorkflowStatus(book) === state.library.status);
     return matchesQuery && matchesStatus;
   });
+  cache[key] = rows;
+  return rows;
 }
 
 function filteredInstances(instances) {
-  const rows = naturalSortInstances(instances || []);
+  const rows = Array.isArray(instances) && instances._naturalSorted ? instances : naturalSortInstances(instances || []);
   if (state.library.status === "all") return rows;
   return rows.filter((item) => instanceWorkflowStatus(item) === state.library.status);
 }
 
 function naturalSortInstances(instances) {
-  return [...(instances || [])].sort((a, b) => {
-    const keyA = instanceNaturalSortKey(a);
-    const keyB = instanceNaturalSortKey(b);
+  const sorted = [...(instances || [])].sort((a, b) => {
+    const keyA = cachedInstanceNaturalSortKey(a);
+    const keyB = cachedInstanceNaturalSortKey(b);
     for (let index = 0; index < Math.max(keyA.length, keyB.length); index += 1) {
       const left = keyA[index];
       const right = keyB[index];
@@ -6907,6 +7131,17 @@ function naturalSortInstances(instances) {
     }
     return String(a?.id || "").localeCompare(String(b?.id || ""), "es", { numeric: true, sensitivity: "base" });
   });
+  try {
+    Object.defineProperty(sorted, "_naturalSorted", { value: true, enumerable: false, configurable: true });
+  } catch (_) {}
+  return sorted;
+}
+
+function cachedInstanceNaturalSortKey(instance) {
+  if (Array.isArray(instance?._naturalSortKey)) return instance._naturalSortKey;
+  const key = instanceNaturalSortKey(instance);
+  if (instance && typeof instance === "object") instance._naturalSortKey = key;
+  return key;
 }
 
 function instanceNaturalSortKey(instance) {
@@ -6922,17 +7157,22 @@ function instanceNaturalSortKey(instance) {
 }
 
 function selectedLibraryBook() {
+  const cache = libraryComputedCache();
+  const key = `selectedBook:${Number(state.library.dataVersion || 0)}:${state.library.selectedBookId}:${normalizeLibrarySearchText(state.library.query)}`;
+  if (Object.prototype.hasOwnProperty.call(cache, key)) return cache[key];
   const book = (state.library.books || []).find((row) => row.id === state.library.selectedBookId) || filteredBooks(false)[0] || null;
   if (!book) return null;
   const detail = state.library.details[String(book.id || "")];
   if (detail?.loaded) {
-    return {
+    cache[key] = {
       ...book,
       coverUrl: book.coverUrl || detail.book?.cover_url || detail.book?.coverUrl || "",
       instances: book.instances || detail.instances || [],
       dashboard: detail.dashboard || book.dashboard || {},
     };
+    return cache[key];
   }
+  cache[key] = book;
   return book;
 }
 
@@ -6965,8 +7205,11 @@ function findLibraryInstance(id) {
 }
 
 function libraryCounts() {
+  const cache = libraryComputedCache();
+  const key = `counts:${Number(state.library.dataVersion || 0)}`;
+  if (cache[key]) return cache[key];
   const books = state.library.books || [];
-  return books.reduce((acc, book) => {
+  const counts = books.reduce((acc, book) => {
     acc.books += 1;
     const instances = book.instances || [];
     if (instances.length) {
@@ -6985,6 +7228,8 @@ function libraryCounts() {
     else acc.vacia += remaining;
     return acc;
   }, { books: 0, instances: 0, vacia: 0, procesando: 0, llena: 0 });
+  cache[key] = counts;
+  return counts;
 }
 
 function bookWorkflowStatus(book) {
@@ -7007,6 +7252,13 @@ function instanceWorkflowStatus(instance) {
 }
 
 function instanceTimelineInfo(instance) {
+  if (instance?._timelineInfo && typeof instance._timelineInfo === "object") return instance._timelineInfo;
+  const timeline = deriveInstanceTimelineCachedInfo(instance);
+  if (instance && typeof instance === "object") instance._timelineInfo = timeline;
+  return timeline;
+}
+
+function deriveInstanceTimelineCachedInfo(instance) {
   const raw = instance?.timeline_stage && typeof instance.timeline_stage === "object" ? instance.timeline_stage : {};
   const id = normalizeTimelineStageId(raw.id || raw.stage || raw.stage_id);
   const fallback = deriveInstanceTimelineInfo(instance);
@@ -7075,6 +7327,13 @@ function instanceTimelineStripHtml(timeline) {
 }
 
 function instanceWorkflowInfo(instance) {
+  if (instance?._workflowInfo && typeof instance._workflowInfo === "object") return instance._workflowInfo;
+  const info = deriveInstanceWorkflowInfo(instance);
+  if (instance && typeof instance === "object") instance._workflowInfo = info;
+  return info;
+}
+
+function deriveInstanceWorkflowInfo(instance) {
   const indicators = {
     ...(instance?.indicators && typeof instance.indicators === "object" ? instance.indicators : {}),
     ...(instance?.summary && typeof instance.summary === "object" ? instance.summary : {}),
@@ -7161,6 +7420,13 @@ function normalizeBookIndicators(book) {
 }
 
 function bookProgressIndicators(book) {
+  if (book?._progressIndicators && typeof book._progressIndicators === "object") return book._progressIndicators;
+  const progress = deriveBookProgressIndicators(book);
+  if (book && typeof book === "object") book._progressIndicators = progress;
+  return progress;
+}
+
+function deriveBookProgressIndicators(book) {
   const indicators = normalizeBookIndicators(book);
   const total = Number(indicators.total_instancias || 0);
   const inDb = Number(indicators.instancias_en_bd || 0);
@@ -7172,8 +7438,8 @@ function bookProgressIndicators(book) {
   };
 }
 
-function bookVisualStatus(book) {
-  const progress = bookProgressIndicators(book);
+function bookVisualStatus(book, progress = null) {
+  progress = progress || bookProgressIndicators(book);
   if (progress.errors > 0) return "error";
   if (progress.total > 0 && progress.inDb >= progress.total) return "complete";
   if (progress.inDb > 0) return "in-progress";
@@ -7433,7 +7699,6 @@ async function bootApp() {
   const urlInstance = factoryInstanceFromUrl();
   if (window.__PDF_APP_MODE__ === "library" && !urlInstance) {
     state.view = "library";
-    renderLibrary();
     await loadLibrary();
     return;
   }
@@ -7442,10 +7707,11 @@ async function bootApp() {
   }
   try {
     state.snapshot = await loadFactorySnapshot();
+    resetRecordLookup();
     state.view = "factory";
-    await refreshNormalizerTrainingStatus({ silent: true });
     restoreFactoryUiState();
     render();
+    refreshNormalizerTrainingStatusLater({ silent: true, renderNotice: true });
     setStatus("Fabrica lista.");
     resumeOcrJobIfRunning({ silent: true });
     return;
@@ -7457,7 +7723,7 @@ async function bootApp() {
 
 $("libraryBtn").onclick = () => {
   state.view = "library";
-  renderLibrary();
+  if ((state.library.books || []).length || state.library.error) renderLibrary();
   loadLibrary("Biblioteca actualizada.", { bypassCache: true })
     .catch((err) => setStatus(`Error de biblioteca: ${err.message}`));
 };

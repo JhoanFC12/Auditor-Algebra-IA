@@ -135,7 +135,7 @@ class BookProgressController:
     def listar_bases_datos(self) -> List[str]:
         return self.db.listar_bases_datos()
 
-    def listar_libros(self, db_name: str) -> List[dict]:
+    def listar_libros(self, db_name: str, *, include_instance_health: bool = True) -> List[dict]:
         t0 = time.time()
         LOGGER.info("listar_libros_start db=%s", db_name)
         self._ensure_schema(db_name)
@@ -269,7 +269,11 @@ class BookProgressController:
                     """
                 )
             rows = self._fetchall_dicts(cur)
-            health_by_book = self._query_books_instance_health(conn)
+            health_by_book = (
+                self._query_books_instance_health(conn)
+                if include_instance_health
+                else self._query_books_instance_health_summary(conn)
+            )
             for row in rows:
                 self._hydrate_book_resource_paths(row)
                 book_id = int(row.get("id") or 0)
@@ -277,13 +281,21 @@ class BookProgressController:
                     book_id,
                     {
                         "items": [],
+                        "instances_in_db_total": 0,
+                        "instances_with_errors_total": 0,
                         "consistentes_total": 0,
                         "inconsistentes_total": 0,
                         "sin_revisar_total": 0,
                     },
                 )
-                row["instances_health"] = list(health.get("items") or [])
-                row["instances_health_json"] = json.dumps(row["instances_health"], ensure_ascii=False)
+                if include_instance_health:
+                    row["instances_health"] = list(health.get("items") or [])
+                    row["instances_health_json"] = json.dumps(row["instances_health"], ensure_ascii=False)
+                else:
+                    row.pop("instances_health", None)
+                    row.pop("instances_health_json", None)
+                row["instances_in_db_total"] = int(health.get("instances_in_db_total") or 0)
+                row["instances_with_errors_total"] = int(health.get("instances_with_errors_total") or 0)
                 row["consistency_consistentes_total"] = int(health.get("consistentes_total") or 0)
                 row["consistency_inconsistentes_total"] = int(health.get("inconsistentes_total") or 0)
                 row["consistency_sin_revisar_total"] = int(health.get("sin_revisar_total") or 0)
@@ -812,11 +824,22 @@ class BookProgressController:
         if not libro:
             raise ValueError("Libro no encontrado.")
         instance_rows = [dict(row) for row in instance_rows] if instance_rows is not None else self.listar_instancias_libro(db_name, libro_id)
+        libro_codigo = str(libro.get("codigo") or "").strip()
+        try:
+            uploaded_by_type = self._query_uploaded_problem_stats_by_instance(
+                db_name,
+                libro_codigo=libro_codigo,
+                instancia_tipos=[str(row.get("tipo") or "") for row in instance_rows],
+            )
+        except Exception as exc:
+            LOGGER.warning("dashboard_batch_uploaded_stats_error db=%s libro_id=%s err=%s", db_name, libro_id, exc)
+            uploaded_by_type = {}
         instance_stats = [
             self._build_instance_stats(
                 db_name,
-                libro_codigo=str(libro.get("codigo") or "").strip(),
+                libro_codigo=libro_codigo,
                 instancia=row,
+                uploaded_by_type=uploaded_by_type,
             )
             for row in instance_rows
         ]
@@ -1057,6 +1080,7 @@ class BookProgressController:
                     cur.execute("ALTER TABLE problemas RENAME COLUMN instancia_tipo TO codigo_instancia;")
                 if self._pg_column_exists(conn, "problemas", "codigo_instancia"):
                     cur.execute("ALTER TABLE problemas ALTER COLUMN codigo_instancia TYPE VARCHAR(80);")
+            self._ensure_runtime_indexes(conn)
             self._ensured_dbs.add(target_db)
             LOGGER.info("ensure_schema_ok db=%s elapsed=%.3fs", target_db, time.time() - t0)
         except Exception as exc:
@@ -1524,6 +1548,100 @@ class BookProgressController:
         finally:
             conn.close()
 
+    def _query_uploaded_problem_stats_by_instance(
+        self,
+        db_name: str,
+        *,
+        libro_codigo: str,
+        instancia_tipos: Iterable[str],
+    ) -> Dict[str, dict]:
+        clean_code = str(libro_codigo or "").strip()
+        clean_tipos: List[str] = []
+        seen: Set[str] = set()
+        for raw_tipo in instancia_tipos:
+            try:
+                tipo = self._normalize_instance_type(str(raw_tipo or ""))
+            except Exception:
+                continue
+            if tipo and tipo not in seen:
+                seen.add(tipo)
+                clean_tipos.append(tipo)
+        empty = {
+            tipo: {
+                "subidos_bd": 0,
+                "subidos_bd_con_solucion": 0,
+                "subidos_bd_sin_solucion": 0,
+                "subidos_bd_consistentes": 0,
+                "subidos_bd_inconsistentes": 0,
+                "subidos_bd_sin_revisar": 0,
+            }
+            for tipo in clean_tipos
+        }
+        if not clean_code or not clean_tipos:
+            return empty
+        conn = self.db.get_connection(db_name)
+        try:
+            if not self._pg_table_exists(conn, "problemas"):
+                return empty
+            problem_instance_col = self._problem_instance_column_name(conn)
+            consistency_col = self._problem_consistency_column_name(conn)
+            placeholders = ", ".join(["%s"] * len(clean_tipos))
+            cur = conn.cursor()
+            cur.execute(
+                f"""
+                SELECT
+                    LOWER(COALESCE({problem_instance_col}, '')) AS tipo,
+                    COUNT(*)::int AS total,
+                    COUNT(*) FILTER (
+                        WHERE jsonb_array_length(
+                            CASE
+                                WHEN jsonb_typeof(COALESCE(soluciones, '[]'::jsonb)) = 'array'
+                                THEN COALESCE(soluciones, '[]'::jsonb)
+                                ELSE '[]'::jsonb
+                            END
+                        ) > 0
+                    )::int AS con_solucion,
+                    COUNT(*) FILTER (
+                        WHERE jsonb_array_length(
+                            CASE
+                                WHEN jsonb_typeof(COALESCE(soluciones, '[]'::jsonb)) = 'array'
+                                THEN COALESCE(soluciones, '[]'::jsonb)
+                                ELSE '[]'::jsonb
+                            END
+                        ) = 0
+                    )::int AS sin_solucion,
+                    COUNT(*) FILTER (
+                        WHERE LOWER(COALESCE({consistency_col}, '')) IN ('consistente', 'bien planteado')
+                    )::int AS consistentes,
+                    COUNT(*) FILTER (
+                        WHERE LOWER(COALESCE({consistency_col}, '')) IN ('inconsistente', 'mal planteado')
+                    )::int AS inconsistentes,
+                    COUNT(*) FILTER (
+                        WHERE LOWER(COALESCE({consistency_col}, 'sin revisar')) IN ('sin revisar', 'pendiente revision', 'pendiente revisiÃ³n')
+                    )::int AS sin_revisar
+                FROM problemas
+                WHERE libro_codigo = %s
+                  AND LOWER(COALESCE({problem_instance_col}, '')) IN ({placeholders})
+                GROUP BY LOWER(COALESCE({problem_instance_col}, ''))
+                """,
+                (clean_code, *clean_tipos),
+            )
+            for row in cur.fetchall() or []:
+                tipo = str(row[0] or "").strip()
+                if not tipo:
+                    continue
+                empty[tipo] = {
+                    "subidos_bd": int(row[1] or 0),
+                    "subidos_bd_con_solucion": int(row[2] or 0),
+                    "subidos_bd_sin_solucion": int(row[3] or 0),
+                    "subidos_bd_consistentes": int(row[4] or 0),
+                    "subidos_bd_inconsistentes": int(row[5] or 0),
+                    "subidos_bd_sin_revisar": int(row[6] or 0),
+                }
+            return empty
+        finally:
+            conn.close()
+
     def _query_books_instance_health(self, conn) -> Dict[int, dict]:
         if not self._pg_table_exists(conn, "libro_instancias_escaneo") or not self._pg_table_exists(conn, "libros_escaneo"):
             return {}
@@ -1570,13 +1688,13 @@ class BookProgressController:
                 i.libro_id,
                 LOWER(COALESCE(i.{instance_col}, '')) AS tipo,
                 COUNT(p.id)::int AS total,
-                COUNT(*) FILTER (
+                COUNT(p.id) FILTER (
                     WHERE LOWER(COALESCE(p.{consistency_col}, 'sin revisar')) IN ('sin revisar', 'pendiente revision', 'pendiente revisión')
                 )::int AS sin_revisar,
-                COUNT(*) FILTER (
+                COUNT(p.id) FILTER (
                     WHERE LOWER(COALESCE(p.{consistency_col}, '')) IN ('inconsistente', 'mal planteado')
                 )::int AS inconsistentes,
-                COUNT(*) FILTER (
+                COUNT(p.id) FILTER (
                     WHERE LOWER(COALESCE(p.{consistency_col}, '')) IN ('consistente', 'bien planteado')
                 )::int AS consistentes
             FROM libro_instancias_escaneo i
@@ -1625,18 +1743,83 @@ class BookProgressController:
             payload["sin_revisar_total"] += sin_revisar
         return by_book
 
-    def _build_instance_stats(self, db_name: str, *, libro_codigo: str, instancia: dict) -> BookInstanceSessionStats:
+    def _query_books_instance_health_summary(self, conn) -> Dict[int, dict]:
+        if not self._pg_table_exists(conn, "libro_instancias_escaneo") or not self._pg_table_exists(conn, "libros_escaneo"):
+            return {}
+        if not self._pg_table_exists(conn, "problemas"):
+            return {}
+        instance_col = self._instance_column_name(conn)
+        problem_instance_col = self._problem_instance_column_name(conn)
+        consistency_col = self._problem_consistency_column_name(conn)
+        cur = conn.cursor()
+        cur.execute(
+            f"""
+            WITH instance_problem_counts AS (
+                SELECT
+                    i.libro_id,
+                    LOWER(COALESCE(i.{instance_col}, '')) AS tipo,
+                    COUNT(p.id)::int AS total,
+                    COUNT(p.id) FILTER (
+                        WHERE LOWER(COALESCE(p.{consistency_col}, 'sin revisar')) IN ('sin revisar', 'pendiente revision', 'pendiente revisión')
+                    )::int AS sin_revisar,
+                    COUNT(p.id) FILTER (
+                        WHERE LOWER(COALESCE(p.{consistency_col}, '')) IN ('inconsistente', 'mal planteado')
+                    )::int AS inconsistentes,
+                    COUNT(p.id) FILTER (
+                        WHERE LOWER(COALESCE(p.{consistency_col}, '')) IN ('consistente', 'bien planteado')
+                    )::int AS consistentes
+                FROM libro_instancias_escaneo i
+                JOIN libros_escaneo b ON b.id = i.libro_id
+                LEFT JOIN problemas p
+                  ON p.libro_codigo = b.codigo
+                 AND LOWER(COALESCE(p.{problem_instance_col}, '')) = LOWER(COALESCE(i.{instance_col}, ''))
+                GROUP BY i.libro_id, LOWER(COALESCE(i.{instance_col}, ''))
+            )
+            SELECT
+                libro_id,
+                COUNT(*) FILTER (WHERE total > 0)::int AS instances_in_db_total,
+                COUNT(*) FILTER (WHERE inconsistentes > 0)::int AS instances_with_errors_total,
+                COALESCE(SUM(consistentes), 0)::int AS consistentes_total,
+                COALESCE(SUM(inconsistentes), 0)::int AS inconsistentes_total,
+                COALESCE(SUM(sin_revisar), 0)::int AS sin_revisar_total
+            FROM instance_problem_counts
+            GROUP BY libro_id
+            """
+        )
+        by_book: Dict[int, dict] = {}
+        for row in cur.fetchall() or []:
+            libro_id = int(row[0] or 0)
+            by_book[libro_id] = {
+                "items": [],
+                "instances_in_db_total": int(row[1] or 0),
+                "instances_with_errors_total": int(row[2] or 0),
+                "consistentes_total": int(row[3] or 0),
+                "inconsistentes_total": int(row[4] or 0),
+                "sin_revisar_total": int(row[5] or 0),
+            }
+        return by_book
+
+    def _build_instance_stats(
+        self,
+        db_name: str,
+        *,
+        libro_codigo: str,
+        instancia: dict,
+        uploaded_by_type: Dict[str, dict] | None = None,
+    ) -> BookInstanceSessionStats:
         tipo = self._normalize_instance_type(str(instancia.get("tipo") or ""))
         total_esperado = max(int(instancia.get("total_esperado") or 0), 0)
         session_path = self._normalize_resource_path_text(str(instancia.get("session_path") or "").strip(), prefer_existing=True)
         soluciones_dir = self._normalize_resource_path_text(str(instancia.get("soluciones_dir") or "").strip(), prefer_existing=True)
         session_info = self._extract_session_instance_stats(session_path)
-        uploaded = self._query_uploaded_problem_stats(
-            db_name,
-            libro_codigo=libro_codigo,
-            instancia_tipo=tipo,
-            numeros=set(session_info.get("numeros", set()) or set()),
-        )
+        uploaded = dict((uploaded_by_type or {}).get(tipo) or {})
+        if not uploaded:
+            uploaded = self._query_uploaded_problem_stats(
+                db_name,
+                libro_codigo=libro_codigo,
+                instancia_tipo=tipo,
+                numeros=set(session_info.get("numeros", set()) or set()),
+            )
         escaneados = max(int(session_info["items_count"]), 0)
         faltantes = max(total_esperado - escaneados, 0)
         porcentaje = 0.0 if total_esperado <= 0 else (escaneados / total_esperado)
@@ -1741,6 +1924,50 @@ class BookProgressController:
                 return False
 
         return True
+
+    def _ensure_runtime_indexes(self, conn) -> None:
+        """Create best-effort indexes for library progress queries."""
+        statements: list[str] = []
+        try:
+            if self._pg_table_exists(conn, "libro_instancias_escaneo"):
+                instance_col = self._instance_column_name(conn)
+                statements.append(
+                    f"""
+                    CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_libro_instancias_escaneo_libro_tipo_lower
+                    ON libro_instancias_escaneo (libro_id, LOWER(COALESCE({instance_col}, '')));
+                    """
+                )
+            if self._pg_table_exists(conn, "problemas") and self._pg_column_exists(conn, "problemas", "libro_codigo"):
+                problem_instance_col = self._problem_instance_column_name(conn)
+                statements.append(
+                    """
+                    CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_problemas_libro_codigo
+                    ON problemas (libro_codigo);
+                    """
+                )
+                statements.append(
+                    f"""
+                    CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_problemas_libro_instancia_lower
+                    ON problemas (libro_codigo, LOWER(COALESCE({problem_instance_col}, '')));
+                    """
+                )
+        except Exception as exc:
+            LOGGER.debug("ensure_runtime_indexes_plan_error err=%s", exc)
+            return
+
+        if not statements:
+            return
+        cur = conn.cursor()
+        for statement in statements:
+            try:
+                cur.execute(statement)
+            except Exception as exc:
+                LOGGER.warning("ensure_runtime_index_error err=%s", exc)
+                try:
+                    conn.rollback()
+                    conn.autocommit = True
+                except Exception:
+                    pass
 
     def _instance_column_name(self, conn) -> str:
         if self._pg_column_exists(conn, "libro_instancias_escaneo", "codigo_instancia"):

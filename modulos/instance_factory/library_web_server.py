@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import base64
 import binascii
+import gzip
 import json
 import mimetypes
 import shutil
@@ -106,6 +107,7 @@ class LibraryWebRuntime:
         self._file_tokens: dict[str, Path] = {}
         self._file_url_cache: dict[str, tuple[tuple[int, int], str, str]] = {}
         self._factory_runtimes: list[FactoryWebRuntime] = []
+        self._factory_runtime_by_instance_id: dict[int, Any] = {}
         self.endpoint_manager = HfEndpointManager()
         self._lock = threading.RLock()
         self._server: ThreadingHTTPServer | None = None
@@ -157,9 +159,13 @@ class LibraryWebRuntime:
             except Exception:
                 pass
         self._factory_runtimes.clear()
+        self._factory_runtime_by_instance_id.clear()
         api_runtimes = getattr(self.library_api, "_factory_runtimes", None)
         if isinstance(api_runtimes, list):
             api_runtimes.clear()
+        api_runtime_map = getattr(self.library_api, "_factory_runtime_by_instance", None)
+        if isinstance(api_runtime_map, dict):
+            api_runtime_map.clear()
         if self._server is None:
             return
         self._server.shutdown()
@@ -200,14 +206,16 @@ class LibraryWebRuntime:
                 result = self._dispatch_api(method, path, query, payload)
                 self._send_json(handler, result)
                 return
-            if path.startswith("/api/") and self._factory_runtime_for_request(handler, query, {}) is not None:
+            if path.startswith("/api/"):
                 payload = self._read_json(handler) if method == "POST" else {}
-                result = self._dispatch_factory_api(handler, method, path, query, payload)
-                if isinstance(result, _FilePayload):
-                    self._send_file(handler, result.path, result.content_type, cache_control=result.cache_control)
-                else:
-                    self._send_json(handler, result)
-                return
+                runtime = self._factory_runtime_for_request(handler, query, payload)
+                if runtime is not None:
+                    result = self._dispatch_factory_api(handler, method, path, query, payload, runtime=runtime)
+                    if isinstance(result, _FilePayload):
+                        self._send_file(handler, result.path, result.content_type, cache_control=result.cache_control)
+                    else:
+                        self._send_json(handler, result)
+                    return
             if method != "GET":
                 self._send_json(handler, {"error": "method_not_allowed"}, status=405)
                 return
@@ -273,15 +281,16 @@ class LibraryWebRuntime:
         path: str,
         query: dict[str, list[str]],
         payload: dict[str, Any],
+        *,
+        runtime: Any | None = None,
     ) -> Any:
-        runtime = self._factory_runtime_for_request(handler, query, payload)
+        runtime = runtime or self._factory_runtime_for_request(handler, query, payload)
         if runtime is None:
             raise FileNotFoundError(f"Ruta API no encontrada: {method} {path}")
         return runtime._dispatch_api(method, path, query, payload)
 
     def _dispatch_factory_file(self, path: str, query: dict[str, list[str]]) -> _FilePayload:
         token = urllib.parse.unquote(path.rsplit("/", 1)[-1])
-        runtimes = self._all_factory_runtimes()
         preferred: list[Any] = []
         raw_instance_id = self._first(query, "instance_id", "")
         if raw_instance_id:
@@ -290,28 +299,43 @@ class LibraryWebRuntime:
             except Exception:
                 instance_id = 0
             if instance_id > 0:
-                preferred = [
-                    runtime
-                    for runtime in runtimes
-                    if int(getattr(runtime, "_library_instance_id", 0) or 0) == instance_id
-                ]
-        token_owners = [
-            runtime
-            for runtime in runtimes
-            if token in dict(getattr(runtime, "_file_tokens", {}) or {})
-        ]
+                runtime = self._runtime_by_instance_id(instance_id)
+                preferred = [runtime] if runtime is not None else []
+        for runtime in preferred:
+            result = self._try_dispatch_factory_file(runtime, path, query)
+            if result is not None:
+                return result
+        runtimes = self._all_factory_runtimes()
+        token_owners: list[Any] = []
+        for runtime in runtimes:
+            tokens = getattr(runtime, "_file_tokens", {}) or {}
+            try:
+                owns_token = token in tokens
+            except Exception:
+                owns_token = False
+            if owns_token:
+                token_owners.append(runtime)
         candidates: list[Any] = []
-        for runtime in [*preferred, *token_owners, *reversed(runtimes)]:
+        for runtime in [*token_owners, *reversed(runtimes)]:
+            if runtime in preferred:
+                continue
             if runtime not in candidates:
                 candidates.append(runtime)
         for runtime in candidates:
-            try:
-                result = runtime._dispatch_api("GET", path, query, {})
-            except FileNotFoundError:
-                continue
-            if isinstance(result, _FilePayload):
+            result = self._try_dispatch_factory_file(runtime, path, query)
+            if result is not None:
                 return result
         raise FileNotFoundError("Archivo no registrado en ninguna instancia abierta.")
+
+    @staticmethod
+    def _try_dispatch_factory_file(runtime: Any, path: str, query: dict[str, list[str]]) -> _FilePayload | None:
+        try:
+            result = runtime._dispatch_api("GET", path, query, {})
+        except FileNotFoundError:
+            return None
+        if isinstance(result, _FilePayload):
+            return result
+        return None
 
     def _all_factory_runtimes(self) -> list[Any]:
         result: list[Any] = []
@@ -342,17 +366,50 @@ class LibraryWebRuntime:
             except Exception:
                 instance_id = 0
         if instance_id > 0:
-            for runtime in self._all_factory_runtimes():
-                try:
-                    if int(getattr(runtime, "_library_instance_id", 0) or 0) == instance_id:
-                        return runtime
-                except Exception:
-                    continue
+            runtime = self._runtime_by_instance_id(instance_id)
+            if runtime is not None:
+                return runtime
             runtime = self._create_factory_runtime_from_request(instance_id, query, payload)
             if runtime is not None:
                 return runtime
             return None
         return self._active_factory_runtime()
+
+    def _runtime_by_instance_id(self, instance_id: int) -> Any | None:
+        try:
+            instance_id = int(instance_id)
+        except Exception:
+            return None
+        if instance_id <= 0:
+            return None
+        runtime = self._factory_runtime_by_instance_id.get(instance_id)
+        if runtime is not None:
+            return runtime
+        api_runtime_map = getattr(self.library_api, "_factory_runtime_by_instance", None)
+        if isinstance(api_runtime_map, dict):
+            for key, candidate in list(api_runtime_map.items()):
+                try:
+                    if int(key[2]) == instance_id:
+                        self._remember_factory_runtime(candidate)
+                        return candidate
+                except Exception:
+                    continue
+        for candidate in self._all_factory_runtimes():
+            try:
+                if int(getattr(candidate, "_library_instance_id", 0) or 0) == instance_id:
+                    self._remember_factory_runtime(candidate)
+                    return candidate
+            except Exception:
+                continue
+        return None
+
+    def _remember_factory_runtime(self, runtime: Any) -> None:
+        try:
+            instance_id = int(getattr(runtime, "_library_instance_id", 0) or 0)
+        except Exception:
+            instance_id = 0
+        if instance_id > 0:
+            self._factory_runtime_by_instance_id[instance_id] = runtime
 
     def _create_factory_runtime_from_request(
         self,
@@ -384,9 +441,13 @@ class LibraryWebRuntime:
         setattr(runtime, "_library_db_name", db_name)
         setattr(runtime, "_library_book_id", int(book_id))
         setattr(runtime, "_library_instance_id", int(instance_id))
+        self._remember_factory_runtime(runtime)
         api_runtimes = getattr(self.library_api, "_factory_runtimes", None)
         if isinstance(api_runtimes, list) and runtime not in api_runtimes:
             api_runtimes.append(runtime)
+        api_runtime_map = getattr(self.library_api, "_factory_runtime_by_instance", None)
+        if isinstance(api_runtime_map, dict):
+            api_runtime_map[(db_name, int(book_id), int(instance_id))] = runtime
         return runtime
 
     def _active_factory_runtime(self) -> Any | None:
@@ -400,7 +461,7 @@ class LibraryWebRuntime:
         selected = str(db_name or "").strip()
         if selected not in dbs:
             selected = self.default_db_name if self.default_db_name in dbs else (dbs[0] if dbs else "")
-        books = self.controller.listar_libros(selected) if selected else []
+        books = self._list_books(selected, include_instance_health=False) if selected else []
         return {
             "schema_version": "library_web_snapshot_v1",
             "selected_db": selected,
@@ -475,15 +536,49 @@ class LibraryWebRuntime:
             **{f"books_{key}": value for key, value in states.items()},
         }
 
+    def _list_books(self, db_name: str, *, include_instance_health: bool = False) -> list[dict[str, Any]]:
+        try:
+            return [dict(row) for row in self.controller.listar_libros(db_name, include_instance_health=include_instance_health)]
+        except TypeError as exc:
+            if "include_instance_health" not in str(exc):
+                raise
+            return [dict(row) for row in self.controller.listar_libros(db_name)]
+
     @staticmethod
     def _book_to_web(book: dict[str, Any]) -> dict[str, Any]:
         payload = dict(book or {})
+        health = LibraryWebRuntime._parse_instances_health(payload)
         payload["id"] = int(payload.get("id") or 0)
         payload["instances_total"] = int(payload.get("instances_total") or 0)
         payload["instances_expected_total"] = int(payload.get("instances_expected_total") or 0)
         payload["instances_session_count"] = int(payload.get("instances_session_count") or 0)
         payload["instances_solutions_count"] = int(payload.get("instances_solutions_count") or 0)
-        payload["instances_health"] = LibraryWebRuntime._parse_instances_health(payload)
+        health_in_db = (
+            sum(1 for item in health if int(item.get("total") or item.get("subidos_bd") or 0) > 0)
+            if health
+            else int(payload.get("instances_in_db_total") or payload.get("instances_en_bd_total") or 0)
+        )
+        health_errors = (
+            sum(
+                1
+                for item in health
+                if int(item.get("inconsistentes") or 0) > 0
+                or str(item.get("status") or "") == "complete_with_inconsistencies"
+            )
+            if health
+            else int(payload.get("instances_with_errors_total") or payload.get("instances_error_total") or 0)
+        )
+        payload["indicators"] = {
+            "total_instancias": int(payload.get("instances_total") or 0),
+            "total_esperado": int(payload.get("instances_expected_total") or 0),
+            "instancias_en_bd": health_in_db,
+            "consistentes_total": int(payload.get("consistency_consistentes_total") or 0),
+            "inconsistentes_total": int(payload.get("consistency_inconsistentes_total") or 0),
+            "sin_revisar_total": int(payload.get("consistency_sin_revisar_total") or 0),
+            "errores_total": health_errors,
+        }
+        for heavy_key in ("instances_health", "instances_health_json", "instances_names"):
+            payload.pop(heavy_key, None)
         return payload
 
     @staticmethod
@@ -733,13 +828,18 @@ class LibraryWebRuntime:
     @staticmethod
     def _send_json(handler: BaseHTTPRequestHandler, payload: Any, *, status: int = 200) -> None:
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        accepts_gzip = "gzip" in str(handler.headers.get("Accept-Encoding") or "").lower()
+        body = gzip.compress(raw, compresslevel=5) if accepts_gzip and len(raw) >= 1024 else raw
         handler.send_response(status)
         handler.send_header("Content-Type", "application/json; charset=utf-8")
-        handler.send_header("Content-Length", str(len(raw)))
+        handler.send_header("Content-Length", str(len(body)))
+        if body is not raw:
+            handler.send_header("Content-Encoding", "gzip")
+            handler.send_header("Vary", "Accept-Encoding")
         handler.send_header("Cache-Control", "no-store")
         LibraryWebRuntime._send_cors_headers(handler)
         handler.end_headers()
-        handler.wfile.write(raw)
+        handler.wfile.write(body)
 
     @staticmethod
     def _send_file(

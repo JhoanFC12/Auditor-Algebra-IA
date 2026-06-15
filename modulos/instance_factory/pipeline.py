@@ -701,6 +701,7 @@ class InstancePdfPipelineService:
         dpi: int = 300,
         confidence: float = 0.25,
         detector_model: str = "",
+        replace_existing: bool = False,
     ) -> list[ProblemPageRecord]:
         import fitz
 
@@ -708,6 +709,19 @@ class InstancePdfPipelineService:
         if not pdf_path.exists():
             raise FileNotFoundError(f"No se encontro el PDF: {pdf_path}")
         rows = self._dedupe_page_rows(self.load_pages())
+        selected_page_numbers = {int(page) for page in pages}
+        removed_rows: list[ProblemPageRecord] = []
+        if replace_existing:
+            removed_rows = [
+                row
+                for row in rows
+                if int(row.page_number or 0) not in selected_page_numbers
+            ]
+            rows = [
+                row
+                for row in rows
+                if int(row.page_number or 0) in selected_page_numbers
+            ]
         temp = Path(tempfile.mkdtemp(prefix="pdf_factory_pages_"))
         with fitz.open(pdf_path) as document:
             matrix = fitz.Matrix(int(dpi) / 72.0, int(dpi) / 72.0)
@@ -733,8 +747,27 @@ class InstancePdfPipelineService:
                 row.reviewed = False
                 rows = [existing for existing in rows if int(existing.page_number or 0) != int(row.page_number or 0)]
                 rows.append(row)
-        self.golden.upsert_instance_rows(self.context.instance_name, self._dedupe_page_rows(rows))
+        final_rows = self._dedupe_page_rows(rows)
+        if removed_rows:
+            delete_row = getattr(self.golden, "delete_instance_row", None)
+            if callable(delete_row):
+                for row in removed_rows:
+                    try:
+                        delete_row(self.context.instance_name, str(row.record_id))
+                    except KeyError:
+                        continue
+                self.golden.upsert_instance_rows(self.context.instance_name, final_rows)
+            else:
+                self.golden.save_instance(self.context.instance_name, final_rows)
+        else:
+            self.golden.upsert_instance_rows(self.context.instance_name, final_rows)
         self._invalidate_pages_cache()
+        invalidated_records: list[StagingProblemRecord] = []
+        for removed in removed_rows:
+            invalidated_records.extend(self._invalidate_downstream_for_page_removed(removed))
+        setattr(self, "_last_pages_detect_removed_count", len(removed_rows))
+        setattr(self, "_last_pages_detect_invalidated_count", len(invalidated_records))
+        setattr(self, "_last_pages_detect_invalidated_records", list(invalidated_records))
         return self.load_pages()
 
     def materialize_crops_to_staging(self, rows: list[ProblemPageRecord] | None = None) -> list[StagingProblemRecord]:
