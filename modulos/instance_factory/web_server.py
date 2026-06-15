@@ -27,7 +27,7 @@ from .library_api import LibraryApiError, LibraryWebApi
 from .runtime_env import load_factory_runtime_env
 from .hf_endpoint_manager import HfEndpointManager
 from .normalizer_training_bank import load_manifest as load_normalizer_training_manifest
-from .training_registry import load_training_cycle_status, task_by_key
+from .training_registry import load_training_cycle_status, start_new_training_cycle, task_by_key
 from .db_promotion import promote_staging_records_to_db
 
 
@@ -39,6 +39,7 @@ WEB_BACKEND_SOURCE_NAMES = (
     "library_web_server.py",
     "library_api.py",
     "pipeline.py",
+    "normalizer_inference.py",
     "staging.py",
     "db_promotion.py",
     "training_registry.py",
@@ -372,6 +373,16 @@ class FactoryWebRuntime:
                 return self._normalizer_training_status()
             if method == "GET" and path == "/api/training/status":
                 return self._training_cycle_status()
+            if method == "POST" and path == "/api/training/cycle/reset":
+                reason = str(payload.get("reason") or "").strip()
+                metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+                status = start_new_training_cycle(
+                    context=self.context,
+                    reason=reason or "Nuevo ciclo de entrenamiento iniciado desde Fabrica web.",
+                    metadata=metadata,
+                )
+                self._invalidate_response_caches()
+                return status
             if method == "POST" and path == "/api/endpoint/ocr/resume":
                 return self.endpoint_manager.resume(
                     wait=self._bool(payload.get("wait"), default=True),
@@ -558,6 +569,23 @@ class FactoryWebRuntime:
                         include_summary=self._bool(payload.get("include_summary"), default=True),
                     )
                 return self._snapshot()
+            if method == "POST" and path == "/api/normalize/ai":
+                try:
+                    updated = self.service.normalize_with_ai(self._required_str(payload, "record_id"))
+                except RuntimeError as exc:
+                    raise WebApiError(
+                        f"Normalizador IA: {str(exc).strip() or 'error desconocido'}",
+                        status=502,
+                        code="normalizer_error",
+                    ) from exc
+                response = self._record_saved_response(
+                    updated,
+                    include_summary=self._bool(payload.get("include_summary"), default=True),
+                )
+                response["schema_version"] = "pdf_factory_web_ai_normalized_v1"
+                response["final_latex"] = str((updated.normalized or {}).get("latex_rendered_item") or "")
+                response["requires_human_review"] = True
+                return response
             if method == "POST" and path == "/api/review/save":
                 record_id = self._required_str(payload, "record_id")
                 normalized = payload.get("normalized") or {}
@@ -1027,12 +1055,17 @@ class FactoryWebRuntime:
         manifest = load_normalizer_training_manifest()
         cycle = self._training_cycle_status()
         normalizer_task = task_by_key(cycle, "normalizer")
-        samples_total = int(manifest.get("samples_total") or 0)
+        historical_samples_total = int(manifest.get("samples_total") or 0)
+        has_active_cycle = bool((cycle.get("cycle") or {}).get("cycle_id")) or int(normalizer_task.get("cycle_baseline_samples") or 0) > 0
+        cycle_matches_manifest = int(normalizer_task.get("historical_samples_total") or 0) == historical_samples_total
+        samples_total = int(normalizer_task.get("samples_total") or 0) if has_active_cycle and cycle_matches_manifest else historical_samples_total
         threshold = int(normalizer_task.get("target_samples") or manifest.get("threshold") or 500)
         payload = {
             **manifest,
             "schema_version": "normalizer_training_bank_status_v1",
             "samples_total": samples_total,
+            "historical_samples_total": int(normalizer_task.get("historical_samples_total") or historical_samples_total),
+            "cycle_baseline_samples": int(normalizer_task.get("cycle_baseline_samples") or 0),
             "threshold": threshold,
             "ready_to_train": samples_total >= threshold,
             "remaining_to_threshold": max(0, threshold - samples_total),
@@ -1896,6 +1929,7 @@ class FactoryWebRuntime:
             "/api/ocr/jobs/status": {"GET"},
             "/api/training/status": {"GET"},
             "/api/training/normalizer/status": {"GET"},
+            "/api/training/cycle/reset": {"POST"},
             "/api/endpoint/ocr/resume": {"POST"},
             "/api/endpoint/ocr/scale-to-zero": {"POST"},
             "/api/ocr/jobs/start": {"POST"},
@@ -1908,6 +1942,7 @@ class FactoryWebRuntime:
             "/api/ocr/segments/boxes": {"POST"},
             "/api/segments/boxes": {"POST"},
             "/api/normalize": {"POST"},
+            "/api/normalize/ai": {"POST"},
             "/api/review/save": {"POST"},
         }
         if path.startswith("/api/library/"):

@@ -206,6 +206,7 @@ def _rewrite_index(bank_root: Path, *, threshold: int = DEFAULT_THRESHOLD) -> di
         "samples_jsonl": str(bank_root / "samples.jsonl"),
         "samples_dir": str(samples_dir),
         "images_dir": str(bank_root / "images"),
+        "revision_events_total": sum(max(1, int(row.get("revision_count") or 1)) for row in rows),
         "next_action": "train_normalizer_v1" if ready else "collect_more_samples",
         "remaining_to_threshold": max(0, int(threshold) - len(rows)),
     }
@@ -252,12 +253,15 @@ def upsert_sample(
             existing = payload if isinstance(payload, dict) else {}
         except Exception:
             existing = {}
+    history = _history_from_existing(existing)
+    revision_count = max(0, int(existing.get("revision_count") or 0)) + 1 if existing else 1
     continuations = _continuation_records(record, all_records)
     row = {
         "schema_version": SAMPLE_SCHEMA_VERSION,
         "sample_id": sample_id,
         "created_at": existing.get("created_at") or _now(),
         "updated_at": _now(),
+        "revision_count": revision_count,
         "context": context.to_dict(),
         "staging_root": str(staging_root),
         "record_id": record.record_id,
@@ -281,7 +285,21 @@ def upsert_sample(
             for row in continuations
         ],
         "images": _image_entries(bank_root=bank_root, sample_id=sample_id, record=record, continuations=continuations),
+        "correction_history": history,
         "intended_use": "normalizer_final_latex_training",
     }
     sample_path.write_text(json.dumps(row, ensure_ascii=False, indent=2), encoding="utf-8")
     return _rewrite_index(bank_root, threshold=threshold)
+
+
+def _history_from_existing(existing: dict[str, Any]) -> list[dict[str, Any]]:
+    if not existing:
+        return []
+    history = existing.get("correction_history") if isinstance(existing.get("correction_history"), list) else []
+    event = {
+        "updated_at": str(existing.get("updated_at") or ""),
+        "final_latex": str(existing.get("final_latex") or ""),
+        "normalized_human": existing.get("normalized_human") if isinstance(existing.get("normalized_human"), dict) else {},
+        "continuations": existing.get("continuations") if isinstance(existing.get("continuations"), list) else [],
+    }
+    return [*history, event][-50:]

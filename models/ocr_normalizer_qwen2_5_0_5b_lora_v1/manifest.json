@@ -1,0 +1,15 @@
+{
+  "schema_version": "local_ocr_normalizer_manifest_v1",
+  "created_at": "2026-06-15T01:13:54",
+  "model_repo": "Jhoan12/math-ocr-normalizer-qwen2.5-0.5b-lora-v1",
+  "base_repo": "Qwen/Qwen2.5-0.5B-Instruct",
+  "base_dir": "E:\\Github\\Auditor-IA\\models\\ocr_normalizer_qwen2_5_0_5b_lora_v1\\base",
+  "adapter_dir": "E:\\Github\\Auditor-IA\\models\\ocr_normalizer_qwen2_5_0_5b_lora_v1\\adapter",
+  "base_size_bytes": 999605188,
+  "adapter_size_bytes": 51127940,
+  "usage": {
+    "HF_OCR_NORMALIZER_PREFER_LOCAL": "1",
+    "HF_OCR_NORMALIZER_BASE_MODEL_LOCAL_DIR": "E:\\Github\\Auditor-IA\\models\\ocr_normalizer_qwen2_5_0_5b_lora_v1\\base",
+    "HF_OCR_NORMALIZER_LOCAL_DIR": "E:\\Github\\Auditor-IA\\models\\ocr_normalizer_qwen2_5_0_5b_lora_v1\\adapter"
+  }
+}

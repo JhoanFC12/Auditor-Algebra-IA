@@ -110,6 +110,37 @@ class SegmentadorV2PathTests(unittest.TestCase):
                 else:
                     os.environ["SEGMENT_LIVE_GOLDEN_BASE"] = previous_live
 
+    def test_reviewed_segments_keep_recorrection_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            segments_root = root / "segments"
+            live_root = root / "segment_training_live"
+            src = root / "crop_003.png"
+            Image.new("RGB", (120, 90), color=(255, 255, 255)).save(src)
+            previous_live = os.environ.get("SEGMENT_LIVE_GOLDEN_BASE")
+            try:
+                os.environ["SEGMENT_LIVE_GOLDEN_BASE"] = str(live_root)
+                segmenter = SegmentadorProblemasV2(segments_root)
+
+                segmenter.save_reviewed_segments(src, [(10, 15, 80, 70)])
+                segmenter.save_reviewed_segments(src, [(12, 18, 90, 75)])
+
+                manifest = json.loads((live_root / "manifest.json").read_text(encoding="utf-8"))
+                self.assertEqual(manifest["records_total"], 1)
+                self.assertEqual(manifest["corrected_images"], 1)
+                self.assertEqual(manifest["revision_events_total"], 2)
+                records = list((live_root / "records").glob("*.json"))
+                self.assertEqual(len(records), 1)
+                record = json.loads(records[0].read_text(encoding="utf-8"))
+                self.assertEqual(record["revision_count"], 2)
+                self.assertEqual(record["boxes_px"], [[12, 18, 90, 75]])
+                self.assertEqual(record["correction_history"][0]["boxes_px"], [[10, 15, 80, 70]])
+            finally:
+                if previous_live is None:
+                    os.environ.pop("SEGMENT_LIVE_GOLDEN_BASE", None)
+                else:
+                    os.environ["SEGMENT_LIVE_GOLDEN_BASE"] = previous_live
+
 
 if __name__ == "__main__":
     unittest.main()

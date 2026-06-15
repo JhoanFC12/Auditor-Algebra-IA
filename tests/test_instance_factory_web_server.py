@@ -103,6 +103,23 @@ class _FakeService:
         self.calls.append(("normalize_existing_ocr", record_id, list(record_ids or [])))
         return self.staging.load_records()
 
+    def normalize_with_ai(self, record_id):
+        self.calls.append(("normalize_with_ai", record_id))
+        record = self.staging.get_record(record_id)
+        if record is None:
+            raise KeyError(record_id)
+        record.normalized = {
+            **dict(record.normalized or {}),
+            "normalizer": "fake-ai-normalizer",
+            "status": StageStatus.NEEDS_REVIEW,
+            "latex_rendered_item": "\\item[\\textbf{1.}] [[curso=GEO]] [[tema=TEST]] [[Estado=sin_revisar]] [[Clave=-]] IA",
+        }
+        record.set_step(PipelineStep.NORMALIZATION, StageStatus.NEEDS_REVIEW, "borrador IA")
+        record.set_step(PipelineStep.REVIEW, StageStatus.NEEDS_REVIEW, "pendiente")
+        record.sync_status_from_steps()
+        self.staging.upsert_record(record)
+        return record
+
     def update_figure_segments(self, record_id, boxes):
         self.calls.append(("update_figure_segments", record_id, boxes))
         record = self.staging.get_record(record_id)
@@ -491,6 +508,39 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                 self.assertEqual(payload["code"], "internal_error")
                 self.assertNotIn("traceback", payload)
                 self.assertNotIn("secret internal path", payload["error"])
+            finally:
+                runtime.stop()
+
+    def test_normalize_ai_returns_readable_model_error(self) -> None:
+        class _BrokenNormalizerService(_FakeService):
+            def normalize_with_ai(self, record_id):
+                raise RuntimeError("No hay modelo normalizador IA configurado en HF_OCR_NORMALIZER_MODEL.")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            crop = root / "crop.png"
+            crop.write_bytes(b"png")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(crop),
+                    raw_ocr="<01.> Halle x. A) 1 B) 2 C) 3 D) 4 E) 5",
+                )
+            )
+            runtime = FactoryWebRuntime(context, service=_BrokenNormalizerService(context, store))
+            try:
+                base = runtime.start()
+                with self.assertRaises(urllib.error.HTTPError) as failure:
+                    _post_json(base, "api/normalize/ai", {"record_id": "crop_001"})
+                payload = _read_http_error(failure.exception)
+                self.assertEqual(failure.exception.code, 502)
+                self.assertEqual(payload["schema_version"], "pdf_factory_web_error_v1")
+                self.assertEqual(payload["code"], "normalizer_error")
+                self.assertIn("HF_OCR_NORMALIZER_MODEL", payload["error"])
+                self.assertNotIn("traceback", payload)
             finally:
                 runtime.stop()
 
@@ -1000,6 +1050,39 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                 self.assertEqual(third["samples_total"], 2)
                 self.assertEqual(calls, [1, 2])
 
+    def test_web_runtime_resets_training_cycle_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            datasets = root / "datasets"
+            (datasets / "normalizer_training_bank").mkdir(parents=True)
+            (datasets / "normalizer_training_bank" / "manifest.json").write_text(
+                json.dumps({"schema_version": "normalizer_training_bank_v1", "samples_total": 3}),
+                encoding="utf-8",
+            )
+            context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            runtime = FactoryWebRuntime(context, service=_FakeService(context, store))
+            with patch.dict(
+                os.environ,
+                {
+                    "TRAINING_DATASETS_ROOT": str(datasets),
+                    "NORMALIZER_TRAINING_BANK_ROOT": "",
+                    "OCR_TRAINING_BANK_ROOTS": "",
+                    "SEGMENT_LIVE_GOLDEN_BASE": "",
+                    "PDF_PROBLEM_DETECTOR_CORRECTIONS_ROOT": "",
+                },
+            ):
+                try:
+                    base = runtime.start()
+                    status = _post_json(base, "api/training/cycle/reset", {"reason": "test cycle"})
+                    normalizer = next(task for task in status["tasks"] if task["key"] == "normalizer")
+                    self.assertEqual(normalizer["samples_total"], 0)
+                    self.assertEqual(normalizer["historical_samples_total"], 3)
+                    self.assertEqual(normalizer["cycle_baseline_samples"], 3)
+                    self.assertTrue((datasets / "training_cycle_state.json").exists())
+                finally:
+                    runtime.stop()
+
     def test_web_runtime_exposes_snapshot_review_and_disabled_promotion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(Path(tmp) / "book.pdf"))
@@ -1429,6 +1512,15 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                 self.assertEqual(normalize_compact["schema_version"], "pdf_factory_web_record_saved_v1")
                 self.assertEqual(normalize_compact["record"]["record_id"], "crop_001")
                 self.assertIn(("normalize_existing_ocr", "crop_001", []), service.calls)
+                ai_normalized = _post_json(
+                    base,
+                    "api/normalize/ai",
+                    {"record_id": "crop_001", "include_summary": False},
+                )
+                self.assertEqual(ai_normalized["schema_version"], "pdf_factory_web_ai_normalized_v1")
+                self.assertEqual(ai_normalized["record"]["normalized"]["normalizer"], "fake-ai-normalizer")
+                self.assertTrue(ai_normalized["requires_human_review"])
+                self.assertIn(("normalize_with_ai", "crop_001"), service.calls)
                 _post_json(base, "api/normalize", {"record_ids": ["crop_001", "crop_001", ""]})
                 self.assertIn(("normalize_existing_ocr", "", ["crop_001"]), service.calls)
                 review_compact = _post_json(

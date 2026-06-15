@@ -2,6 +2,14 @@
 
 Este documento es la guia viva para mejorar la app sin perder el rumbo. Cada idea nueva debe entrar aqui como decision, pendiente o cambio de arquitectura antes de implementarse.
 
+Plan maestro de producto:
+
+```text
+docs/plan_maestro_app_aprendizaje_adaptativo.md
+```
+
+Ese documento ubica la Fabrica PDF dentro del objetivo mayor: construir una BD relacional y semantica para similitud de problemas, dificultad, diagnostico del alumno y practicas adaptativas.
+
 ## Objetivo general
 
 Construir un flujo confiable para convertir PDFs escaneados en problemas matematicos revisados, entrenables y finalmente almacenables en la base de datos local.
@@ -29,6 +37,7 @@ El orden de prioridad actual es:
 - Se retira el `Carrito OCR global`: en la practica resulto incomodo. El OCR se trabaja desde la cola local de cada instancia.
 - La BD final no sera solo un almacen: debe alimentar busqueda por similitud, estimacion de dificultad y recomendacion de ejercicios.
 - La descripcion semantica de un problema debe separar texto, grafico, solucion futura, habilidades y evidencias; no debe depender solo del enunciado renderizado.
+- Antes de construir fuerte la app del alumno, la BD debe poder responder: que conceptos trabaja este problema, que problemas se parecen y que dificultad tiene.
 
 ## Almacen y Biblioteca
 

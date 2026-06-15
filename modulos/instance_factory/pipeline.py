@@ -25,6 +25,8 @@ from .models import (
     build_pipeline_contract,
     utc_now_text,
 )
+from .normalizer_inference import HfOcrNormalizerClient, normalizer_input_from_record
+from .ocr_training_bank import upsert_raw_ocr_correction
 from .page_selection import parse_page_selection
 from .problem_detector_corrections import maybe_write_problem_detector_correction
 from .staging import InstanceStagingStore
@@ -1383,10 +1385,80 @@ class InstancePdfPipelineService:
         self.staging.upsert_many(out)
         return out
 
+    def normalize_with_ai(self, record_id: str) -> StagingProblemRecord:
+        record_id = str(record_id or "").strip()
+        if not record_id:
+            raise ValueError("record_id requerido para normalizar con IA.")
+        record = self.staging.get_record(record_id)
+        if record is None:
+            raise KeyError(record_id)
+        if not str(record.raw_ocr or "").strip():
+            raise ValueError("Este registro no tiene OCR crudo para normalizar con IA.")
+
+        base_normalized = dict(record.normalized or {})
+        if not base_normalized:
+            base_normalized = self._draft_normalized_from_raw_ocr(record)
+        input_payload = normalizer_input_from_record(self.context, record)
+        client = HfOcrNormalizerClient(model=str(self.models.normalizer or ""))
+        prediction = client.generate_final_latex(input_payload)
+        final_latex = str(prediction.get("final_latex") or "").strip()
+        if not final_latex:
+            raise RuntimeError("El normalizador IA no devolvio formato final.")
+
+        record.models = {**record.models, **self._model_snapshot()}
+        metadata = dict(base_normalized.get("metadata_tecnica") or {})
+        metadata.update(
+            {
+                "normalizer_input_schema": str(input_payload.get("schema_version") or ""),
+                "normalizer_model": str(prediction.get("model") or self.models.normalizer or ""),
+                "normalizer_base_url": str(prediction.get("base_url") or ""),
+                "ai_generated_requires_human_review": True,
+            }
+        )
+        record.normalized = {
+            **base_normalized,
+            "schema_version": "normalized_problem_staging_v1",
+            "normalizer": str(prediction.get("model") or self.models.normalizer or ""),
+            "status": StageStatus.NEEDS_REVIEW,
+            "updated_at": utc_now_text(),
+            "source_record_id": record.record_id,
+            "latex_rendered_item": final_latex,
+            "metadata_tecnica": metadata,
+        }
+        record.errors = [
+            str(item)
+            for item in list(record.errors or [])
+            if not str(item).startswith("normalizacion:") and not str(item).startswith("normalizacion_ia:")
+        ]
+        record.trace = {
+            **dict(record.trace or {}),
+            "last_ai_normalizer": {
+                "updated_at": utc_now_text(),
+                "model": str(prediction.get("model") or self.models.normalizer or ""),
+                "source": "hf_ocr_normalizer",
+                "requires_human_review": True,
+                "input_schema": str(input_payload.get("schema_version") or ""),
+            },
+        }
+        record.set_step(PipelineStep.OCR, StageStatus.READY, "OCR crudo disponible para normalizador IA")
+        record.set_step(
+            PipelineStep.NORMALIZATION,
+            StageStatus.NEEDS_REVIEW,
+            "borrador IA del formato final pendiente de revision humana",
+            source="hf_ocr_normalizer",
+        )
+        record.set_step(PipelineStep.REVIEW, StageStatus.NEEDS_REVIEW, "formato final IA pendiente de revision humana")
+        self._write_raw_artifacts(record)
+        record.sync_status_from_steps()
+        record.touch()
+        self.staging.upsert_record(record)
+        return record
+
     def update_raw_ocr(self, record_id: str, raw_ocr: str) -> StagingProblemRecord:
         record = self.staging.get_record(record_id)
         if record is None:
             raise KeyError(record_id)
+        previous_raw_ocr = str(record.raw_ocr or "")
         record.raw_ocr = str(raw_ocr or "")
         record.structured_ocr = {}
         record.errors = []
@@ -1416,6 +1488,25 @@ class InstancePdfPipelineService:
             },
         }
         self._mark_record_downstream_active(record, reason="raw_ocr_reviewed_after_source_change")
+        try:
+            training = upsert_raw_ocr_correction(
+                self.context,
+                record,
+                corrected_text=record.raw_ocr,
+                previous_text=previous_raw_ocr,
+            )
+            record.artifacts = {
+                **dict(record.artifacts or {}),
+                "ocr_training_bank_record": str(training.get("record_path") or ""),
+                "ocr_training_bank_manifest": str(training.get("manifest_path") or ""),
+                "ocr_training_records_corrected": int(training.get("records_corrected") or 0),
+                "ocr_training_revision_count": int(training.get("revision_count") or 0),
+            }
+        except Exception as exc:
+            record.artifacts = {
+                **dict(record.artifacts or {}),
+                "ocr_training_bank_error": str(exc),
+            }
         self._write_raw_artifacts(record)
         record.sync_status_from_steps()
         record.touch()

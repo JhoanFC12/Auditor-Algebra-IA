@@ -67,6 +67,7 @@ from .library_covers import library_cover_dir, save_cover_bytes
 from .models import InstancePipelineContext
 from .library_api import LibraryApiError, LibraryWebApi
 from .runtime_env import load_factory_runtime_env
+from .training_registry import load_training_cycle_status
 from .web_server import (
     FactoryWebRuntime,
     WebApiError,
@@ -201,6 +202,10 @@ class LibraryWebRuntime:
                 result = self._save_pasted_cover(self._read_json(handler, max_bytes=24_000_000))
                 self._send_json(handler, result)
                 return
+            if method == "GET" and path == "/api/training/status":
+                result = self._dispatch_api(method, path, query, {})
+                self._send_json(handler, result)
+                return
             if path.startswith("/api/library/"):
                 payload = self._read_json(handler) if method == "POST" else {}
                 result = self._dispatch_api(method, path, query, payload)
@@ -243,6 +248,8 @@ class LibraryWebRuntime:
             if method == "GET" and path == "/api/library/bootstrap":
                 db_name = self._first(query, "db_name", self.default_db_name)
                 return self._snapshot(db_name)
+            if method == "GET" and path == "/api/training/status":
+                return load_training_cycle_status()
             if method == "GET" and path == "/api/library/book":
                 db_name = self._required_query(query, "db_name")
                 book_id = self._bounded_int(self._required_query(query, "book_id"), "book_id", minimum=1, maximum=10**9)
@@ -956,6 +963,7 @@ class LibraryWebRuntime:
             "/api/library/cover/paste": {"POST"},
             "/api/library/instance/create": {"POST"},
             "/api/library/instance/factory": {"POST"},
+            "/api/training/status": {"GET"},
         }
         if path.startswith("/api/library/"):
             return LibraryWebApi.allowed_methods(path)

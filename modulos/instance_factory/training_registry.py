@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -13,6 +14,7 @@ from .models import InstancePipelineContext
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATASETS_ROOT = REPO_ROOT / ".cache" / "transcriptor_runs" / "datasets"
 SCHEMA_VERSION = "pdf_factory_training_cycle_status_v1"
+STATE_SCHEMA_VERSION = "pdf_factory_training_cycle_state_v1"
 DEFAULT_TARGET_SAMPLES = 500
 
 
@@ -115,8 +117,60 @@ def _datasets_root(root: Path | None = None) -> Path:
     return DEFAULT_DATASETS_ROOT.expanduser().resolve()
 
 
+def _cycle_state_path(datasets_root: Path) -> Path:
+    configured = str(os.getenv("TRAINING_CYCLE_STATE_PATH") or "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return datasets_root / "training_cycle_state.json"
+
+
 def _target_for(spec: TrainingBankSpec) -> int:
     return _positive_int(os.getenv(spec.target_env), default_target_samples())
+
+
+def load_cycle_state(*, root: Path | None = None) -> dict[str, Any]:
+    datasets_root = _datasets_root(root)
+    path = _cycle_state_path(datasets_root)
+    if not path.exists():
+        return {
+            "schema_version": STATE_SCHEMA_VERSION,
+            "cycle_id": "",
+            "state_path": str(path),
+            "started_at": "",
+            "reason": "",
+            "baselines": {},
+        }
+    payload = _read_json(path)
+    if not payload:
+        return {
+            "schema_version": STATE_SCHEMA_VERSION,
+            "cycle_id": "",
+            "state_path": str(path),
+            "started_at": "",
+            "reason": "",
+            "baselines": {},
+        }
+    payload["state_path"] = str(path)
+    payload.setdefault("schema_version", STATE_SCHEMA_VERSION)
+    payload.setdefault("baselines", {})
+    return payload
+
+
+def save_cycle_state(state: dict[str, Any], *, root: Path | None = None) -> dict[str, Any]:
+    datasets_root = _datasets_root(root)
+    path = _cycle_state_path(datasets_root)
+    payload = {
+        "schema_version": STATE_SCHEMA_VERSION,
+        "cycle_id": str(state.get("cycle_id") or uuid.uuid4().hex[:12]),
+        "state_path": str(path),
+        "started_at": str(state.get("started_at") or now_text()),
+        "reason": str(state.get("reason") or ""),
+        "baselines": dict(state.get("baselines") or {}),
+        "metadata": dict(state.get("metadata") or {}),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return payload
 
 
 def _paths_from_env(raw: str) -> list[Path]:
@@ -133,9 +187,10 @@ def _candidate_roots(
     datasets_root: Path,
     context: InstancePipelineContext | None = None,
 ) -> list[Path]:
-    roots: list[Path] = []
-    roots.extend(_paths_from_env(os.getenv(spec.root_env, "")))
-    roots.extend((datasets_root / name).expanduser().resolve() for name in spec.default_dirs)
+    env_roots = _paths_from_env(os.getenv(spec.root_env, ""))
+    roots: list[Path] = list(env_roots) if env_roots else []
+    if not roots:
+        roots.extend((datasets_root / name).expanduser().resolve() for name in spec.default_dirs)
 
     if spec.key == "problem_detector" and context is not None:
         try:
@@ -281,11 +336,21 @@ def _task_status(
     *,
     datasets_root: Path,
     context: InstancePipelineContext | None = None,
+    cycle_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     target = _target_for(spec)
     roots = _candidate_roots(spec, datasets_root=datasets_root, context=context)
     root_rows = [row for row in (_root_status(root, spec) for root in roots) if row is not None]
-    samples_total = sum(int(row.get("samples_total") or 0) for row in root_rows)
+    historical_samples_total = sum(int(row.get("samples_total") or 0) for row in root_rows)
+    baselines = cycle_state.get("baselines") if isinstance(cycle_state, dict) else {}
+    baseline = 0
+    if isinstance(baselines, dict):
+        task_baseline = baselines.get(spec.key)
+        if isinstance(task_baseline, dict):
+            baseline = max(0, int(task_baseline.get("samples_total") or 0))
+    if baseline > historical_samples_total:
+        baseline = 0
+    samples_total = max(0, historical_samples_total - baseline)
     remaining = max(0, target - samples_total)
     ready = samples_total >= target
     return {
@@ -295,6 +360,8 @@ def _task_status(
         "bank_kind": spec.bank_kind,
         "sample_unit": spec.sample_unit,
         "samples_total": samples_total,
+        "historical_samples_total": historical_samples_total,
+        "cycle_baseline_samples": baseline,
         "target_samples": target,
         "remaining_samples": remaining,
         "ready_to_train": ready,
@@ -309,15 +376,26 @@ def load_training_cycle_status(
     *,
     root: Path | None = None,
     context: InstancePipelineContext | None = None,
+    include_cycle: bool = True,
 ) -> dict[str, Any]:
     datasets_root = _datasets_root(root)
-    tasks = [_task_status(spec, datasets_root=datasets_root, context=context) for spec in TRAINING_BANKS]
+    cycle_state = load_cycle_state(root=datasets_root) if include_cycle else {}
+    tasks = [
+        _task_status(spec, datasets_root=datasets_root, context=context, cycle_state=cycle_state)
+        for spec in TRAINING_BANKS
+    ]
     ready = [row for row in tasks if row.get("ready_to_train")]
     return {
         "schema_version": SCHEMA_VERSION,
         "updated_at": now_text(),
         "datasets_root": str(datasets_root),
         "target_per_model": default_target_samples(),
+        "cycle": {
+            "cycle_id": str(cycle_state.get("cycle_id") or "") if include_cycle else "",
+            "started_at": str(cycle_state.get("started_at") or "") if include_cycle else "",
+            "reason": str(cycle_state.get("reason") or "") if include_cycle else "",
+            "state_path": str(cycle_state.get("state_path") or "") if include_cycle else "",
+        },
         "tasks_total": len(tasks),
         "tasks_ready_to_train": len(ready),
         "samples_total": sum(int(row.get("samples_total") or 0) for row in tasks),
@@ -329,6 +407,45 @@ def load_training_cycle_status(
             "promotion_to_db_is_separate_from_training": True,
         },
     }
+
+
+def start_new_training_cycle(
+    *,
+    root: Path | None = None,
+    context: InstancePipelineContext | None = None,
+    reason: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    datasets_root = _datasets_root(root)
+    previous_status = load_training_cycle_status(root=datasets_root, context=context, include_cycle=False)
+    baselines = {
+        str(task.get("key")): {
+            "label": str(task.get("label") or ""),
+            "samples_total": int(task.get("historical_samples_total") or task.get("samples_total") or 0),
+            "target_samples": int(task.get("target_samples") or default_target_samples()),
+            "sample_unit": str(task.get("sample_unit") or ""),
+        }
+        for task in previous_status.get("tasks") or []
+        if isinstance(task, dict) and str(task.get("key") or "")
+    }
+    state = save_cycle_state(
+        {
+            "cycle_id": uuid.uuid4().hex[:12],
+            "started_at": now_text(),
+            "reason": reason,
+            "baselines": baselines,
+            "metadata": metadata or {},
+        },
+        root=datasets_root,
+    )
+    status = load_training_cycle_status(root=datasets_root, context=context, include_cycle=True)
+    status["cycle_reset"] = {
+        "schema_version": STATE_SCHEMA_VERSION,
+        "state_path": state.get("state_path"),
+        "cycle_id": state.get("cycle_id"),
+        "baselines": baselines,
+    }
+    return status
 
 
 def task_by_key(status: dict[str, Any], key: str) -> dict[str, Any]:

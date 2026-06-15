@@ -27,8 +27,6 @@ def _bootstrap_path() -> Path:
 
 
 def _handoff_to_workspace_python(root: Path) -> bool:
-    if os.getenv("AUDITOR_LIBRARY_VENV_HANDOFF") == "1":
-        return False
     venv_exe = root / ".venv" / "Scripts" / "pythonw.exe"
     if not venv_exe.exists():
         return False

@@ -55,6 +55,50 @@ class ProblemDetectorCorrectionTests(unittest.TestCase):
             self.assertEqual(len(parts), 5)
             manifest = json.loads((root / "problem_detector_corrections" / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["samples_total"], 1)
+            self.assertEqual(manifest["revision_events_total"], 1)
+
+    def test_recorrection_updates_current_target_and_keeps_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            page = root / "page.png"
+            Image.new("RGB", (200, 100), "white").save(page)
+            context = InstancePipelineContext(book_code="GEO01", instance_type="semana_01")
+            dataset_root = root / "problem_detector_corrections"
+
+            first = maybe_write_problem_detector_correction(
+                context=context,
+                page_record_id="page_001",
+                page_number=1,
+                page_image=page,
+                pdf_path="",
+                detector_source="pdf_factory:test",
+                layout_mode="una_columna",
+                previous_boxes=[(10, 20, 100, 80)],
+                human_boxes=[(12, 22, 110, 82)],
+                root=dataset_root,
+            )
+            second = maybe_write_problem_detector_correction(
+                context=context,
+                page_record_id="page_001",
+                page_number=1,
+                page_image=page,
+                pdf_path="",
+                detector_source="pdf_factory:test",
+                layout_mode="una_columna",
+                previous_boxes=[(12, 22, 110, 82)],
+                human_boxes=[(15, 25, 120, 88)],
+                root=dataset_root,
+            )
+
+            self.assertTrue(first["saved"])
+            self.assertTrue(second["saved"])
+            metadata = json.loads(Path(second["metadata_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(metadata["revision_count"], 2)
+            self.assertEqual(metadata["human_boxes"][0]["xyxy"], [15, 25, 120, 88])
+            self.assertEqual(metadata["correction_history"][0]["human_boxes"][0]["xyxy"], [12, 22, 110, 82])
+            manifest = json.loads((dataset_root / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["samples_total"], 1)
+            self.assertEqual(manifest["revision_events_total"], 2)
 
     def test_skips_small_coordinate_nudge(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

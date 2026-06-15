@@ -4,6 +4,7 @@ import argparse
 import base64
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from huggingface_hub import HfApi, get_token
@@ -57,6 +58,21 @@ def main() -> int:
     print(f"[INFO] Dataset: {config['dataset_repo_id']}")
     print(f"[INFO] Modelo: {config['model_repo_id']}")
     print(f"[INFO] Flavor: {config.get('flavor', 't4-small')}")
+    job_record = {
+        "schema_version": "hf_ocr_normalizer_job_submission_v1",
+        "submitted_at": datetime.now().isoformat(timespec="seconds"),
+        "job_id": str(job.id),
+        "dataset_repo_id": config["dataset_repo_id"],
+        "model_repo_id": config["model_repo_id"],
+        "base_model": config.get("base_model", "Qwen/Qwen2.5-0.5B-Instruct"),
+        "flavor": str(config.get("flavor", "t4-small")),
+        "timeout_seconds": int(config.get("timeout_seconds", 7200)),
+        "config_path": str(Path(args.config).expanduser().resolve()),
+    }
+    out_path = REPO_ROOT / "submitted_jobs" / "hf_ocr_normalizer_job_last.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(job_record, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[INFO] Registro local: {out_path}")
     return 0
 
 

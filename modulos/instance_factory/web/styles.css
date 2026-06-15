@@ -479,7 +479,8 @@ img, canvas { max-width: 100%; }
 }
 
 .training-task b,
-.training-task span {
+.training-task span,
+.training-task small {
   display: block;
   min-width: 0;
   overflow: hidden;
@@ -497,6 +498,12 @@ img, canvas { max-width: 100%; }
   color: var(--muted);
   font-size: 12px;
   font-weight: 850;
+}
+
+.training-task small {
+  margin-top: 1px;
+  color: var(--muted);
+  font-size: 10px;
 }
 
 .training-task.ready {

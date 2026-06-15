@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from modulos.instance_factory.training_registry import load_training_cycle_status, task_by_key
+from modulos.instance_factory.training_registry import load_training_cycle_status, start_new_training_cycle, task_by_key
 
 
 class TrainingRegistryTests(unittest.TestCase):
@@ -55,6 +55,45 @@ class TrainingRegistryTests(unittest.TestCase):
             detector = task_by_key(status, "problem_detector")
             self.assertEqual(detector["samples_total"], 719)
             self.assertTrue(detector["ready_to_train"])
+
+    def test_start_new_cycle_resets_visible_counts_but_keeps_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_manifest(root / "normalizer_training_bank", {"samples_total": 300})
+            self._write_manifest(root / "segment_training_live", {"corrected_images": 43})
+            self._write_manifest(root / "ocr_golden_live", {"records_corrected": 148})
+            self._write_manifest(root / "ocr_geometry_golden_live", {"records_corrected": 333})
+            self._write_manifest(root / "pdf_problem_boxes_live" / "piloto", {"pages_total": 715})
+
+            with patch.dict(
+                os.environ,
+                {
+                    "TRAINING_DATASETS_ROOT": str(root),
+                    "TRAINING_SAMPLE_TARGET": "500",
+                    "NORMALIZER_TRAINING_BANK_ROOT": "",
+                    "SEGMENT_LIVE_GOLDEN_BASE": "",
+                    "OCR_TRAINING_BANK_ROOTS": "",
+                    "PDF_PROBLEM_DETECTOR_CORRECTIONS_ROOT": "",
+                },
+            ):
+                status = start_new_training_cycle(reason="normalizer v1 submitted")
+
+            self.assertTrue((root / "training_cycle_state.json").exists())
+            self.assertTrue(status["cycle"]["cycle_id"])
+
+            normalizer = task_by_key(status, "normalizer")
+            self.assertEqual(normalizer["samples_total"], 0)
+            self.assertEqual(normalizer["historical_samples_total"], 300)
+            self.assertEqual(normalizer["cycle_baseline_samples"], 300)
+            self.assertEqual(normalizer["remaining_samples"], 500)
+
+            ocr = task_by_key(status, "ocr_raw")
+            self.assertEqual(ocr["samples_total"], 0)
+            self.assertEqual(ocr["historical_samples_total"], 481)
+
+            detector = task_by_key(status, "problem_detector")
+            self.assertEqual(detector["samples_total"], 0)
+            self.assertEqual(detector["historical_samples_total"], 715)
 
     @staticmethod
     def _write_manifest(root: Path, payload: dict[str, object]) -> None:

@@ -1,0 +1,11 @@
+{
+  "schema_version": "hf_ocr_normalizer_job_submission_v1",
+  "submitted_at": "2026-06-15T00:12:36",
+  "job_id": "6a2f89c4871c005b5352d191",
+  "dataset_repo_id": "Jhoan12/math-ocr-normalization-golden-v1",
+  "model_repo_id": "Jhoan12/math-ocr-normalizer-qwen2.5-0.5b-lora-v1",
+  "base_model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "flavor": "t4-small",
+  "timeout_seconds": 7200,
+  "config_path": "E:\\Github\\Auditor-IA\\config\\hf_ocr_normalizer_job.json"
+}

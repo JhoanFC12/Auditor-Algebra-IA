@@ -78,20 +78,22 @@ def maybe_write_problem_detector_correction(
     label_target.write_text(("\n".join(yolo_lines) + "\n") if yolo_lines else "", encoding="utf-8")
 
     metadata_target = metadata_dir / f"{correction_id}.json"
-    existing_created_at = ""
+    existing: dict[str, Any] = {}
     if metadata_target.exists():
         try:
             existing = json.loads(metadata_target.read_text(encoding="utf-8"))
-            if isinstance(existing, dict):
-                existing_created_at = str(existing.get("created_at") or "")
+            existing = existing if isinstance(existing, dict) else {}
         except Exception:
-            existing_created_at = ""
+            existing = {}
     now = utc_now_text()
+    history = _history_from_existing(existing)
+    revision_count = max(0, int(existing.get("revision_count") or 0)) + 1 if existing else 1
     metadata = {
         "schema_version": SCHEMA_VERSION,
         "correction_id": correction_id,
-        "created_at": existing_created_at or now,
+        "created_at": str(existing.get("created_at") or now),
         "updated_at": now,
+        "revision_count": revision_count,
         "book_code": context.book_code,
         "instance_type": context.instance_type,
         "project_name": context.project_name,
@@ -115,6 +117,7 @@ def maybe_write_problem_detector_correction(
         "model_boxes": _box_rows(previous),
         "human_boxes": _box_rows(human, include_order=True),
         "change_summary": change_summary,
+        "correction_history": history,
         "training_target": "pdf_problem_detector_yolov8_problem_boxes",
         "excluded_future_scope": ["problem_vs_solution_classification"],
     }
@@ -196,6 +199,7 @@ def rewrite_manifest(root: Path) -> dict[str, Any]:
         "metadata_dir": str(metadata_dir),
         "class_map": {str(CLASS_ID_PROBLEM): CLASS_NAME_PROBLEM},
         "counts_by_change": by_change,
+        "revision_events_total": sum(max(1, int(row.get("revision_count") or 1)) for row in rows),
         "policy": {
             "save_only_human_modified_model_boxes": True,
             "problem_vs_solution_classification": "excluded_for_now",
@@ -318,6 +322,20 @@ def _max_coord_delta(left: tuple[int, int, int, int], right: tuple[int, int, int
 
 def _should_save(change_summary: dict[str, Any]) -> bool:
     return any(int(change_summary.get(key) or 0) > 0 for key in ("added", "removed", "moved_or_resized", "reordered"))
+
+
+def _history_from_existing(existing: dict[str, Any]) -> list[dict[str, Any]]:
+    if not existing:
+        return []
+    history = existing.get("correction_history") if isinstance(existing.get("correction_history"), list) else []
+    event = {
+        "updated_at": str(existing.get("updated_at") or ""),
+        "layout_mode": str(existing.get("layout_mode") or ""),
+        "model_boxes": existing.get("model_boxes") if isinstance(existing.get("model_boxes"), list) else [],
+        "human_boxes": existing.get("human_boxes") if isinstance(existing.get("human_boxes"), list) else [],
+        "change_summary": existing.get("change_summary") if isinstance(existing.get("change_summary"), dict) else {},
+    }
+    return [*history, event][-50:]
 
 
 def _model_name_from_detector_source(detector_source: str) -> str:

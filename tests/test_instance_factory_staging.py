@@ -301,8 +301,54 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             manifest = json.loads((bank / "manifest.json").read_text(encoding="utf-8"))
             rows = [json.loads(line) for line in (bank / "samples.jsonl").read_text(encoding="utf-8").splitlines()]
             self.assertEqual(manifest["samples_total"], 1)
+            self.assertEqual(manifest["revision_events_total"], 1)
             self.assertEqual(rows[0]["final_latex"], updated.normalized["latex_rendered_item"])
+            self.assertEqual(rows[0]["revision_count"], 1)
             self.assertTrue(Path(rows[0]["images"][0]["bank_path"]).exists())
+            self.assertEqual(updated.artifacts["normalizer_training_samples_total"], 1)
+
+    def test_ready_review_recorrection_keeps_normalizer_training_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bank = root / "normalizer_bank"
+            context = InstancePipelineContext(book_code="GEO", instance_type="s02")
+            store = InstanceStagingStore(context, root=root / "staging")
+            crop = root / "crop.png"
+            crop.write_bytes(b"png")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_002",
+                    crop_id="crop_002",
+                    crop_path=str(crop),
+                    raw_ocr="12. Halle x. A) 1 B) 2 C) 3 D) 4 E) 5",
+                )
+            )
+
+            with patch.dict(os.environ, {"NORMALIZER_TRAINING_BANK_ROOT": str(bank)}):
+                store.update_review(
+                    "crop_002",
+                    {
+                        "numero": "12",
+                        "latex_rendered_item": r"\item[\textbf{12.}] Halle $x$. £A)$1$æB)$2$æC)$3$£D)$4$ææE)$5$£",
+                    },
+                    mark_ready=True,
+                )
+                updated = store.update_review(
+                    "crop_002",
+                    {
+                        "numero": "12",
+                        "latex_rendered_item": r"\item[\textbf{12.}] Halle $x+y$. £A)$1$æB)$2$æC)$3$£D)$4$ææE)$5$£",
+                    },
+                    mark_ready=True,
+                )
+
+            manifest = json.loads((bank / "manifest.json").read_text(encoding="utf-8"))
+            rows = [json.loads(line) for line in (bank / "samples.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(manifest["samples_total"], 1)
+            self.assertEqual(manifest["revision_events_total"], 2)
+            self.assertEqual(rows[0]["revision_count"], 2)
+            self.assertIn("Halle $x+y$", rows[0]["final_latex"])
+            self.assertIn("Halle $x$.", rows[0]["correction_history"][0]["final_latex"])
             self.assertEqual(updated.artifacts["normalizer_training_samples_total"], 1)
 
     def test_normalize_existing_ocr_requires_raw_ocr_when_targeting_single_record(self) -> None:
@@ -366,10 +412,12 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             )
             service = InstancePdfPipelineService(context, staging_store=store)
 
-            updated = service.update_raw_ocr(
-                "crop_001",
-                "<01.> Determinar x. A) $10^\\circ$ B) $20^\\circ$ C) $30^\\circ$ D) $40^\\circ$ E) $50^\\circ$",
-            )
+            ocr_bank = Path(tmp) / "ocr_golden_live"
+            with patch.dict(os.environ, {"OCR_TRAINING_BANK_ROOTS": str(ocr_bank)}):
+                updated = service.update_raw_ocr(
+                    "crop_001",
+                    "<01.> Determinar x. A) $10^\\circ$ B) $20^\\circ$ C) $30^\\circ$ D) $40^\\circ$ E) $50^\\circ$",
+                )
 
             self.assertEqual(updated.raw_ocr[:5], "<01.>")
             self.assertEqual(updated.structured_ocr, {})
@@ -379,6 +427,52 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             loaded = store.get_record("crop_001")
             self.assertEqual(loaded.structured_ocr, {})
             self.assertEqual(loaded.normalized, {})
+            manifest = json.loads((ocr_bank / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["records_corrected"], 1)
+            self.assertEqual(manifest["revision_events_total"], 1)
+            rows = list((ocr_bank / "records").glob("*.json"))
+            self.assertEqual(len(rows), 1)
+            training_record = json.loads(rows[0].read_text(encoding="utf-8"))
+            self.assertEqual(training_record["corrected_text"], updated.raw_ocr)
+            self.assertEqual(training_record["revision_count"], 1)
+            self.assertTrue((ocr_bank / training_record["copied_image_rel"]).exists())
+
+    def test_update_raw_ocr_accumulates_recorrections_without_duplicate_samples(self) -> None:
+        try:
+            from modulos.instance_factory.pipeline import InstancePdfPipelineService
+        except Exception as exc:  # pragma: no cover - optional detector/OCR dependencies.
+            self.skipTest(f"pipeline deps unavailable: {exc}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            crop = Path(tmp) / "crop_001.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="GEO", instance_type="s03")
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(crop),
+                    raw_ocr="modelo inicial",
+                )
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+            ocr_bank = Path(tmp) / "ocr_golden_live"
+
+            with patch.dict(os.environ, {"OCR_TRAINING_BANK_ROOTS": str(ocr_bank)}):
+                service.update_raw_ocr("crop_001", "texto corregido v1")
+                updated = service.update_raw_ocr("crop_001", "texto corregido v2")
+
+            manifest = json.loads((ocr_bank / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["records_corrected"], 1)
+            self.assertEqual(manifest["revision_events_total"], 2)
+            rows = list((ocr_bank / "records").glob("*.json"))
+            self.assertEqual(len(rows), 1)
+            training_record = json.loads(rows[0].read_text(encoding="utf-8"))
+            self.assertEqual(training_record["corrected_text"], "texto corregido v2")
+            self.assertEqual(training_record["revision_count"], 2)
+            self.assertEqual(training_record["correction_history"][0]["corrected_text"], "texto corregido v1")
+            self.assertEqual(updated.artifacts["ocr_training_revision_count"], 2)
 
     def test_normalize_existing_ocr_prepares_review_from_raw_ocr_only(self) -> None:
         try:
@@ -413,6 +507,52 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertEqual(loaded.step_status(PipelineStep.NORMALIZATION), StageStatus.NEEDS_REVIEW)
             self.assertEqual(loaded.normalized["normalizer"], "manual_raw_ocr_review")
             self.assertEqual(loaded.normalized["enunciado_latex"], "<01.> Determinar x. A) $10^\\circ$ B) $20^\\circ$")
+
+    def test_normalize_with_ai_stores_review_draft_without_marking_ready(self) -> None:
+        class FakeNormalizerClient:
+            calls: list[dict] = []
+
+            def __init__(self, *, model: str):
+                self.model = model
+
+            def generate_final_latex(self, input_payload: dict) -> dict:
+                self.calls.append(input_payload)
+                return {
+                    "model": self.model,
+                    "base_url": "fake://normalizer",
+                    "final_latex": "\\item[\\textbf{1.}] [[curso=GEO]] [[tema=ANGULOS]] [[Estado=sin_revisar]] [[Clave=A]] Determinar x. \u00a3A)$10$\u00e6B)$20$\u00e6C)$30$\u00a3D)$40$\u00e6\u00e6E)$50$\u00a3",
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            crop = Path(tmp) / "crop_001.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="GEO", instance_type="s03")
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(crop),
+                    raw_ocr="<01.> Determinar x. A) $10$ B) $20$ C) $30$ D) $40$ E) $50$",
+                    source={"problem_number": 1, "page_number": 3},
+                    figure_segmentation={"status": StageStatus.READY, "segments_total": 0},
+                )
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+            service.models.normalizer = "Jhoan12/fake-normalizer"
+
+            with patch("modulos.instance_factory.pipeline.HfOcrNormalizerClient", FakeNormalizerClient):
+                updated = service.normalize_with_ai("crop_001")
+
+            self.assertEqual(updated.status, StageStatus.NEEDS_REVIEW)
+            self.assertEqual(updated.step_status(PipelineStep.NORMALIZATION), StageStatus.NEEDS_REVIEW)
+            self.assertEqual(updated.step_status(PipelineStep.REVIEW), StageStatus.NEEDS_REVIEW)
+            self.assertEqual(updated.normalized["normalizer"], "Jhoan12/fake-normalizer")
+            self.assertIn("\\item[\\textbf{1.}]", updated.normalized["latex_rendered_item"])
+            self.assertTrue(updated.normalized["metadata_tecnica"]["ai_generated_requires_human_review"])
+            self.assertEqual(FakeNormalizerClient.calls[0]["schema_version"], "normalizer_training_input_v1")
+            self.assertEqual(FakeNormalizerClient.calls[0]["raw_ocr"], "<01.> Determinar x. A) $10$ B) $20$ C) $30$ D) $40$ E) $50$")
+            self.assertEqual(store.get_record("crop_001").status, StageStatus.NEEDS_REVIEW)
 
     def test_trained_ocr_rejects_hf_router_as_dedicated_endpoint(self) -> None:
         try:

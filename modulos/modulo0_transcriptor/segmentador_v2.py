@@ -520,6 +520,7 @@ print(json.dumps(out, ensure_ascii=False))
             "target_corrected_images": target_corrected,
             "remaining_corrected_images": max(0, target_corrected - len(corrected_rows)),
             "boxes_total": sum(int(row.get("boxes_total", 0) or 0) for row in rows),
+            "revision_events_total": sum(max(1, int(row.get("revision_count") or 1)) for row in rows),
             "files": {
                 "source_records_all": "source_records_all.jsonl",
                 "source_records_positive": "source_records_positive.jsonl",
@@ -581,10 +582,23 @@ print(json.dumps(out, ensure_ascii=False))
             )
 
         normalized_detector = self._normalize_detector_payload(detector_payload) or {}
+        records_dir = live_dir / "records"
+        record_path = records_dir / f"{record_id}.json"
+        existing: dict = {}
+        if record_path.exists():
+            try:
+                loaded = json.loads(record_path.read_text(encoding="utf-8"))
+                existing = loaded if isinstance(loaded, dict) else {}
+            except Exception:
+                existing = {}
+        history = self._live_record_history(existing)
+        now = datetime.now().isoformat(timespec="seconds")
         record = {
             "schema_version": "segment_training_live_source_v1",
             "record_id": record_id,
-            "updated_at": datetime.now().isoformat(timespec="seconds"),
+            "created_at": str(existing.get("created_at") or now),
+            "updated_at": now,
+            "revision_count": (max(0, int(existing.get("revision_count") or 0)) + 1 if existing else 1),
             "source_path": str(source),
             "source_stem": source.stem,
             "source_image_rel": str(copied_source.relative_to(live_dir)).replace("\\", "/") if copied_source.exists() else "",
@@ -593,10 +607,10 @@ print(json.dumps(out, ensure_ascii=False))
             "boxes_px": [list(row["bbox_px"]) for row in segment_rows],
             "segments": segment_rows,
             "detector_review": normalized_detector,
+            "correction_history": history,
         }
-        records_dir = live_dir / "records"
         records_dir.mkdir(parents=True, exist_ok=True)
-        (records_dir / f"{record_id}.json").write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+        record_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
         if (os.getenv("SEGMENT_LIVE_GOLDEN_DEFER_INDEX", "") or "").strip().lower() not in {"1", "true", "yes", "si"}:
             self._rewrite_live_golden_indexes(live_dir)
 
@@ -622,6 +636,18 @@ print(json.dumps(out, ensure_ascii=False))
     def _sort_segments_for_live(self, segments: List[SegmentoProblemaV2]) -> List[SegmentoProblemaV2]:
         clean = [seg for seg in list(segments or []) if isinstance(seg, SegmentoProblemaV2)]
         return sorted(clean, key=lambda seg: self._box_reading_key(seg.bbox))
+
+    def _live_record_history(self, existing: dict) -> List[dict]:
+        if not existing:
+            return []
+        history = existing.get("correction_history") if isinstance(existing.get("correction_history"), list) else []
+        event = {
+            "updated_at": str(existing.get("updated_at") or ""),
+            "boxes_total": int(existing.get("boxes_total") or 0),
+            "boxes_px": existing.get("boxes_px") if isinstance(existing.get("boxes_px"), list) else [],
+            "detector_review": existing.get("detector_review") if isinstance(existing.get("detector_review"), dict) else {},
+        }
+        return [*history, event][-50:]
 
     def _resolve_problem_model_path(self) -> str:
         candidates = (

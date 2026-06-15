@@ -861,6 +861,33 @@ class LibraryWebApiTests(unittest.TestCase):
         finally:
             runtime.stop()
 
+    def test_library_runtime_exposes_training_cycle_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "normalizer_training_bank").mkdir(parents=True)
+            (root / "normalizer_training_bank" / "manifest.json").write_text(
+                json.dumps({"schema_version": "test_manifest_v1", "samples_total": 300}),
+                encoding="utf-8",
+            )
+            (root / "segment_training_live").mkdir(parents=True)
+            (root / "segment_training_live" / "manifest.json").write_text(
+                json.dumps({"schema_version": "test_manifest_v1", "corrected_images": 27}),
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"TRAINING_DATASETS_ROOT": str(root), "TRAINING_SAMPLE_TARGET": "500"}):
+                runtime = LibraryWebRuntime(controller=_FakeController())
+                try:
+                    base = runtime.start()
+                    payload = _get_json(base, "api/training/status")
+                finally:
+                    runtime.stop()
+
+        self.assertEqual(payload["schema_version"], "pdf_factory_training_cycle_status_v1")
+        tasks = {row["key"]: row for row in payload["tasks"]}
+        self.assertEqual(set(tasks), {"problem_detector", "ocr_raw", "figure_segmenter", "normalizer"})
+        self.assertEqual(tasks["normalizer"]["samples_total"], 300)
+        self.assertEqual(tasks["figure_segmenter"]["samples_total"], 27)
+
     def test_library_runtime_retires_global_ocr_cart_route(self) -> None:
         runtime = LibraryWebRuntime(controller=_FakeController())
         try:

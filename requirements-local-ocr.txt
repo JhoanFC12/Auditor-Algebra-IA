@@ -7,5 +7,6 @@
 
 accelerate>=1.2
 peft>=0.14
+safetensors>=0.4
 sentencepiece>=0.2
 transformers>=4.49,<5

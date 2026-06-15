@@ -103,6 +103,12 @@ const NORMALIZER_TRAINING_CACHE_MS = 20000;
 const PDF_PAGE_PREFETCH_RADIUS = 2;
 const PDF_IMAGE_CACHE_LIMIT = 28;
 const BOX_PAGE_PREFETCH_RADIUS = 2;
+const TRAINING_TASK_FALLBACKS = [
+  { key: "problem_detector", label: "Segmentacion de problemas", sample_unit: "pagina corregida" },
+  { key: "ocr_raw", label: "OCR crudo", sample_unit: "crop corregido" },
+  { key: "figure_segmenter", label: "Segmentacion de graficos", sample_unit: "imagen corregida" },
+  { key: "normalizer", label: "Normalizador final", sample_unit: "problema normalizado" },
+];
 
 const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
 let librarySearchTimer = null;
@@ -541,31 +547,46 @@ async function refreshNormalizerTrainingStatus({ silent = true, force = false, r
   const fresh = state.trainingCycle
     && !state.trainingCycle.error
     && Date.now() - Number(state.trainingCycleFetchedAt || 0) <= NORMALIZER_TRAINING_CACHE_MS;
-  if (!force && fresh) {
+  const freshNormalizer = state.normalizerTraining
+    && !state.normalizerTraining.error
+    && Date.now() - Number(state.normalizerTrainingFetchedAt || 0) <= NORMALIZER_TRAINING_CACHE_MS;
+  if (!force && (fresh || freshNormalizer)) {
     if (renderNotice) renderTrainingNotice();
-    return state.trainingCycle;
+    return state.trainingCycle || state.normalizerTraining;
   }
   try {
-    state.trainingCycle = await api("/api/training/status");
-    state.trainingCycleFetchedAt = Date.now();
-    const normalizer = (state.trainingCycle.tasks || []).find((task) => task.key === "normalizer") || {};
-    state.normalizerTraining = {
-      ...normalizer,
-      schema_version: "normalizer_training_bank_status_v1",
-      threshold: Number(normalizer.target_samples || 500),
-      samples_total: Number(normalizer.samples_total || 0),
-      ready_to_train: Boolean(normalizer.ready_to_train),
-      samples_jsonl: (normalizer.roots || [])[0]?.root || state.trainingCycle.datasets_root || "",
-      notification: normalizer.ready_to_train
-        ? `Ya hay ${Number(normalizer.samples_total || 0)} muestras listas para entrenar una primera version del normalizador.`
-        : "",
-    };
+    try {
+      state.trainingCycle = await api("/api/training/status");
+      state.trainingCycleFetchedAt = Date.now();
+      const normalizer = (state.trainingCycle.tasks || []).find((task) => task.key === "normalizer") || {};
+      state.normalizerTraining = {
+        ...normalizer,
+        schema_version: "normalizer_training_bank_status_v1",
+        threshold: Number(normalizer.target_samples || 500),
+        samples_total: Number(normalizer.samples_total || 0),
+        ready_to_train: Boolean(normalizer.ready_to_train),
+        samples_jsonl: (normalizer.roots || [])[0]?.root || state.trainingCycle.datasets_root || "",
+        notification: normalizer.ready_to_train
+          ? `Ya hay ${Number(normalizer.samples_total || 0)} muestras listas para entrenar una primera version del normalizador.`
+          : "",
+      };
+    } catch (cycleErr) {
+      const bank = await api("/api/training/normalizer/status");
+      state.trainingCycle = trainingCycleFromNormalizerBank(bank);
+      state.trainingCycleFetchedAt = Date.now();
+      state.normalizerTraining = {
+        ...bank,
+        threshold: Number(bank.threshold || 500),
+        samples_total: Number(bank.samples_total || 0),
+        ready_to_train: Boolean(bank.ready_to_train),
+      };
+    }
     state.normalizerTrainingFetchedAt = Date.now();
     if (renderNotice) renderTrainingNotice();
     if (!silent && state.normalizerTraining?.ready_to_train) {
       setStatus(state.normalizerTraining.notification || "Dataset normalizador listo para entrenar.");
     }
-    return state.trainingCycle;
+    return state.trainingCycle || state.normalizerTraining;
   } catch (err) {
     state.trainingCycle = {
       schema_version: "pdf_factory_training_cycle_status_v1",
@@ -587,6 +608,53 @@ async function refreshNormalizerTrainingStatus({ silent = true, force = false, r
   }
 }
 
+function trainingCycleFromNormalizerBank(bank = {}) {
+  const target = Number(bank.threshold || bank.target_samples || 500);
+  const normalizerTotal = Number(bank.samples_total || 0);
+  const normalizerHistorical = Number(bank.historical_samples_total || normalizerTotal);
+  const datasetsRoot = String(bank.datasets_root || bank.root || bank.samples_jsonl || "").trim();
+  const tasks = TRAINING_TASK_FALLBACKS.map((spec) => {
+    const isNormalizer = spec.key === "normalizer";
+    const total = isNormalizer ? normalizerTotal : 0;
+    const historical = isNormalizer ? normalizerHistorical : 0;
+    return {
+      ...spec,
+      model_stage: spec.key,
+      bank_kind: isNormalizer ? "normalizer_training_bank" : "training_bank_pending_status",
+      samples_total: total,
+      historical_samples_total: historical,
+      cycle_baseline_samples: Number(isNormalizer ? bank.cycle_baseline_samples || 0 : 0),
+      target_samples: target,
+      remaining_samples: Math.max(0, target - total),
+      ready_to_train: total >= target,
+      roots: isNormalizer
+        ? [{ root: String(bank.samples_jsonl || bank.root || ""), samples_total: total, exists: true }]
+        : [],
+      count_policy: isNormalizer
+        ? "Cuenta problemas principales con formato final humano; las continuaciones viven dentro del padre."
+        : "Reinicia/actualiza el servidor para leer este contador desde /api/training/status.",
+      legacy_fallback: !isNormalizer,
+    };
+  });
+  return {
+    schema_version: "pdf_factory_training_cycle_status_v1",
+    updated_at: new Date().toISOString(),
+    datasets_root: datasetsRoot,
+    target_per_model: target,
+    cycle: bank.training_cycle ? {
+      cycle_id: "",
+      started_at: "",
+      reason: "",
+      state_path: "",
+    } : {},
+    tasks_total: tasks.length,
+    tasks_ready_to_train: tasks.filter((task) => task.ready_to_train).length,
+    samples_total: tasks.reduce((acc, task) => acc + Number(task.samples_total || 0), 0),
+    tasks,
+    legacy_fallback: true,
+  };
+}
+
 function renderTrainingNotice() {
   const host = $("trainingNotice");
   if (!host) return;
@@ -594,27 +662,39 @@ function renderTrainingNotice() {
   if (cycle && !cycle.error && Array.isArray(cycle.tasks) && cycle.tasks.length) {
     const tasks = cycle.tasks;
     const readyCount = tasks.filter((task) => Boolean(task.ready_to_train)).length;
+    const activeCycle = cycle.cycle || {};
+    const cycleLabel = activeCycle.cycle_id
+      ? `Ciclo ${activeCycle.cycle_id}: cuenta solo correcciones nuevas desde ${activeCycle.started_at || "el ultimo reset"}.`
+      : `Sin ciclo reiniciado: cuenta todo el historico disponible.`;
     host.innerHTML = `
       <div class="training-notice training-cycle ${readyCount ? "ready" : ""}">
         <div class="training-cycle-main">
           <strong>Banco de entrenamiento</strong>
           <span>${readyCount}/${tasks.length} modelo(s) listos para reentrenar. Meta general: ${Number(cycle.target_per_model || 500)} muestras.</span>
+          <small>${escapeHtml(cycleLabel)}</small>
         </div>
         <div class="training-cycle-grid">
           ${tasks.map((task) => {
             const total = Number(task.samples_total || 0);
             const target = Number(task.target_samples || cycle.target_per_model || 500);
             const ready = Boolean(task.ready_to_train || total >= target);
+            const historical = Number(task.historical_samples_total || total);
+            const label = task.legacy_fallback ? `${total}/${target}` : `${total}/${target}`;
             return `
               <div class="training-task ${ready ? "ready" : ""}" title="${escapeAttr(task.count_policy || "")}">
                 <b>${escapeHtml(task.label || task.key)}</b>
-                <span>${total}/${target}</span>
+                <span>${escapeHtml(label)}</span>
+                ${historical !== total ? `<small>hist. ${historical}</small>` : ""}
+                ${task.legacy_fallback ? `<small>pendiente</small>` : ""}
               </div>
             `;
           }).join("")}
         </div>
+        <button id="resetTrainingCycleBtn" class="ghost compact-action" type="button">Nuevo ciclo</button>
       </div>
     `;
+    const resetBtn = $("resetTrainingCycleBtn");
+    if (resetBtn) resetBtn.onclick = () => resetTrainingCycle();
     return;
   }
   const bank = state.normalizerTraining;
@@ -656,6 +736,25 @@ async function loadFactorySnapshot() {
     }
   }
   return api("/api/bootstrap");
+}
+
+async function resetTrainingCycle() {
+  const ok = window.confirm("Iniciar un nuevo ciclo deja los contadores en 0 sin borrar el historico. ¿Continuar?");
+  if (!ok) return;
+  setBusy("Iniciando nuevo ciclo de entrenamiento...");
+  try {
+    state.trainingCycle = await api("/api/training/cycle/reset", {
+      method: "POST",
+      body: {
+        reason: "Nuevo ciclo iniciado desde la interfaz despues de entrenar/actualizar modelos.",
+      },
+    });
+    state.trainingCycleFetchedAt = Date.now();
+    renderTrainingNotice();
+    setStatus("Nuevo ciclo iniciado. Los contadores ahora cuentan solo nuevas correcciones.");
+  } catch (err) {
+    setStatus(`Error iniciando ciclo: ${err.message}`);
+  }
 }
 
 async function refreshFactorySummary() {
@@ -4910,7 +5009,7 @@ function batchModeConfig(mode = state.batchMode) {
     return {
       mode: "normalizer_input",
       title: "Entrada para normalizador",
-      description: "Copia el JSON construido desde OCR crudo, crop y segmentos graficos. La respuesta del modelo se pega despues en Formato final en bloque.",
+      description: "Copia el JSON compacto usado por el normalizador IA. La respuesta del modelo se pega despues en Formato final en bloque.",
       action: "Solo copiar",
       empty: "No hay registros de staging para preparar entrada de normalizador.",
       placeholder: "----imagen.png-----\n{\n  \"schema_version\": \"normalizer_input_staging_v1\",\n  \"raw_ocr\": \"<01.> ...\",\n  \"figure_segmentation\": {}\n}",
@@ -5037,7 +5136,7 @@ function buildBatchText(mode) {
 }
 
 function normalizerInputJsonFromRecord(record, index = 0) {
-  return JSON.stringify(normalizerInputFromRecord(record, index), null, 2);
+  return JSON.stringify(normalizerTrainingInputFromRecord(record, index), null, 2);
 }
 
 function normalizerInputFromRecord(record, index = 0) {
@@ -5111,6 +5210,41 @@ function normalizerFigureSegmentationFromRecord(record, normalized = {}) {
       max_conf: rawFigure.detector.max_conf ?? null,
       final_boxes: Array.isArray(rawFigure.detector.final_boxes) ? rawFigure.detector.final_boxes : [],
     } : {},
+  };
+}
+
+function normalizerTrainingInputFromRecord(record, index = 0) {
+  const source = record?.source && typeof record.source === "object" ? record.source : {};
+  const normalized = record?.normalized && typeof record.normalized === "object" ? record.normalized : {};
+  const figure = normalizerFigureSegmentationFromRecord(record, normalized);
+  const cropName = String(record?.crop_path || "").split(/[\\/]/).filter(Boolean).pop() || batchRecordTitle(record, index);
+  return {
+    schema_version: "normalizer_training_input_v1",
+    record_id: String(record?.record_id || ""),
+    raw_ocr: String(record?.raw_ocr || ""),
+    source: {
+      book_code: String(source.book_code || state.snapshot?.context?.book_code || ""),
+      instance_type: String(source.instance_type || state.snapshot?.context?.instance_type || ""),
+      page_number: source.page_number ?? source.source_page_number ?? null,
+      problem_number: source.problem_number ?? source.n ?? normalized.numero ?? "",
+      box_index: source.box_index ?? source.page_problem_index ?? source.problem_index ?? null,
+      crop_name: cropName,
+    },
+    figure_segmentation: {
+      status: String(record?.figure_segmentation?.status || ""),
+      has_figure: Boolean(figure.has_figure),
+      segments_total: Number(figure.segments_total || 0),
+      detector_source: String(figure.detector?.detector_source || ""),
+      review_status: String(figure.detector?.review_status || ""),
+    },
+    human_hints: {
+      curso: String(normalized.curso || ""),
+      tema: String(normalized.tema || ""),
+      has_figure: Boolean(figure.has_figure),
+      figure_tag: String(normalized.figure_tag || ""),
+    },
+    continuations: [],
+    images: [{ role: "main", crop_id: String(record?.crop_id || record?.record_id || ""), file_name: cropName }],
   };
 }
 
@@ -5277,7 +5411,9 @@ function mergeRecordsIntoSnapshot(updates = []) {
 }
 
 function applyRecordSavedPayload(payload) {
-  if (!payload || payload.schema_version !== "pdf_factory_web_record_saved_v1") return null;
+  const validSchema = payload?.schema_version === "pdf_factory_web_record_saved_v1"
+    || payload?.schema_version === "pdf_factory_web_ai_normalized_v1";
+  if (!payload || !validSchema) return null;
   const updated = payload.record || null;
   if (updated) replaceRecordInSnapshot(updated);
   if (state.snapshot) {
@@ -5911,6 +6047,7 @@ function renderReviewStage() {
       </div>
       <div class="stage-actions">
         <button id="openNormalizerInputBatch" type="button">Entrada normalizador</button>
+        <button id="normalizeWithAiBtn" class="secondary" type="button" ${record?.raw_ocr ? "" : "disabled"}>Normalizar con IA</button>
         <button id="openFinalLatexBatch" type="button">Formato final en bloque</button>
       </div>
     </div>
@@ -5967,6 +6104,8 @@ function renderReviewStage() {
   if (record) {
     const normalizerInputBtn = $("openNormalizerInputBatch");
     if (normalizerInputBtn) normalizerInputBtn.onclick = () => openBatchMode("normalizer_input");
+    const normalizeWithAiBtn = $("normalizeWithAiBtn");
+    if (normalizeWithAiBtn) normalizeWithAiBtn.onclick = () => normalizeSelectedRecordWithAi(record);
     const finalLatexBatchBtn = $("openFinalLatexBatch");
     if (finalLatexBatchBtn) finalLatexBatchBtn.onclick = () => openBatchMode("final_latex");
     bindRecordNavigation(records);
@@ -6180,6 +6319,41 @@ function normalizeLatexPreviewValueSafe(value) {
   return decodeLatexTextAccents(value)
     .replace(degreePattern, "$1^\\circ")
     .replace(/(\d+(?:[.,]\d+)?)\s*\\degree\b/gi, "$1^\\circ");
+}
+
+async function normalizeSelectedRecordWithAi(record = selectedRecord()) {
+  if (!record?.record_id) return setStatus("Selecciona un problema para normalizar con IA.");
+  if (!String(record.raw_ocr || "").trim()) return setStatus("Este problema no tiene OCR crudo para normalizar.");
+  const btn = $("normalizeWithAiBtn");
+  if (btn) btn.disabled = true;
+  setBusy("Normalizando con IA...");
+  try {
+    const payload = await api("/api/normalize/ai", {
+      method: "POST",
+      body: {
+        record_id: record.record_id,
+        include_summary: false,
+      },
+    });
+    const updated = applyRecordSavedPayload(payload) || payload.record || null;
+    const finalLatex = String(payload.final_latex || updated?.normalized?.latex_rendered_item || "").trim();
+    const editor = $("finalLatexText");
+    if (editor && finalLatex) {
+      editor.value = finalLatex;
+      updateFinalLatexReviewStatus();
+      updateFinalLatexPreview();
+      editor.focus();
+    }
+    state.reviewDraft = null;
+    persistFactoryUiState();
+    renderTimeline();
+    setStatus("Borrador IA listo. Revisalo y guardalo para convertirlo en dato de entrenamiento.");
+  } catch (err) {
+    setStatus(`Error normalizando con IA: ${err.message}`);
+  } finally {
+    if (btn) btn.disabled = !String(record.raw_ocr || "").trim();
+    $("busyText").textContent = "";
+  }
 }
 
 async function saveReviewForm(event) {
