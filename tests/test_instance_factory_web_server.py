@@ -853,6 +853,207 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
             finally:
                 runtime.stop()
 
+    def test_web_runtime_runs_normalizer_ai_queue_as_reconnectable_background_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            crop = root / "crop.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(crop),
+                    raw_ocr="<01.> Halle x.",
+                    status=StageStatus.NEEDS_REVIEW,
+                )
+            )
+            service = _FakeService(context, store)
+            runtime = FactoryWebRuntime(context, service=service)
+            try:
+                base = runtime.start()
+                started = _post_json(base, "api/normalize/ai/jobs/start", {"record_ids": ["crop_001"]})
+                self.assertEqual(started["schema_version"], "pdf_factory_normalizer_job_v1")
+                self.assertTrue(started["running"])
+                job_id = started["job_id"]
+
+                status = {}
+                for _ in range(40):
+                    status = _get_json(base, f"api/normalize/ai/jobs/status?job_id={job_id}")
+                    if not status["running"]:
+                        break
+                    time.sleep(0.05)
+
+                self.assertEqual(status["status"], "done")
+                self.assertEqual(status["ok"], 1)
+                self.assertEqual(status["failed"], 0)
+                self.assertEqual(status["current"], 1)
+                self.assertEqual(status["record_update_seq"], 1)
+                self.assertEqual(len(status["record_updates"]), 1)
+                self.assertEqual(status["record_updates"][0]["record_id"], "crop_001")
+                self.assertEqual(
+                    status["record_updates"][0]["record"]["normalized"]["normalizer"],
+                    "fake-ai-normalizer",
+                )
+                synced_status = _get_json(base, f"api/normalize/ai/jobs/status?job_id={job_id}&since_update=1")
+                self.assertEqual(synced_status["record_update_seq"], 1)
+                self.assertEqual(synced_status["record_updates"], [])
+                self.assertIn(("normalize_with_ai", "crop_001"), service.calls)
+            finally:
+                runtime.stop()
+
+    def test_web_runtime_smoke_flow_pages_to_review_candidate(self) -> None:
+        class _FlowService(_FakeService):
+            def materialize_crops_to_staging(self):
+                self.calls.append(("materialize_crops_to_staging",))
+                rows = []
+                for page in self.pages:
+                    for index, box in enumerate(page.boxes or [(1, 2, 30, 40)], start=1):
+                        record_id = f"crop_{int(page.page_number):03d}_{index:02d}"
+                        crop = Path(self.context.staging_root()) / "crops" / f"{record_id}.png"
+                        crop.parent.mkdir(parents=True, exist_ok=True)
+                        crop.write_bytes(b"png")
+                        record = StagingProblemRecord(
+                            record_id=record_id,
+                            crop_id=record_id,
+                            crop_path=str(crop),
+                            status=StageStatus.PENDING,
+                            models={"ocr": "test-ocr", "figure_segmentation": "test-figure"},
+                            source={
+                                "page_record_id": page.record_id,
+                                "page_number": page.page_number,
+                                "bbox_px": list(box[:4]),
+                            },
+                        )
+                        record.set_step(PipelineStep.CROPS, StageStatus.READY, "crop materializado")
+                        record.sync_status_from_steps()
+                        self.staging.upsert_record(record)
+                        rows.append(record)
+                return rows
+
+            def run_ocr_and_segmentation(
+                self,
+                *,
+                provider="hf",
+                curso="SIN_CURSO",
+                tema="SIN_TEMA",
+                start_n=1,
+                limit=None,
+                ocr_model="",
+                figure_model="",
+                force_figure_model=True,
+                record_id="",
+                record_ids=None,
+                progress_callback=None,
+                run_segmentation=True,
+                run_ocr=True,
+            ):
+                self.phase_calls.append((record_id, list(record_ids or []), bool(run_segmentation), bool(run_ocr)))
+                ids = [record_id] if record_id else list(record_ids or [])
+                updated = []
+                for raw_id in ids:
+                    record = self.staging.get_record(str(raw_id))
+                    if record is None:
+                        continue
+                    if run_segmentation:
+                        record.figure_segmentation = {
+                            "status": StageStatus.READY,
+                            "segments_total": 1,
+                            "segments": [{"idx": 1, "bbox_px": [1, 2, 20, 25], "image_path": record.crop_path}],
+                        }
+                        record.set_step(PipelineStep.SEGMENTATION, StageStatus.READY, "segmentacion lista", segments_total=1)
+                    if run_ocr:
+                        record.raw_ocr = "<01.> Halle x. A) $1$ B) $2$ C) $3$ D) $4$ E) $5$"
+                        record.set_step(PipelineStep.OCR, StageStatus.READY, "OCR crudo listo", characters=len(record.raw_ocr))
+                    record.sync_status_from_steps()
+                    self.staging.upsert_record(record)
+                    updated.append(record)
+                return updated
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            page_image = root / "page.png"
+            page_image.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            service = _FlowService(context, store)
+            service.pages = [
+                ProblemPageRecord(
+                    record_id="page_001",
+                    pdf_path=str(root / "book.pdf"),
+                    page_number=1,
+                    image_path=page_image,
+                    boxes=[(1, 2, 30, 40)],
+                    reviewed=False,
+                )
+            ]
+            runtime = FactoryWebRuntime(context, service=service, endpoint_manager=_FakeEndpointManager())
+            try:
+                base = runtime.start()
+                detected = _post_json(base, "api/pages/detect", {"pages": "1", "compact": True})
+                self.assertEqual(detected["schema_version"], "pdf_factory_web_pages_detected_v1")
+                self.assertEqual(detected["selected_pages"], [1])
+
+                saved_page = _post_json(
+                    base,
+                    "api/pages/boxes",
+                    {
+                        "record_id": "page_001",
+                        "boxes": [[5, 6, 70, 80]],
+                        "layout_mode": "auto",
+                        "compact": True,
+                    },
+                )
+                self.assertEqual(saved_page["page"]["boxes"], [[5, 6, 70, 80]])
+
+                materialized = _post_json(base, "api/staging/materialize", {"compact": True})
+                self.assertEqual(len(materialized["records"]), 1)
+                record_id = materialized["records"][0]["record_id"]
+
+                ocr_job = _post_json(base, "api/ocr/jobs/start", {"record_ids": [record_id], "provider": "local"})
+                for _ in range(40):
+                    ocr_status = _get_json(base, f"api/ocr/jobs/status?job_id={ocr_job['job_id']}")
+                    if not ocr_status["running"]:
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(ocr_status["status"], "done")
+                self.assertEqual(ocr_status["ok"], 1)
+                self.assertEqual(ocr_status["failed"], 0)
+
+                normalizer_job = _post_json(base, "api/normalize/ai/jobs/start", {"record_ids": [record_id]})
+                for _ in range(40):
+                    normalizer_status = _get_json(base, f"api/normalize/ai/jobs/status?job_id={normalizer_job['job_id']}")
+                    if not normalizer_status["running"]:
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(normalizer_status["status"], "done")
+                self.assertEqual(normalizer_status["ok"], 1)
+
+                final_item = (
+                    r"\item[\textbf{1.}] [[curso=GEO]] [[tema=TEST]] [[Estado=sin_revisar]] "
+                    r"[[Clave=A]] Halle $x$. £A)$1$æB)$2$æC)$3$£D)$4$ææE)$5$£"
+                )
+                review = _post_json(
+                    base,
+                    "api/review/save",
+                    {
+                        "record_id": record_id,
+                        "normalized": {"latex_rendered_item": final_item, "status": StageStatus.READY},
+                        "notes": "smoke",
+                        "mark_ready": True,
+                        "compact": True,
+                        "defer_golden_sync": True,
+                    },
+                )
+                self.assertEqual(review["record"]["status_label"], StageStatus.READY)
+
+                candidate = _get_json(base, f"api/promotion?record_id={record_id}")
+                self.assertTrue(candidate["ready_for_future_promotion"])
+                self.assertEqual(candidate["target_table"], "problemas")
+            finally:
+                runtime.stop()
+
     def test_web_runtime_skips_graph_segmentation_when_already_done(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1521,6 +1722,19 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                 self.assertEqual(ai_normalized["record"]["normalized"]["normalizer"], "fake-ai-normalizer")
                 self.assertTrue(ai_normalized["requires_human_review"])
                 self.assertIn(("normalize_with_ai", "crop_001"), service.calls)
+                normalizer_job = _post_json(base, "api/normalize/ai/jobs/start", {"record_ids": ["crop_001"]})
+                self.assertEqual(normalizer_job["schema_version"], "pdf_factory_normalizer_job_v1")
+                normalizer_job_id = normalizer_job["job_id"]
+                normalizer_status = {}
+                for _ in range(40):
+                    normalizer_status = _get_json(base, f"api/normalize/ai/jobs/status?job_id={normalizer_job_id}")
+                    if not normalizer_status["running"]:
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(normalizer_status["status"], "done")
+                self.assertEqual(normalizer_status["ok"], 1)
+                self.assertEqual(normalizer_status["failed"], 0)
+                self.assertEqual(normalizer_status["record_updates"][0]["record"]["record_id"], "crop_001")
                 _post_json(base, "api/normalize", {"record_ids": ["crop_001", "crop_001", ""]})
                 self.assertIn(("normalize_existing_ocr", "", ["crop_001"]), service.calls)
                 review_compact = _post_json(
@@ -1540,6 +1754,20 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                 self.assertEqual(review_compact["record"]["normalized"]["numero"], "8")
                 self.assertEqual(review_compact["record"]["golden_sync"]["status"], "deferred")
                 self.assertEqual(review_compact["record"]["status"], StageStatus.READY)
+                promotion_preview = _post_json(
+                    base,
+                    "api/promotion/upload",
+                    {
+                        "record_ids": ["crop_001"],
+                        "dry_run": True,
+                        "compact": True,
+                        "db_name": "local_test_db",
+                        "db_profile": "biblioteca",
+                    },
+                )
+                self.assertEqual(promotion_preview["schema_version"], "pdf_factory_db_promotion_report_v1")
+                self.assertTrue(promotion_preview["dry_run"])
+                self.assertEqual(promotion_preview["rows"][0]["record_id"], "crop_001")
 
                 with urllib.request.urlopen(base + "api/record?record_id=crop_001", timeout=5) as response:
                     detail = json.loads(response.read().decode("utf-8"))

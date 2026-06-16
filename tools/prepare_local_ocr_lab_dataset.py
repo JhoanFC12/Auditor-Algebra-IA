@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from modulos.modulo0_transcriptor.scan_pipeline.prompts import (
+    RAW_OCR_GEOMETRY_ANGLE_POLICY,
     SYSTEM_PROMPT_RAW_OCR,
     build_prompt_profile_instructions,
 )
@@ -33,6 +34,10 @@ PROPER_IMAGE_TAG_RE = re.compile(r"\[\[\s*Imagen\s*=\s*([^\]]+)\]\]", re.IGNOREC
 ANY_IMAGE_TAG_RE = re.compile(r"\[\[?\s*Imagen\s*=\s*([^\]]+?)\]?\]", re.IGNORECASE)
 NUMBERED_ITEM_RE = re.compile(r"<\s*\d{1,4}\s*\.\s*>")
 CONTINUATION_RE = re.compile(r"^\s*\[CONT\.\]", re.IGNORECASE)
+FINAL_FORMAT_RE = re.compile(r"(?:\\item\s*\[|Â£|£|\[\[\s*(?:curso|tema|estado|clave|imagen)\s*=)", re.IGNORECASE)
+ANGLE_WORD_RE = re.compile(r"\b(?:angulo|angulos|angular|angulares|bisectriz|vertices?)\b", re.IGNORECASE)
+GEOMETRY_VERTEX_ANGLE_RE = re.compile(r"(?:\\sphericalangle|\\angle|m\s*[<∠]\s*[A-Z]{2,4})", re.IGNORECASE)
+INEQUALITY_ANGLE_CONFUSION_RE = re.compile(r"(?:\\leq|\\lt|m\s*<\s*[A-Z]{2,4}|[A-Z]\s*<\s*[A-Z]{2,4})")
 
 
 @dataclass
@@ -82,6 +87,10 @@ def _image_tag_training_issues(text: str) -> list[str]:
     return sorted(set(issues))
 
 
+def _looks_like_final_latex_format(text: str) -> bool:
+    return bool(FINAL_FORMAT_RE.search(str(text or "")))
+
+
 def _infer_training_section(row: dict[str, Any]) -> str:
     section = str(row.get("training_section") or "").strip()
     if section:
@@ -101,8 +110,92 @@ def _infer_training_section(row: dict[str, Any]) -> str:
     return "General"
 
 
-def _build_prompt(row: dict[str, Any]) -> str:
+def _domain_key(training_section: str) -> str:
+    key = str(training_section or "General").strip().casefold()
+    if "geometr" in key:
+        return "geometria"
+    if "trigonom" in key:
+        return "trigonometria"
+    if "aritmet" in key:
+        return "aritmetica"
+    if "algebra" in key:
+        return "algebra"
+    return "general"
+
+
+def _specialist_hint(training_section: str) -> str:
+    return {
+        "geometria": "geometry_ocr_v1",
+        "trigonometria": "trigonometry_ocr_v1",
+        "aritmetica": "arithmetic_ocr_v1",
+        "algebra": "algebra_ocr_v1",
+    }.get(_domain_key(training_section), "general_ocr_v1")
+
+
+def _target_without_number_headers(text: str) -> str:
+    return NUMBERED_ITEM_RE.sub("", str(text or ""))
+
+
+def _infer_notation_flags(row: dict[str, Any], *, target_text: str, training_section: str) -> list[str]:
+    raw_candidate = str(row.get("ocr_model_text") or row.get("ocr_text") or row.get("raw_ocr") or "")
+    probe = " ".join(
+        str(value or "")
+        for value in (
+            row.get("book_code"),
+            row.get("instance_type"),
+            row.get("source_label"),
+            row.get("project_name"),
+            row.get("curso"),
+            row.get("tema"),
+            target_text,
+            raw_candidate,
+        )
+    )
+    flags: set[str] = set()
+    if _domain_key(training_section) == "geometria":
+        flags.add("geometry_policy")
+        if ANGLE_WORD_RE.search(probe) or GEOMETRY_VERTEX_ANGLE_RE.search(probe) or "\\sphericalangle" in probe:
+            flags.add("angles")
+            flags.add("angle_symbol_policy")
+    if re.search(r"(?<![A-Za-z])[A-E]\)", str(target_text or "")):
+        flags.add("options_ae")
+    if CONTINUATION_RE.search(str(target_text or "")):
+        flags.add("continuation")
+    if "\\dfrac" in str(target_text or ""):
+        flags.add("fractions_dfrac")
+    if "\\overset{\\frown}" in str(target_text or ""):
+        flags.add("arcs")
+    return sorted(flags)
+
+
+def _infer_error_types(row: dict[str, Any], *, target_text: str, training_section: str) -> list[str]:
+    raw_candidate = str(row.get("ocr_model_text") or row.get("ocr_text") or row.get("raw_ocr") or "")
+    target_body = _target_without_number_headers(target_text)
+    candidate_body = _target_without_number_headers(raw_candidate)
+    errors: set[str] = set()
+    if not raw_candidate.strip():
+        return []
+    if _domain_key(training_section) == "geometria":
+        target_has_angle = "\\sphericalangle" in target_body or ANGLE_WORD_RE.search(target_body)
+        candidate_has_inequality_like_angle = bool(INEQUALITY_ANGLE_CONFUSION_RE.search(candidate_body))
+        if target_has_angle and candidate_has_inequality_like_angle:
+            errors.add("angle_symbol_confusion")
+        if "\\angle" in candidate_body and "\\sphericalangle" in target_body:
+            errors.add("angle_macro_not_canonical")
+    if _option_labels_missing(target_text, raw_candidate):
+        errors.add("option_missing")
+    return sorted(errors)
+
+
+def _option_labels_missing(target_text: str, candidate_text: str) -> bool:
+    target = set(re.findall(r"(?<![A-Za-z])([A-E])\)", str(target_text or "")))
+    candidate = set(re.findall(r"(?<![A-Za-z])([A-E])\)", str(candidate_text or "")))
+    return bool(target and not target.issubset(candidate))
+
+
+def _build_prompt(row: dict[str, Any], *, training_section: str | None = None) -> str:
     source = row.get("source") if isinstance(row.get("source"), dict) else {}
+    section = training_section or _infer_training_section(row)
     profile = build_prompt_profile_instructions(
         curso=str(row.get("curso") or source.get("curso") or ""),
         tema=str(row.get("tema") or source.get("tema") or ""),
@@ -110,7 +203,14 @@ def _build_prompt(row: dict[str, Any]) -> str:
         instance_type=str(row.get("instance_type") or source.get("instance_type") or ""),
         stage="raw_ocr",
     )
-    return f"{SYSTEM_PROMPT_RAW_OCR}\n\n{profile}".strip()
+    context = (
+        "CONTEXTO DE ENTRENAMIENTO OCR:\n"
+        f"- dominio={_domain_key(section)}\n"
+        f"- especialista={_specialist_hint(section)}\n"
+    )
+    if _domain_key(section) == "geometria":
+        context += RAW_OCR_GEOMETRY_ANGLE_POLICY
+    return f"{SYSTEM_PROMPT_RAW_OCR}\n\n{profile}\n\n{context}".strip()
 
 
 def _copy_image(image_src: Path, out_dir: Path, split: str, sample_id: str) -> str:
@@ -141,8 +241,11 @@ def _sample_row(
     source = row.get("source") if isinstance(row.get("source"), dict) else {}
     book_code = str(row.get("book_code") or source.get("book_code") or "").strip()
     instance_type = str(row.get("instance_type") or source.get("instance_type") or "").strip()
-    training_section = _infer_training_section({**row, "book_code": book_code, "instance_type": instance_type})
-    prompt = _build_prompt({**row, "book_code": book_code, "instance_type": instance_type})
+    row_context = {**row, "book_code": book_code, "instance_type": instance_type}
+    training_section = _infer_training_section(row_context)
+    prompt = _build_prompt(row_context, training_section=training_section)
+    notation_flags = _infer_notation_flags(row_context, target_text=target_text, training_section=training_section)
+    error_types = _infer_error_types(row_context, target_text=target_text, training_section=training_section)
     return {
         "schema_version": "local_math_ocr_sample_v1",
         "id": sample_id,
@@ -158,6 +261,10 @@ def _sample_row(
         "book_code": book_code,
         "instance_type": instance_type,
         "training_section": training_section,
+        "domain": _domain_key(training_section),
+        "specialist_hint": _specialist_hint(training_section),
+        "notation_flags": notation_flags,
+        "error_types": error_types,
         "status": str(row.get("status") or ""),
         "human_reviewed": True,
     }
@@ -206,6 +313,9 @@ def collect_golden_rows(
             if not target_text:
                 skipped.append({"source": str(record_path), "reason": "missing_corrected_text"})
                 continue
+            if _looks_like_final_latex_format(target_text):
+                skipped.append({"source": str(record_path), "reason": "not_raw_ocr_final_latex_format"})
+                continue
             tag_issues = _image_tag_training_issues(target_text)
             if tag_issues and not allow_suspect_image_tags:
                 skipped.append({"source": str(record_path), "reason": "suspect_image_tags", "issues": tag_issues})
@@ -239,13 +349,17 @@ def _iter_staging_record_paths(staging_root: Path) -> Iterable[Path]:
 
 
 def _staging_raw_ocr_is_human_reviewed(row: dict[str, Any]) -> bool:
+    human_sources = {
+        "human_raw_ocr_editor",
+        "human_raw_ocr_batch_acceptance",
+    }
     trace = row.get("trace") if isinstance(row.get("trace"), dict) else {}
     last_review = trace.get("last_raw_ocr_review") if isinstance(trace.get("last_raw_ocr_review"), dict) else {}
-    if str(last_review.get("source") or "") == "human_raw_ocr_editor":
+    if str(last_review.get("source") or "") in human_sources:
         return True
     steps = row.get("steps") if isinstance(row.get("steps"), dict) else {}
     ocr_step = steps.get("ocr") if isinstance(steps.get("ocr"), dict) else {}
-    return str(ocr_step.get("source") or "") == "human_raw_ocr_editor"
+    return str(ocr_step.get("source") or "") in human_sources
 
 
 def collect_staging_rows(
@@ -265,6 +379,9 @@ def collect_staging_rows(
             raw_ocr = str(row.get("raw_ocr") or "").strip()
             if not raw_ocr:
                 skipped.append({"source": str(record_path), "reason": "missing_raw_ocr"})
+                continue
+            if _looks_like_final_latex_format(raw_ocr):
+                skipped.append({"source": str(record_path), "reason": "not_raw_ocr_final_latex_format"})
                 continue
             human_reviewed = _staging_raw_ocr_is_human_reviewed(row)
             if not human_reviewed and not include_unreviewed:
@@ -296,9 +413,46 @@ def write_dataset(
     *,
     sources: list[str],
     max_samples: int = 0,
+    domains: set[str] | None = None,
+    required_notation_flags: set[str] | None = None,
 ) -> dict[str, Any]:
     out_dir = Path(out_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+    selected_domains = {str(item or "").strip().casefold() for item in (domains or set()) if str(item or "").strip()}
+    selected_flags = {
+        str(item or "").strip()
+        for item in (required_notation_flags or set())
+        if str(item or "").strip()
+    }
+    if selected_domains:
+        kept: list[dict[str, Any]] = []
+        for row in rows:
+            if str(row.get("domain") or "").strip().casefold() in selected_domains:
+                kept.append(row)
+            else:
+                skipped.append(
+                    {
+                        "source": str(row.get("source_record_path") or row.get("id") or ""),
+                        "reason": "domain_filter",
+                        "domain": str(row.get("domain") or ""),
+                    }
+                )
+        rows = kept
+    if selected_flags:
+        kept = []
+        for row in rows:
+            flags = {str(item) for item in row.get("notation_flags", []) if item is not None}
+            if selected_flags.issubset(flags):
+                kept.append(row)
+            else:
+                skipped.append(
+                    {
+                        "source": str(row.get("source_record_path") or row.get("id") or ""),
+                        "reason": "notation_flag_filter",
+                        "notation_flags": sorted(flags),
+                    }
+                )
+        rows = kept
     if max_samples > 0:
         rows = sorted(rows, key=lambda item: item["id"])
         rows = rows[:max_samples]
@@ -325,6 +479,10 @@ def write_dataset(
         "skipped_total": len(skipped),
         "task": "image_crop_to_corrected_raw_math_ocr",
         "target_policy": "Entrenar solo OCR crudo fiel revisado; normalizacion queda fuera de este dataset.",
+        "filters": {
+            "domains": sorted(selected_domains),
+            "required_notation_flags": sorted(selected_flags),
+        },
         "files": {
             "train": "train.jsonl",
             "validation": "validation.jsonl",
@@ -345,6 +503,8 @@ def export_dataset(
     allow_suspect_image_tags: bool = False,
     include_unreviewed_staging: bool = False,
     max_samples: int = 0,
+    domains: set[str] | None = None,
+    required_notation_flags: set[str] | None = None,
 ) -> dict[str, Any]:
     if golden_dirs is None:
         selected_golden = [path for path in DEFAULT_GOLDEN_DIRS if path.exists()]
@@ -374,6 +534,8 @@ def export_dataset(
         out_dir,
         sources=[*(str(path) for path in selected_golden), *(str(path) for path in selected_staging)],
         max_samples=max_samples,
+        domains=domains,
+        required_notation_flags=required_notation_flags,
     )
 
 
@@ -388,6 +550,8 @@ def main() -> int:
     parser.add_argument("--max-samples", type=int, default=0, help="Limita muestras para smoke training.")
     parser.add_argument("--allow-suspect-image-tags", action="store_true")
     parser.add_argument("--include-unreviewed-staging", action="store_true")
+    parser.add_argument("--domain", action="append", default=None, help="Filtra por domain exportado, por ejemplo geometria.")
+    parser.add_argument("--require-notation-flag", action="append", default=None, help="Exige un notation_flag, por ejemplo angle_symbol_policy.")
     args = parser.parse_args()
 
     manifest = export_dataset(
@@ -398,6 +562,13 @@ def main() -> int:
         allow_suspect_image_tags=bool(args.allow_suspect_image_tags),
         include_unreviewed_staging=bool(args.include_unreviewed_staging),
         max_samples=max(0, int(args.max_samples or 0)),
+        domains={str(item).strip() for item in (args.domain or []) if str(item).strip()} or None,
+        required_notation_flags={
+            str(item).strip()
+            for item in (args.require_notation_flag or [])
+            if str(item).strip()
+        }
+        or None,
     )
     print(json.dumps(manifest, ensure_ascii=False, indent=2))
     return 0

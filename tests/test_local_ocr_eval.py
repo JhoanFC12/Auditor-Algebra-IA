@@ -43,6 +43,28 @@ class LocalOcrEvalTests(unittest.TestCase):
 
         self.assertEqual(summary["prefix_ok_rate"], 0.0)
 
+    def test_angle_symbol_accuracy_catches_inequality_confusion(self) -> None:
+        rows = [
+            {
+                "id": "angle-ok",
+                "image": "x.png",
+                "text": "<01.> Si $m\\sphericalangle ABC=40^\\circ$, calcule $x$.",
+                "raw_candidate": "<01.> Si $m\\sphericalangle ABC=40^\\circ$, calcule $x$.",
+            },
+            {
+                "id": "angle-bad",
+                "image": "y.png",
+                "text": "<02.> Si $m\\sphericalangle BCD=50^\\circ$, calcule $x$.",
+                "raw_candidate": "<02.> Si $m\\leq BCD=50^\\circ$, calcule $x$.",
+            },
+        ]
+
+        summary = evaluate_rows(rows, dataset_dir=".", candidate_field="raw_candidate")
+
+        self.assertEqual(summary["angle_symbol_samples"], 2)
+        self.assertAlmostEqual(summary["angle_symbol_accuracy"], 0.5)
+        self.assertEqual(summary["angle_confusion_total"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -66,6 +66,28 @@ def _option_labels(text: str) -> set[str]:
     return set(re.findall(r"(?<![A-Za-z])([A-E])\)", str(text or "")))
 
 
+ANGLE_CONFUSION_RE = re.compile(r"(?:\\leq|\\lt|m\s*<\s*[A-Z]{2,4}|[A-Z]\s*<\s*[A-Z]{2,4})")
+
+
+def _angle_symbol_score(target: str, prediction: str) -> dict[str, Any]:
+    target_count = str(target or "").count("\\sphericalangle")
+    prediction_count = str(prediction or "").count("\\sphericalangle")
+    confusion_count = len(ANGLE_CONFUSION_RE.findall(str(prediction or "")))
+    if target_count <= 0:
+        return {
+            "angle_target_count": 0,
+            "angle_prediction_count": prediction_count,
+            "angle_confusion_count": confusion_count,
+            "angle_symbol_ok": confusion_count == 0,
+        }
+    return {
+        "angle_target_count": target_count,
+        "angle_prediction_count": prediction_count,
+        "angle_confusion_count": confusion_count,
+        "angle_symbol_ok": prediction_count >= target_count and confusion_count == 0,
+    }
+
+
 def _format_score(target: str, prediction: str) -> dict[str, Any]:
     target_options = _option_labels(target)
     pred_options = _option_labels(prediction)
@@ -133,6 +155,7 @@ def evaluate_rows(
         prediction = _normalize_for_metric(prediction)
         distance = _edit_distance(prediction, target)
         format_score = _format_score(target, prediction)
+        angle_score = _angle_symbol_score(target, prediction)
         results.append(
             {
                 "id": str(row.get("id") or ""),
@@ -143,6 +166,7 @@ def evaluate_rows(
                 "exact": prediction == target,
                 "prefix_ok": bool(format_score["prefix_ok"]),
                 "options_recall": float(format_score["options_recall"]),
+                **angle_score,
                 "prediction_chars": len(prediction),
                 "error": error,
                 "target_preview": target[:220],
@@ -157,6 +181,7 @@ def evaluate_rows(
             "results": [],
         }
     errored = [row for row in results if row["error"]]
+    angle_rows = [row for row in results if int(row.get("angle_target_count") or 0) > 0]
     return {
         "schema_version": "local_math_ocr_eval_v1",
         "samples": total,
@@ -165,6 +190,13 @@ def evaluate_rows(
         "prefix_ok_rate": sum(1 for row in results if row["prefix_ok"]) / total,
         "avg_cer": sum(float(row["cer"]) for row in results) / total,
         "avg_options_recall": sum(float(row["options_recall"]) for row in results) / total,
+        "angle_symbol_accuracy": (
+            sum(1 for row in angle_rows if row["angle_symbol_ok"]) / len(angle_rows)
+            if angle_rows
+            else None
+        ),
+        "angle_symbol_samples": len(angle_rows),
+        "angle_confusion_total": sum(int(row.get("angle_confusion_count") or 0) for row in results),
         "avg_prediction_chars": sum(int(row["prediction_chars"]) for row in results) / total,
         "worst": sorted(results, key=lambda row: float(row["cer"]), reverse=True)[:10],
         "results": results,
@@ -172,6 +204,10 @@ def evaluate_rows(
 
 
 def main() -> int:
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
     parser = argparse.ArgumentParser(description="Evalua candidatos OCR contra dataset local imagen->texto corregido.")
     parser.add_argument("--dataset-dir", required=True)
     parser.add_argument("--split", default="test", choices=["train", "validation", "test"])

@@ -92,13 +92,9 @@ class LibraryWebRuntime:
         port: int = 0,
     ) -> None:
         load_factory_runtime_env()
-        if controller is None and BookProgressController is None:
-            raise RuntimeError(
-                "No se puede iniciar Biblioteca sin el controlador real: falta instalar psycopg2."
-            ) from _BOOK_PROGRESS_IMPORT_ERROR
-        self.controller = controller or BookProgressController()
+        self.controller = controller
         self.library_api = LibraryWebApi(
-            controller=self.controller,
+            controller=controller,
             runtime_factory=self._create_factory_runtime,
             file_url_resolver=self._register_library_file,
         )
@@ -117,8 +113,29 @@ class LibraryWebRuntime:
         self.port = max(0, int(port or 0))
         self.url = ""
 
+    def _require_controller(self) -> Any:
+        try:
+            controller = self.library_api.controller
+        except LibraryApiError:
+            raise
+        except ModuleNotFoundError as exc:
+            if exc.name == "psycopg2":
+                raise LibraryApiError(
+                    "Biblioteca no puede conectar con la base local: falta instalar psycopg2 en este entorno de Python.",
+                    status=503,
+                    code="library_dependency_missing",
+                ) from exc
+            raise
+        self.controller = controller
+        return controller
+
     def _create_factory_runtime(self, context: InstancePipelineContext) -> FactoryWebRuntime:
-        runtime = FactoryWebRuntime(context, library_api=self.library_api, endpoint_manager=self.endpoint_manager)
+        runtime = FactoryWebRuntime(
+            context,
+            library_api=self.library_api,
+            endpoint_manager=self.endpoint_manager,
+            host=self.host,
+        )
         self._factory_runtimes.append(runtime)
         return runtime
 
@@ -143,7 +160,8 @@ class LibraryWebRuntime:
 
         self._server = ThreadingHTTPServer((self.host, self.port), Handler)
         host, port = self._server.server_address
-        self.url = f"http://{host}:{port}/"
+        display_host = "127.0.0.1" if str(host) in {"0.0.0.0", "::"} else str(host)
+        self.url = f"http://{display_host}:{port}/"
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         return self.url
@@ -244,12 +262,12 @@ class LibraryWebRuntime:
         payload: dict[str, Any],
     ) -> Any:
         with self._lock:
-            if path.startswith("/api/library/"):
-                return self.library_api.dispatch(method, path, query, payload)
             self._ensure_allowed_method(method, path)
             if method == "GET" and path == "/api/library/bootstrap":
                 db_name = self._first(query, "db_name", self.default_db_name)
                 return self._snapshot(db_name)
+            if path.startswith("/api/library/"):
+                return self.library_api.dispatch(method, path, query, payload)
             if method == "GET" and path == "/api/training/status":
                 return load_training_cycle_status()
             if method == "GET" and path == "/api/library/book":
@@ -261,14 +279,16 @@ class LibraryWebRuntime:
                 data = dict(payload.get("book") or {})
                 if not isinstance(data, dict):
                     raise ValueError("book debe ser un objeto.")
-                book_id = self.controller.crear_libro(db_name, BookCreateInput(**self._book_payload(data)))
+                controller = self._require_controller()
+                book_id = controller.crear_libro(db_name, BookCreateInput(**self._book_payload(data)))
                 return {"schema_version": "library_book_created_v1", "book_id": int(book_id), "snapshot": self._snapshot(db_name)}
             if method == "POST" and path == "/api/library/instance/create":
                 db_name = self._required_str(payload, "db_name")
                 data = dict(payload.get("instance") or {})
                 if not isinstance(data, dict):
                     raise ValueError("instance debe ser un objeto.")
-                instance_id = self.controller.crear_instancia(db_name, BookInstanceInput(**self._instance_payload(data)))
+                controller = self._require_controller()
+                instance_id = controller.crear_instancia(db_name, BookInstanceInput(**self._instance_payload(data)))
                 book_id = int(data.get("libro_id") or 0)
                 return {
                     "schema_version": "library_instance_created_v1",
@@ -463,7 +483,8 @@ class LibraryWebRuntime:
             book_id = int(raw_book_id)
         except Exception:
             return None
-        book = self.controller.obtener_libro(db_name, book_id)
+        controller = self._require_controller()
+        book = controller.obtener_libro(db_name, book_id)
         if not book:
             return None
         instance = self._instance_by_id(db_name, book_id, instance_id)
@@ -490,7 +511,8 @@ class LibraryWebRuntime:
         return None
 
     def _snapshot(self, db_name: str = "") -> dict[str, Any]:
-        dbs = list(self.controller.listar_bases_datos())
+        controller = self._require_controller()
+        dbs = list(controller.listar_bases_datos())
         selected = str(db_name or "").strip()
         if selected not in dbs:
             selected = self.default_db_name if self.default_db_name in dbs else (dbs[0] if dbs else "")
@@ -511,11 +533,12 @@ class LibraryWebRuntime:
         }
 
     def _book_detail(self, db_name: str, book_id: int) -> dict[str, Any]:
-        book = self.controller.obtener_libro(db_name, int(book_id))
+        controller = self._require_controller()
+        book = controller.obtener_libro(db_name, int(book_id))
         if not book:
             raise FileNotFoundError("Libro no encontrado.")
-        instances = [self._instance_to_web(row) for row in self.controller.listar_instancias_libro(db_name, int(book_id))]
-        dashboard = self.controller.obtener_dashboard_libro(db_name, int(book_id))
+        instances = [self._instance_to_web(row) for row in controller.listar_instancias_libro(db_name, int(book_id))]
+        dashboard = controller.obtener_dashboard_libro(db_name, int(book_id))
         return {
             "schema_version": "library_book_detail_v1",
             "book": self._book_to_web(book),
@@ -524,10 +547,11 @@ class LibraryWebRuntime:
         }
 
     def _open_factory_for_instance(self, db_name: str, book_id: int, instance_type: str) -> dict[str, Any]:
-        book = self.controller.obtener_libro(db_name, int(book_id))
+        controller = self._require_controller()
+        book = controller.obtener_libro(db_name, int(book_id))
         if not book:
             raise FileNotFoundError("Libro no encontrado.")
-        instance = self.controller.obtener_instancia(db_name, int(book_id), instance_type)
+        instance = controller.obtener_instancia(db_name, int(book_id), instance_type)
         if not instance:
             raise FileNotFoundError("Instancia no encontrada.")
         pdf_path = str(book.get("pdf_path") or "").strip()
@@ -571,11 +595,12 @@ class LibraryWebRuntime:
 
     def _list_books(self, db_name: str, *, include_instance_health: bool = False) -> list[dict[str, Any]]:
         try:
-            return [dict(row) for row in self.controller.listar_libros(db_name, include_instance_health=include_instance_health)]
+            controller = self._require_controller()
+            return [dict(row) for row in controller.listar_libros(db_name, include_instance_health=include_instance_health)]
         except TypeError as exc:
             if "include_instance_health" not in str(exc):
                 raise
-            return [dict(row) for row in self.controller.listar_libros(db_name)]
+            return [dict(row) for row in controller.listar_libros(db_name)]
 
     @staticmethod
     def _book_to_web(book: dict[str, Any]) -> dict[str, Any]:
@@ -718,7 +743,7 @@ class LibraryWebRuntime:
         db_name = str(payload.get("db_name") or "").strip()
         if not book_id or not db_name:
             return {}
-        book = self.controller.obtener_libro(db_name, book_id)
+        book = self._require_controller().obtener_libro(db_name, book_id)
         return dict(book or {})
 
     def _attach_cover_to_book(self, payload: dict[str, Any], cover_path: str, *, book: dict[str, Any] | None = None) -> None:
@@ -729,11 +754,12 @@ class LibraryWebRuntime:
             book_id = 0
         if not db_name or not book_id:
             raise ValueError("db_name y book_id son requeridos para asociar portada.")
-        current = dict(book or self.controller.obtener_libro(db_name, book_id) or {})
+        controller = self._require_controller()
+        current = dict(book or controller.obtener_libro(db_name, book_id) or {})
         if not current:
             raise FileNotFoundError("Libro no encontrado.")
         merged = {**current, "cover_path": cover_path}
-        self.controller.actualizar_libro(db_name, book_id, BookUpdateInput(**self._book_payload(merged)))
+        controller.actualizar_libro(db_name, book_id, BookUpdateInput(**self._book_payload(merged)))
 
     def _cover_upload_dir(self, payload: dict[str, Any]) -> Path:
         return library_cover_dir(payload, db_name=str(payload.get("db_name") or ""))
@@ -751,7 +777,7 @@ class LibraryWebRuntime:
         }
 
     def _instance_by_id(self, db_name: str, book_id: int, instance_id: int) -> dict[str, Any] | None:
-        for row in self.controller.listar_instancias_libro(db_name, int(book_id)):
+        for row in self._require_controller().listar_instancias_libro(db_name, int(book_id)):
             if int(dict(row).get("id") or 0) == int(instance_id):
                 return dict(row)
         return None
@@ -991,6 +1017,8 @@ class LibraryWebRuntime:
             "/api/library/instance/factory": {"POST"},
             "/api/training/status": {"GET"},
         }
+        if path in exact:
+            return exact[path]
         if path.startswith("/api/library/"):
             return LibraryWebApi.allowed_methods(path)
         return exact.get(path, set())

@@ -107,7 +107,16 @@ class LibraryWebApi:
     @property
     def controller(self) -> Any:
         if self._controller is None:
-            from modulos.modulo9_organizador_libros.controlador_organizador_libros import BookProgressController
+            try:
+                from modulos.modulo9_organizador_libros.controlador_organizador_libros import BookProgressController
+            except ModuleNotFoundError as exc:
+                if exc.name == "psycopg2":
+                    raise LibraryApiError(
+                        "Biblioteca no puede conectar con la base local: falta instalar psycopg2 en este entorno de Python.",
+                        status=503,
+                        code="library_dependency_missing",
+                    ) from exc
+                raise
 
             self._controller = BookProgressController()
         return self._controller
@@ -850,6 +859,16 @@ class LibraryWebApi:
             from .staging import InstanceStagingStore
 
             context = InstancePipelineContext.from_library_instance(book, instance, db_name=db_name)
+            staging_summary = InstanceStagingStore.load_manifest_summary_from_root(context.staging_root())
+            if staging_summary is None and (context.staging_root() / "records").exists():
+                store = InstanceStagingStore(context)
+                records = store.load_records()
+                staging_summary = store.summarize_records(records)
+            if staging_summary is not None:
+                counts.update(staging_summary)
+                if _staging_summary_has_work(staging_summary):
+                    return counts
+
             if golden is None:
                 from modulos.modulo13_laboratorio_pdf_segmentacion.controlador_laboratorio_pdf import PdfProblemGoldenController
 
@@ -878,12 +897,6 @@ class LibraryWebApi:
                 counts["pages_total"] = len(page_rows)
                 counts["pages_reviewed"] = sum(1 for row in page_rows if bool(getattr(row, "reviewed", False)))
                 counts["boxes_total"] = sum(len(getattr(row, "boxes", None) or []) for row in page_rows)
-
-            staging_summary = InstanceStagingStore.load_manifest_summary_from_root(context.staging_root())
-            if staging_summary is None and (context.staging_root() / "records").exists():
-                store = InstanceStagingStore(context)
-                records = store.load_records()
-                staging_summary = store.summarize_records(records)
             if staging_summary is not None:
                 counts.update(staging_summary)
         except Exception as exc:
@@ -1124,6 +1137,23 @@ def _timeline_stage_from_counts(counts: dict[str, Any]) -> dict[str, Any]:
         "counts": {key: int(value) for key, value in counts.items() if isinstance(value, int)},
         "error": str(counts.get("timeline_error") or ""),
     }
+
+
+def _staging_summary_has_work(summary: dict[str, Any]) -> bool:
+    for key in (
+        "records_total",
+        "crops_found",
+        "ocr_done",
+        "segments_done",
+        "normalized_done",
+        "ready",
+    ):
+        try:
+            if int(summary.get(key) or 0) > 0:
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def _page_timeline_score(page: Any, index: int) -> tuple[int, int, int, int, str]:

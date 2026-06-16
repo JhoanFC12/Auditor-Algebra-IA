@@ -1,0 +1,22 @@
+{
+  "schema_version": "hf_geometry_ocr_agent_merge_v1",
+  "created_at": "2026-06-16T03:43:00-05:00",
+  "purpose": "Fusionar LoRA OCR Geometria angle-policy v1 y activar modelo OCR entrenado en la app",
+  "base_model": "Qwen/Qwen2.5-VL-3B-Instruct",
+  "adapter_model_repo_id": "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-agent-angle-policy-lora-v1",
+  "merged_model_repo_id": "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-agent-angle-policy-merged-v1",
+  "hf_merge_job_id": "6a310b405ff0a6cf94f9ebe6",
+  "hf_merge_job_url": "https://huggingface.co/jobs/Jhoan12/6a310b405ff0a6cf94f9ebe6",
+  "endpoint_name": "math-ocr-geometry-agent-angle-policy-v1",
+  "endpoint_url": "https://ukqdj8ptwdywjg5d.us-east-1.aws.endpoints.huggingface.cloud/v1",
+  "endpoint_repository": "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-agent-angle-policy-merged-v1",
+  "activated_env_file": ".env.local",
+  "env_backup": ".env.local.backup_20260616_034344",
+  "prompt_focus": [
+    "OCR crudo fiel para Geometria",
+    "Usar \\sphericalangle para angulos visibles",
+    "Usar m\\sphericalangle para medidas de angulos",
+    "No usar <, \\lt ni \\leq como simbolo de angulo",
+    "No describir graficos ni agregar informacion no visible"
+  ]
+}

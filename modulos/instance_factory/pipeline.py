@@ -32,6 +32,13 @@ from .problem_detector_corrections import maybe_write_problem_detector_correctio
 from .staging import InstanceStagingStore
 
 
+def _canonical_human_review_text(value: str) -> str:
+    return "\n".join(
+        line.rstrip()
+        for line in str(value or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    ).strip()
+
+
 class InstancePdfPipelineService:
     def __init__(
         self,
@@ -437,11 +444,18 @@ class InstancePdfPipelineService:
                 )
         self.golden.upsert_instance_rows(self.context.instance_name, [target])
         self._invalidate_pages_cache()
-        invalidated_records: list[StagingProblemRecord] = []
+        updated_records: list[StagingProblemRecord] = []
         if previous_signature != current_signature:
-            invalidated_records = self._invalidate_downstream_for_page_boxes_change(target, previous_boxes=previous_boxes)
+            updated_records = self._invalidate_downstream_for_page_boxes_change(target, previous_boxes=previous_boxes)
+        invalidated_records = [
+            record
+            for record in updated_records
+            if dict(dict(record.audit or {}).get("downstream_state") or {}).get("status") == "invalidated"
+            and dict(dict(record.audit or {}).get("downstream_state") or {}).get("reason") == "page_boxes_changed"
+        ]
         setattr(self, "_last_page_boxes_invalidated_count", len(invalidated_records))
         setattr(self, "_last_page_boxes_invalidated_records", list(invalidated_records))
+        setattr(self, "_last_page_boxes_updated_records", list(updated_records))
         return target
 
     def delete_page_record(self, record_id: str) -> list[ProblemPageRecord]:
@@ -488,14 +502,27 @@ class InstancePdfPipelineService:
         return json.dumps([list(box) for box in cls._coerce_boxes(list(boxes or []))], separators=(",", ":"))
 
     @classmethod
-    def _source_dependency_signature(cls, source: dict[str, Any]) -> str:
-        raw_bbox = source.get("bbox_px") or []
+    def _coerced_bbox(cls, raw_bbox: Any) -> list[int]:
         clean_bbox = cls._coerce_boxes([raw_bbox])
-        bbox = list(clean_bbox[0]) if clean_bbox else list(raw_bbox or [])[:4]
+        if clean_bbox:
+            return [int(value) for value in clean_bbox[0]]
+        if not isinstance(raw_bbox, (list, tuple)):
+            return []
         try:
-            bbox_key = json.dumps([int(v) for v in bbox[:4]], separators=(",", ":"))
+            return [int(round(float(value))) for value in list(raw_bbox)[:4]]
         except Exception:
-            bbox_key = json.dumps(bbox, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            return [int(value) for value in list(raw_bbox)[:4] if isinstance(value, int)]
+
+    @classmethod
+    def _bbox_signature(cls, raw_bbox: Any) -> str:
+        bbox = cls._coerced_bbox(raw_bbox)
+        if not bbox:
+            return ""
+        return json.dumps([int(v) for v in bbox[:4]], separators=(",", ":"))
+
+    @classmethod
+    def _source_dependency_signature(cls, source: dict[str, Any]) -> str:
+        bbox_key = cls._bbox_signature(source.get("bbox_px") or [])
         return "|".join(
             [
                 str(source.get("book_code") or "").strip(),
@@ -538,11 +565,57 @@ class InstancePdfPipelineService:
         changed: list[StagingProblemRecord] = []
         previous_box_signature = self._boxes_signature(list(previous_boxes or []))
         current_box_signature = self._boxes_signature(list(page.boxes or []))
+        current_boxes_by_signature: dict[str, tuple[int, list[int]]] = {}
+        for index, box in enumerate(self._coerce_boxes(list(page.boxes or [])), start=1):
+            signature = self._bbox_signature(box)
+            if signature and signature not in current_boxes_by_signature:
+                current_boxes_by_signature[signature] = (index, [int(value) for value in box[:4]])
         for record in self.staging.load_records():
             source = dict(record.source or {})
             same_source_record = str(source.get("source_record_id") or "") == str(page.record_id or "")
             same_page = str(source.get("page_number") or "") == str(page.page_number or "")
             if not (same_source_record or same_page):
+                continue
+            bbox_signature = self._bbox_signature(source.get("bbox_px") or [])
+            current_match = current_boxes_by_signature.get(bbox_signature)
+            if current_match is not None:
+                box_index, bbox = current_match
+                updated_source = {
+                    **dict(source),
+                    "page_number": page.page_number,
+                    "source_record_id": page.record_id,
+                    "bbox_px": bbox,
+                    "box_index": box_index,
+                    "page_problem_index": box_index,
+                    "page_boxes_signature": current_box_signature,
+                }
+                if updated_source != source:
+                    relinks = list(dict(record.trace or {}).get("source_relinks") or [])
+                    relinks.append(
+                        {
+                            "updated_at": utc_now_text(),
+                            "reason": "page_boxes_reordered_or_extended",
+                            "previous_source": dict(source),
+                            "updated_source": dict(updated_source),
+                            "previous_page_boxes_signature": previous_box_signature,
+                            "current_page_boxes_signature": current_box_signature,
+                            "page_record_id": page.record_id,
+                        }
+                    )
+                    record.source = updated_source
+                    record.trace = {**dict(record.trace or {}), "source_relinks": relinks[-20:]}
+                    record.set_step(PipelineStep.PAGES, StageStatus.READY, "pagina fuente relinkada tras edicion de boxes")
+                    record.set_step(
+                        PipelineStep.BOXES,
+                        StageStatus.READY,
+                        "box fuente preservado tras cambio de orden",
+                        bbox_px=bbox,
+                        source_record_id=page.record_id,
+                    )
+                    self._mark_record_downstream_active(record, reason="page_box_source_preserved")
+                    record.sync_status_from_steps()
+                    record.touch()
+                    changed.append(record)
                 continue
             self._invalidate_record_downstream(
                 record,
@@ -659,6 +732,31 @@ class InstancePdfPipelineService:
                 "updated_at": utc_now_text(),
             },
         }
+
+    def _reset_normalization_and_review(self, record: StagingProblemRecord, *, reason: str) -> None:
+        record.normalized = {}
+        record.review = {}
+        artifacts = dict(record.artifacts or {})
+        for key in (
+            "latest_review",
+            "review_snapshot",
+            "normalizer_output",
+            "normalizer_input",
+            "normalized",
+        ):
+            artifacts.pop(key, None)
+        record.artifacts = artifacts
+        resets = list(dict(record.trace or {}).get("downstream_resets") or [])
+        resets.append(
+            {
+                "updated_at": utc_now_text(),
+                "reason": str(reason or "upstream_changed"),
+                "cleared": ["normalized", "review"],
+            }
+        )
+        record.trace = {**dict(record.trace or {}), "downstream_resets": resets[-20:]}
+        record.set_step(PipelineStep.NORMALIZATION, StageStatus.PENDING, "normalizacion pendiente por cambio previo")
+        record.set_step(PipelineStep.REVIEW, StageStatus.PENDING, "revision final pendiente por cambio previo")
 
     def build_record_stage_rows(self) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -796,13 +894,10 @@ class InstancePdfPipelineService:
                 crop_payload = {}
             crop_payloads.append((self._crop_payload_sort_key(crop_id, crop_payload), crop_id, record_path, crop_payload))
 
-        out: list[StagingProblemRecord] = []
+        prepared_payloads: list[tuple[str, Path, Path, dict[str, Any], dict[str, Any]]] = []
         for _sort_key, crop_id, record_path, crop_payload in sorted(crop_payloads, key=lambda item: item[0]):
             crop_rel = str(crop_payload.get("crop_image_rel") or "").strip()
             crop_path = Path(target) / crop_rel if crop_rel else Path("")
-            existing = self.staging.get_record(crop_id)
-            record = existing or StagingProblemRecord(record_id=crop_id, crop_id=crop_id, crop_path=str(crop_path))
-            previous_source = dict(record.source or {})
             new_source = {
                 "book_code": self.context.book_code,
                 "instance_type": self.context.instance_type,
@@ -823,6 +918,41 @@ class InstancePdfPipelineService:
                 "session_json": crop_payload.get("session_json") or "",
                 "problem_crops_live_record": str(record_path),
             }
+            prepared_payloads.append((crop_id, crop_path, record_path, crop_payload, new_source))
+
+        existing_records = self.staging.load_records()
+        existing_by_dependency: dict[str, StagingProblemRecord] = {}
+        for existing_record in existing_records:
+            signature = self._source_dependency_signature(dict(existing_record.source or {}))
+            if not signature or not self._bbox_signature(dict(existing_record.source or {}).get("bbox_px") or []):
+                continue
+            existing_by_dependency.setdefault(signature, copy.deepcopy(existing_record))
+
+        active_crop_ids = {crop_id for crop_id, *_rest in prepared_payloads}
+        for crop_id, _crop_path, _record_path, _crop_payload, new_source in prepared_payloads:
+            signature = self._source_dependency_signature(new_source)
+            match = existing_by_dependency.get(signature)
+            if match is None or str(match.record_id or "") == str(crop_id or ""):
+                continue
+            if str(match.record_id or "") not in active_crop_ids:
+                self.staging.delete_record(match.record_id, rewrite_manifest=False)
+
+        out: list[StagingProblemRecord] = []
+        for crop_id, crop_path, record_path, crop_payload, new_source in prepared_payloads:
+            existing = self.staging.get_record(crop_id)
+            source_match = existing_by_dependency.get(self._source_dependency_signature(new_source))
+            relinked_from = ""
+            if existing is None and source_match is not None and str(source_match.record_id or "") != str(crop_id or ""):
+                relinked_from = str(source_match.record_id or "")
+                payload = copy.deepcopy(source_match.to_dict())
+                payload["record_id"] = crop_id
+                payload["crop_id"] = crop_id
+                payload["crop_path"] = str(crop_path)
+                payload["source"] = dict(new_source)
+                record = StagingProblemRecord.from_dict(payload)
+            else:
+                record = existing or StagingProblemRecord(record_id=crop_id, crop_id=crop_id, crop_path=str(crop_path))
+            previous_source = dict(record.source or {})
             if existing and self._source_dependency_signature(previous_source) != self._source_dependency_signature(new_source):
                 self._invalidate_record_downstream(
                     record,
@@ -836,7 +966,22 @@ class InstancePdfPipelineService:
                         "current_bbox_px": new_source.get("bbox_px") or [],
                     },
                 )
+            elif relinked_from:
+                relinks = list(dict(record.trace or {}).get("source_relinks") or [])
+                relinks.append(
+                    {
+                        "updated_at": utc_now_text(),
+                        "reason": "crop_id_relinked_after_box_order_change",
+                        "previous_record_id": relinked_from,
+                        "new_record_id": crop_id,
+                        "source": dict(new_source),
+                    }
+                )
+                record.trace = {**dict(record.trace or {}), "source_relinks": relinks[-20:]}
+                self._mark_record_downstream_active(record, reason="crop_id_relinked_after_box_order_change")
             record.crop_path = str(crop_path)
+            record.record_id = crop_id
+            record.crop_id = crop_id
             record.status = StageStatus.normalize(record.status)
             if record.status == StageStatus.ERROR and record.step_status(PipelineStep.CROPS) == StageStatus.ERROR:
                 record.status = StageStatus.PENDING
@@ -883,9 +1028,11 @@ class InstancePdfPipelineService:
                 },
             }
             record.sync_status_from_steps()
+            if relinked_from and (record.raw_ocr or record.structured_ocr or record.figure_segmentation or record.normalized):
+                self._write_raw_artifacts(record)
             record.touch()
             out.append(record)
-        self.staging.upsert_many(out)
+        self.staging.upsert_many(out, existing_by_identity={})
         return out
 
     def run_ocr_and_segmentation(
@@ -1454,37 +1601,45 @@ class InstancePdfPipelineService:
         self.staging.upsert_record(record)
         return record
 
-    def update_raw_ocr(self, record_id: str, raw_ocr: str) -> StagingProblemRecord:
+    def update_raw_ocr(self, record_id: str, raw_ocr: str, *, force_review: bool = False) -> StagingProblemRecord:
         record = self.staging.get_record(record_id)
         if record is None:
             raise KeyError(record_id)
         previous_raw_ocr = str(record.raw_ocr or "")
-        record.raw_ocr = str(raw_ocr or "")
+        next_raw_ocr = str(raw_ocr or "")
+        same_text = _canonical_human_review_text(previous_raw_ocr) == _canonical_human_review_text(next_raw_ocr)
+        previous_review = dict(dict(record.trace or {}).get("last_raw_ocr_review") or {})
+        if same_text and previous_review:
+            return record
+        if same_text and not force_review:
+            return record
+        record.raw_ocr = next_raw_ocr
         record.structured_ocr = {}
         record.errors = []
-        record.normalized = {}
+        if not same_text:
+            self._reset_normalization_and_review(record, reason="raw_ocr_changed")
         if record.raw_ocr.strip():
             ocr_status = StageStatus.READY
-            ocr_detail = "OCR crudo revisado"
+            ocr_detail = "OCR crudo revisado" if not same_text else "OCR crudo aceptado por revision humana"
         else:
             ocr_status = StageStatus.PENDING
             ocr_detail = "OCR crudo vacio; pendiente"
+        review_source = "human_raw_ocr_batch_acceptance" if same_text and force_review else "human_raw_ocr_editor"
         record.set_step(
             PipelineStep.OCR,
             ocr_status,
             ocr_detail,
-            source="human_raw_ocr_editor",
+            source=review_source,
             characters=len(record.raw_ocr),
         )
-        record.set_step(PipelineStep.NORMALIZATION, StageStatus.PENDING, "pendiente de preparar revision desde OCR crudo revisado")
-        record.set_step(PipelineStep.REVIEW, StageStatus.PENDING, "pendiente de revision final")
         record.trace = {
             **dict(record.trace or {}),
             "last_raw_ocr_review": {
                 "updated_at": utc_now_text(),
-                "source": "human_raw_ocr_editor",
+                "source": review_source,
                 "characters": len(record.raw_ocr),
                 "structured_items_total": int((record.structured_ocr or {}).get("items_total") or 0),
+                "accepted_without_text_change": bool(same_text and force_review),
             },
         }
         self._mark_record_downstream_active(record, reason="raw_ocr_reviewed_after_source_change")
@@ -1575,6 +1730,7 @@ class InstancePdfPipelineService:
             "segmentos graficos revisados por humano",
             segments_total=len(segments),
         )
+        self._reset_normalization_and_review(record, reason="figure_segments_changed")
         record.trace = {
             **dict(record.trace or {}),
             "last_figure_segment_review": {

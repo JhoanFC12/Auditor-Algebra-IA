@@ -241,8 +241,8 @@ class InstanceFactoryDbPromotionTests(unittest.TestCase):
             )
             conn = FakeConnection()
 
-            with patch("database.connection.DatabaseManager.from_profile", return_value=FakeDb(conn)), patch(
-                "modulos.modulo0_transcriptor.controlador_transcriptor.TranscriptorController",
+            with patch("modulos.instance_factory.db_promotion._database_manager_from_profile", return_value=FakeDb(conn)), patch(
+                "modulos.instance_factory.db_promotion._transcriptor_controller_factory",
                 return_value=FakeController(),
             ):
                 report = promote_staging_records_to_db(store, context, dry_run=False)

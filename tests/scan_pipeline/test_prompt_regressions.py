@@ -13,6 +13,7 @@ from modulos.modulo0_transcriptor.scan_pipeline.prompts import (
     SYSTEM_PROMPT_RAW_OCR,
     build_extract_prompt,
     build_faithful_ocr_prompt,
+    build_faithful_ocr_prompt_compact,
     build_parse_retry_prompt,
     build_prompt_profile_instructions,
     build_structure_prompt,
@@ -48,10 +49,17 @@ class PromptRegressionTests(unittest.TestCase):
         self.assertIn("texto externo visible", profile)
         self.assertIn("SOLO para notacion visible", profile)
         self.assertIn("sphericalangle", profile)
+        self.assertIn("No uses <, \\lt ni \\leq para representar angulos", profile)
         self.assertIn("dfrac", profile)
         self.assertIn("no agregues relaciones", profile)
         self.assertIn("[sin texto OCR visible]", profile)
         self.assertNotIn("[[Imagen", profile)
+
+    def test_compact_ocr_prompt_keeps_geometry_angle_policy(self) -> None:
+        prompt = build_faithful_ocr_prompt_compact(curso="Geometria", tema="Angulos")
+        self.assertIn("\\sphericalangle", prompt)
+        self.assertIn("No uses <, \\lt ni \\leq para representar angulos", prompt)
+        self.assertIn("desigualdad real", prompt)
 
     def test_extract_prompt_mentions_spurious_93_and_ax_plus_b_case(self) -> None:
         prompt = build_extract_prompt(curso="Algebra", tema="Division", start_n=2)

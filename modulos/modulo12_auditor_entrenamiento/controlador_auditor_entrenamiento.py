@@ -196,7 +196,7 @@ class TrainingAuditController:
     SESSION_SUFFIXES = (".session.json", ".json")
     DEFAULT_GOLDEN_ROOT = Path("E:/Github/Auditor-IA/.cache/transcriptor_runs/datasets")
     DEFAULT_OCR_GOLDEN_DIR = DEFAULT_GOLDEN_ROOT / "ocr_golden_live"
-    TRAINED_OCR_ENDPOINT_NAME = "math-ocr-geometry-rules-v4"
+    TRAINED_OCR_ENDPOINT_NAME = "math-ocr-geometry-agent-angle-policy-v1"
     OCR_TRAINING_FIELDS = {
         "General": (Path("E:/Banco de Preguntas"), DEFAULT_GOLDEN_ROOT / "ocr_golden_live"),
         "Geometria": (Path("E:/Banco de Preguntas/2. GEOMETRIA"), DEFAULT_GOLDEN_ROOT / "ocr_geometry_golden_live"),
@@ -212,7 +212,7 @@ class TrainingAuditController:
     DEFAULT_OCR_NORMALIZATION_GOLDEN_DIR = DEFAULT_GOLDEN_ROOT / "ocr_normalization_golden_live"
     DEFAULT_PROBLEM_CROPS_LIVE_DIR = DEFAULT_GOLDEN_ROOT / "problem_crops_live"
     DEFAULT_SEGMENT_LIVE_DIR = DEFAULT_GOLDEN_ROOT / "segment_training_live"
-    TRAINED_OCR_VISION_MODEL = "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-rules-merged-v4"
+    TRAINED_OCR_VISION_MODEL = "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-agent-angle-policy-merged-v1"
     DEFAULT_OPENAI_FORMAT_MODEL = TRAINED_OCR_VISION_MODEL
     DEFAULT_HF_FORMAT_MODEL = TRAINED_OCR_VISION_MODEL
 

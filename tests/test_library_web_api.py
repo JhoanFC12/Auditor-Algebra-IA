@@ -10,9 +10,9 @@ import urllib.error
 import urllib.request
 from dataclasses import asdict
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
-from modulos.instance_factory.library_api import LibraryWebApi, _timeline_stage_from_counts
+from modulos.instance_factory.library_api import LibraryApiError, LibraryWebApi, _timeline_stage_from_counts
 from modulos.instance_factory.library_web_server import LibraryWebRuntime
 from modulos.instance_factory.models import InstancePipelineContext, StagingProblemRecord
 from modulos.instance_factory.staging import InstanceStagingStore
@@ -957,7 +957,7 @@ class LibraryWebApiTests(unittest.TestCase):
                 else:
                     os.environ["PDF_LIBRARY_COVER_ROOT"] = previous_cover_root
 
-    def test_local_timeline_counts_uses_cached_manifests(self) -> None:
+    def test_local_timeline_counts_prefers_staging_manifest_when_work_exists(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             book = {
@@ -994,10 +994,10 @@ class LibraryWebApiTests(unittest.TestCase):
 
             class _GoldenFromManifest:
                 def load_instance_summary(self, _name):
-                    return {"pages_total": 2, "reviewed_pages": 1, "boxes_total": 5}
+                    raise AssertionError("No debe leer paginas si staging ya tiene crops/OCR.")
 
                 def load_instance(self, _name):
-                    raise AssertionError("No debe leer cada pagina si existe manifest.")
+                    raise AssertionError("No debe leer cada pagina si staging ya tiene crops/OCR.")
 
             with patch(
                 "modulos.modulo13_laboratorio_pdf_segmentacion.controlador_laboratorio_pdf.PdfProblemGoldenController",
@@ -1005,13 +1005,47 @@ class LibraryWebApiTests(unittest.TestCase):
             ), patch.object(InstanceStagingStore, "load_records", side_effect=AssertionError("No debe leer cada record si existe manifest.")):
                 counts = LibraryWebApi._local_timeline_counts("demo_db", book, instance)
 
-            self.assertEqual(counts["pages_total"], 2)
-            self.assertEqual(counts["pages_reviewed"], 1)
-            self.assertEqual(counts["boxes_total"], 5)
             self.assertEqual(counts["records_total"], 5)
             self.assertEqual(counts["ocr_done"], 4)
             self.assertEqual(counts["segments_done"], 3)
             self.assertEqual(counts["errors"], 1)
+
+    def test_local_timeline_counts_reads_golden_when_staging_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            book = {
+                "id": 1,
+                "codigo": "ALG01",
+                "titulo": "Algebra",
+                "workspace_dir": str(root),
+                "pdf_path": str(root / "book.pdf"),
+            }
+            instance = {"id": 11, "libro_id": 1, "tipo": "S01", "total_esperado": 10}
+            context = InstancePipelineContext.from_library_instance(book, instance, db_name="demo_db")
+            staging_root = context.staging_root()
+            staging_root.mkdir(parents=True, exist_ok=True)
+            (staging_root / "manifest.json").write_text(
+                json.dumps({"schema_version": "pdf_factory_staging_v1", "summary": {"records_total": 0}}),
+                encoding="utf-8",
+            )
+
+            class _GoldenFromManifest:
+                def load_instance_summary(self, _name):
+                    return {"pages_total": 2, "reviewed_pages": 1, "boxes_total": 5}
+
+                def load_instance(self, _name):
+                    raise AssertionError("No debe leer cada pagina si existe resumen golden.")
+
+            with patch(
+                "modulos.modulo13_laboratorio_pdf_segmentacion.controlador_laboratorio_pdf.PdfProblemGoldenController",
+                return_value=_GoldenFromManifest(),
+            ):
+                counts = LibraryWebApi._local_timeline_counts("demo_db", book, instance)
+
+            self.assertEqual(counts["pages_total"], 2)
+            self.assertEqual(counts["pages_reviewed"], 1)
+            self.assertEqual(counts["boxes_total"], 5)
+            self.assertEqual(counts["records_total"], 0)
 
     def test_timeline_stage_skips_local_scan_when_instance_is_already_in_db(self) -> None:
         controller = _FakeController()
@@ -1048,7 +1082,7 @@ class LibraryWebApiTests(unittest.TestCase):
             context = InstancePipelineContext.from_library_instance(book, instance, db_name="demo_db")
             context.staging_root().mkdir(parents=True, exist_ok=True)
             (context.staging_root() / "manifest.json").write_text(
-                json.dumps({"schema_version": "pdf_factory_staging_v1", "summary": {"records_total": 5, "ocr_done": 4}}),
+                json.dumps({"schema_version": "pdf_factory_staging_v1", "summary": {"records_total": 0}}),
                 encoding="utf-8",
             )
 
@@ -1075,7 +1109,7 @@ class LibraryWebApiTests(unittest.TestCase):
 
         self.assertEqual(golden.calls, 1)
         self.assertEqual(second["pages_total"], 2)
-        self.assertEqual(second["records_total"], 5)
+        self.assertEqual(second["records_total"], 0)
 
     def test_local_timeline_counts_reuses_golden_controller_across_instances(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1388,6 +1422,16 @@ class LibraryWebApiTests(unittest.TestCase):
             finally:
                 runtime.stop()
 
+    def test_library_runtime_serves_legacy_bootstrap_route(self) -> None:
+        runtime = LibraryWebRuntime(controller=_FakeController())
+        try:
+            base = runtime.start()
+            payload = _get_json(base, "api/library/bootstrap?db_name=demo_db")
+            self.assertEqual(payload["schema_version"], "library_web_snapshot_v1")
+            self.assertEqual(payload["selected_db"], "demo_db")
+        finally:
+            runtime.stop()
+
     def test_library_runtime_proxies_factory_api_routes_to_open_factory(self) -> None:
         class ProxyFactory:
             def __init__(self) -> None:
@@ -1410,6 +1454,15 @@ class LibraryWebApiTests(unittest.TestCase):
             self.assertEqual(payload["path"], "/api/ocr/raw")
             self.assertEqual(proxy.calls[0][0:2], ("POST", "/api/ocr/raw"))
             self.assertEqual(proxy.calls[0][3]["record_id"], "crop_001")
+            normalizer_job = _post_json(base, "api/normalize/ai/jobs/start", {"record_ids": ["crop_001"]})
+            self.assertEqual(normalizer_job["schema_version"], "proxied_factory_v1")
+            self.assertEqual(normalizer_job["path"], "/api/normalize/ai/jobs/start")
+            self.assertEqual(proxy.calls[1][0:2], ("POST", "/api/normalize/ai/jobs/start"))
+            normalizer_status = _get_json(base, "api/normalize/ai/jobs/status?job_id=test-job")
+            self.assertEqual(normalizer_status["schema_version"], "proxied_factory_v1")
+            self.assertEqual(normalizer_status["path"], "/api/normalize/ai/jobs/status")
+            self.assertEqual(proxy.calls[2][0:2], ("GET", "/api/normalize/ai/jobs/status"))
+            self.assertEqual(proxy.calls[2][2]["job_id"], ["test-job"])
         finally:
             runtime.stop()
 
@@ -1461,6 +1514,30 @@ class LibraryWebApiTests(unittest.TestCase):
             self.assertEqual(proxies[0].calls[0][3]["raw_ocr"], "texto")
         finally:
             runtime.stop()
+
+    def test_library_runtime_serves_shell_when_controller_is_unavailable(self) -> None:
+        dependency_error = LibraryApiError(
+            "Biblioteca no puede conectar con la base local: falta instalar psycopg2 en este entorno de Python.",
+            status=503,
+            code="library_dependency_missing",
+        )
+        with patch.object(LibraryWebApi, "controller", new_callable=PropertyMock) as controller_property:
+            controller_property.side_effect = dependency_error
+            runtime = LibraryWebRuntime(controller=None)
+            try:
+                base = runtime.start()
+                with urllib.request.urlopen(base, timeout=5) as response:
+                    html = response.read().decode("utf-8")
+
+                self.assertIn("Biblioteca", html)
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    urllib.request.urlopen(base + "api/library/bootstrap", timeout=5)
+
+                self.assertEqual(raised.exception.code, 503)
+                payload = json.loads(raised.exception.read().decode("utf-8"))
+                self.assertEqual(payload["code"], "library_dependency_missing")
+            finally:
+                runtime.stop()
 
 
 if __name__ == "__main__":

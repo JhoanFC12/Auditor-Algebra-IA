@@ -175,6 +175,8 @@ class FactoryWebRuntime:
         service: Any | None = None,
         library_api: LibraryWebApi | None = None,
         endpoint_manager: HfEndpointManager | None = None,
+        host: str = "127.0.0.1",
+        port: int = 0,
     ) -> None:
         load_factory_runtime_env()
         self.context = context
@@ -198,9 +200,13 @@ class FactoryWebRuntime:
         self._endpoint_lifecycle_lock = threading.RLock()
         self._ocr_jobs: dict[str, dict[str, Any]] = {}
         self._active_ocr_job_id = ""
+        self._normalizer_jobs: dict[str, dict[str, Any]] = {}
+        self._active_normalizer_job_id = ""
         self._pdf_info_cache: dict[str, Any] = {}
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+        self.host = str(host or "127.0.0.1").strip() or "127.0.0.1"
+        self.port = max(0, int(port or 0))
         self.url = ""
 
     def start(self) -> str:
@@ -222,9 +228,10 @@ class FactoryWebRuntime:
             def log_message(self, _format: str, *_args: Any) -> None:
                 return
 
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server = ThreadingHTTPServer((self.host, self.port), Handler)
         host, port = self._server.server_address
-        self.url = f"http://{host}:{port}/"
+        display_host = "127.0.0.1" if str(host) in {"0.0.0.0", "::"} else str(host)
+        self.url = f"http://{display_host}:{port}/"
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         return self.url
@@ -288,6 +295,16 @@ class FactoryWebRuntime:
             return self._ocr_job_status(self._first(query, "job_id", ""), since_update=since_update)
         if method == "POST" and path == "/api/ocr/jobs/start":
             return self._start_ocr_job(payload)
+        if method == "GET" and path == "/api/normalize/ai/jobs/status":
+            since_update = self._bounded_int(
+                self._first(query, "since_update", "0") or "0",
+                "since_update",
+                minimum=0,
+                maximum=1_000_000_000,
+            )
+            return self._normalizer_job_status(self._first(query, "job_id", ""), since_update=since_update)
+        if method == "POST" and path == "/api/normalize/ai/jobs/start":
+            return self._start_normalizer_job(payload)
         with self._lock:
             if path.startswith("/api/library/"):
                 return self.library_api.dispatch(method, path, query, payload)
@@ -441,13 +458,14 @@ class FactoryWebRuntime:
                     include_summary = self._bool(payload.get("include_summary"), default=True)
                     invalidated_count = int(getattr(self.service, "_last_page_boxes_invalidated_count", 0) or 0)
                     invalidated_records = list(getattr(self.service, "_last_page_boxes_invalidated_records", []) or [])
+                    updated_records = list(getattr(self.service, "_last_page_boxes_updated_records", []) or invalidated_records)
                     response = {
                         "schema_version": "pdf_factory_web_page_saved_v1",
                         "page": self._page_to_web(page),
                         "invalidated_records": invalidated_count,
                     }
-                    if invalidated_records:
-                        response["updated_records"] = [self._record_to_web(record) for record in invalidated_records]
+                    if updated_records:
+                        response["updated_records"] = [self._record_to_web(record) for record in updated_records]
                     if include_summary:
                         records = self.service.staging.load_records()
                         pages = self.service.load_pages()
@@ -544,9 +562,10 @@ class FactoryWebRuntime:
                     )
                 return self._snapshot()
             if method == "POST" and path == "/api/ocr/raw":
-                updated = self.service.update_raw_ocr(
+                updated = self._update_raw_ocr(
                     self._required_str(payload, "record_id"),
                     str(payload.get("raw_ocr") or ""),
+                    force_review=self._bool(payload.get("force_review"), default=False),
                 )
                 if self._bool(payload.get("compact"), default=False):
                     return self._record_saved_response(
@@ -612,6 +631,14 @@ class FactoryWebRuntime:
                     "snapshot": self._snapshot(),
                 }
             raise FileNotFoundError(f"Ruta API no encontrada: {method} {path}")
+
+    def _update_raw_ocr(self, record_id: str, raw_ocr: str, *, force_review: bool = False) -> StagingProblemRecord:
+        try:
+            return self.service.update_raw_ocr(record_id, raw_ocr, force_review=force_review)
+        except TypeError as exc:
+            if "force_review" not in str(exc):
+                raise
+            return self.service.update_raw_ocr(record_id, raw_ocr)
 
     def _start_ocr_job(self, payload: dict[str, Any]) -> dict[str, Any]:
         record_ids = self._record_ids_from_payload(payload)
@@ -755,6 +782,199 @@ class FactoryWebRuntime:
             })
             job["record_update_seq"] = seq
             job["record_updates"] = updates[-200:]
+
+    def _start_normalizer_job(self, payload: dict[str, Any]) -> dict[str, Any]:
+        record_ids = self._record_ids_from_payload(payload)
+        explicit_record_id = str(payload.get("record_id") or "").strip()
+        if not record_ids and explicit_record_id:
+            record_ids = [explicit_record_id]
+        record_ids = [item for item in dict.fromkeys(record_ids) if item]
+        if not record_ids:
+            raise WebApiError("record_ids requerido para iniciar cola de normalizador IA.", status=400, code="missing_record_ids")
+        with self._job_lock:
+            job_id = uuid.uuid4().hex
+            job = {
+                "schema_version": "pdf_factory_normalizer_job_v1",
+                "job_id": job_id,
+                "status": "queued",
+                "record_ids": record_ids,
+                "total": len(record_ids),
+                "current": 0,
+                "ok": 0,
+                "failed": 0,
+                "active_id": record_ids[0] if record_ids else "",
+                "active_position": 0,
+                "progress_label": f"0/{len(record_ids)}",
+                "message": f"Cola normalizador IA preparada 0/{len(record_ids)}",
+                "errors": [],
+                "record_update_seq": 0,
+                "record_updates": [],
+            }
+            self._normalizer_jobs[job_id] = job
+            self._active_normalizer_job_id = job_id
+            thread = threading.Thread(target=self._run_normalizer_job, args=(job_id,), daemon=True)
+            job["thread_name"] = thread.name
+            response = self._public_normalizer_job(job)
+            thread.start()
+            return response
+
+    def _normalizer_job_status(self, job_id: str = "", *, since_update: int = 0) -> dict[str, Any]:
+        with self._job_lock:
+            selected = str(job_id or self._current_normalizer_job_id() or "").strip()
+            job = self._normalizer_jobs.get(selected) if selected else None
+            if not job:
+                return {
+                    "schema_version": "pdf_factory_normalizer_job_v1",
+                    "job_id": selected,
+                    "status": "idle",
+                    "running": False,
+                    "total": 0,
+                    "current": 0,
+                    "ok": 0,
+                    "failed": 0,
+                    "errors": [],
+                    "record_update_seq": 0,
+                    "record_updates": [],
+                }
+            return self._public_normalizer_job(job, since_update=since_update)
+
+    def _current_normalizer_job_id(self) -> str:
+        active_id = str(self._active_normalizer_job_id or "").strip()
+        active = self._normalizer_jobs.get(active_id)
+        if active and self._normalizer_job_is_running(active):
+            return active_id
+        for job_id in reversed(list(self._normalizer_jobs.keys())):
+            job = self._normalizer_jobs.get(job_id)
+            if job and self._normalizer_job_is_running(job):
+                return job_id
+        return active_id
+
+    @staticmethod
+    def _normalizer_job_is_running(job: dict[str, Any]) -> bool:
+        return str(job.get("status") or "") in {"queued", "running"}
+
+    def _active_normalizer_job_count(self) -> int:
+        return sum(1 for job in self._normalizer_jobs.values() if self._normalizer_job_is_running(job))
+
+    def _public_normalizer_job(self, job: dict[str, Any], *, since_update: int = 0) -> dict[str, Any]:
+        payload = dict(job)
+        payload.pop("thread_name", None)
+        record_updates = list(payload.pop("record_updates", []) or [])
+        record_update_seq = int(payload.get("record_update_seq") or 0)
+        if since_update > 0:
+            record_updates = [
+                update for update in record_updates
+                if int(update.get("seq") or 0) > since_update
+            ]
+        payload["record_update_seq"] = record_update_seq
+        payload["record_updates"] = record_updates
+        payload["running"] = self._normalizer_job_is_running(payload)
+        payload["active_jobs"] = self._active_normalizer_job_count()
+        payload["phase"] = "normalizer"
+        payload["phase_label"] = "Normalizador IA"
+        total = int(payload.get("total") or 0)
+        active_position = int(payload.get("active_position") or 0)
+        if total and active_position and not payload.get("progress_label"):
+            payload["progress_label"] = f"{active_position}/{total}"
+        return payload
+
+    def _update_normalizer_job(self, job_id: str, **updates: Any) -> None:
+        with self._job_lock:
+            job = self._normalizer_jobs.get(job_id)
+            if not job:
+                return
+            job.update(updates)
+
+    def _append_normalizer_record_update(self, job_id: str, record_id: str) -> None:
+        try:
+            record = self.service.staging.get_record(str(record_id or ""))
+            if record is None:
+                return
+            record_payload = self._record_to_web(record)
+        except Exception:
+            return
+        with self._job_lock:
+            job = self._normalizer_jobs.get(job_id)
+            if not job:
+                return
+            seq = int(job.get("record_update_seq") or 0) + 1
+            updates = list(job.get("record_updates") or [])
+            updates.append({
+                "seq": seq,
+                "record_id": str(record_id or ""),
+                "record": record_payload,
+            })
+            job["record_update_seq"] = seq
+            job["record_updates"] = updates[-200:]
+
+    def _run_normalizer_job(self, job_id: str) -> None:
+        with self._job_lock:
+            job = self._normalizer_jobs.get(job_id)
+            if not job:
+                return
+            record_ids = list(job.get("record_ids") or [])
+        total = len(record_ids)
+        self._update_normalizer_job(
+            job_id,
+            status="running",
+            current=0,
+            active_position=0,
+            progress_label=f"0/{total}",
+            message=f"Normalizando con IA 0/{total}",
+        )
+        for index, record_id in enumerate(record_ids):
+            position = index + 1
+            self._update_normalizer_job(
+                job_id,
+                current=index,
+                active_position=position,
+                active_id=record_id,
+                progress_label=f"{position}/{total}",
+                active_event={
+                    "phase": "normalizer",
+                    "record_id": record_id,
+                    "position": position,
+                    "total": total,
+                    "progress_label": f"{position}/{total}",
+                },
+                message=f"Normalizador IA {position}/{total}",
+            )
+            try:
+                self.service.normalize_with_ai(str(record_id))
+                self._invalidate_response_caches()
+                self._append_normalizer_record_update(job_id, str(record_id))
+                with self._job_lock:
+                    job = self._normalizer_jobs.get(job_id) or {}
+                    job["ok"] = int(job.get("ok") or 0) + 1
+                    job["current"] = position
+                    job["active_position"] = position
+                    job["progress_label"] = f"{position}/{total}"
+                    job["message"] = f"Borrador IA guardado {position}/{total}"
+            except Exception as exc:
+                message = str(exc).strip() or "error desconocido"
+                if isinstance(exc, RuntimeError):
+                    message = f"Normalizador IA: {message}"
+                with self._job_lock:
+                    job = self._normalizer_jobs.get(job_id) or {}
+                    errors = list(job.get("errors") or [])
+                    errors.append({"record_id": record_id, "message": message})
+                    job["errors"] = errors[-50:]
+                    job["failed"] = int(job.get("failed") or 0) + 1
+                    job["current"] = position
+                    job["active_position"] = position
+                    job["progress_label"] = f"{position}/{total}"
+                    job["message"] = f"Error normalizando {position}/{total}"
+        with self._job_lock:
+            job = self._normalizer_jobs.get(job_id)
+            if job:
+                failed = int(job.get("failed") or 0)
+                job["status"] = "error" if failed else "done"
+                job["running"] = False
+                job["current"] = total
+                job["active_position"] = total
+                job["progress_label"] = f"{total}/{total}" if total else "0/0"
+                job["message"] = f"Cola normalizador IA terminada con {failed} error(es)." if failed else f"Normalizador IA terminado para {total} problema(s)."
+        self._invalidate_response_caches()
 
     def _begin_endpoint_job(self, *, kind: str, job_id: str, label: str = "") -> str:
         begin_job = getattr(self.endpoint_manager, "begin_job", None)
@@ -1517,10 +1737,14 @@ class FactoryWebRuntime:
         payload = record.to_dict()
         crop_path = Path(record.crop_path)
         downstream = dict(dict(record.audit or {}).get("downstream_state") or {})
+        raw_ocr_review = dict(dict(record.trace or {}).get("last_raw_ocr_review") or {})
         crop_exists = bool(record.crop_path and self._file_stat_signature(crop_path, file_signature_cache) is not None)
         figure = dict(record.figure_segmentation or {})
         structured = dict(record.structured_ocr or {})
         payload["training_examples_total"] = len(record.training_examples or [])
+        payload["raw_ocr_human_reviewed"] = bool(raw_ocr_review)
+        payload["raw_ocr_review_source"] = str(raw_ocr_review.get("source") or "")
+        payload["raw_ocr_reviewed_at"] = str(raw_ocr_review.get("updated_at") or "")
         payload["structured_ocr"] = {
             "items_total": len(list(structured.get("items") or [])),
             "status": str(structured.get("status") or ""),
@@ -1927,12 +2151,14 @@ class FactoryWebRuntime:
             "/api/promotion/upload": {"POST"},
             "/api/endpoint/ocr/status": {"GET"},
             "/api/ocr/jobs/status": {"GET"},
+            "/api/normalize/ai/jobs/status": {"GET"},
             "/api/training/status": {"GET"},
             "/api/training/normalizer/status": {"GET"},
             "/api/training/cycle/reset": {"POST"},
             "/api/endpoint/ocr/resume": {"POST"},
             "/api/endpoint/ocr/scale-to-zero": {"POST"},
             "/api/ocr/jobs/start": {"POST"},
+            "/api/normalize/ai/jobs/start": {"POST"},
             "/api/pages/detect": {"POST"},
             "/api/pages/boxes": {"POST"},
             "/api/pages/delete": {"POST"},

@@ -70,6 +70,15 @@ RAW_OCR_REGRESSION_GUARDS = (
     "- No conviertas una lista inicial de alternativas en un problema nuevo; es continuacion del problema anterior hasta que aparezca un encabezado real como <n.> o PROBLEMA n.\n"
 )
 
+RAW_OCR_GEOMETRY_ANGLE_POLICY = (
+    "POLITICA OCR GEOMETRIA - ANGULOS:\n"
+    "- En contexto de geometria, si el texto visible muestra el simbolo impreso de angulo junto a vertices, usa $\\sphericalangle ABC$.\n"
+    "- Para medida de angulo usa $m\\sphericalangle ABC$.\n"
+    "- No uses <, \\lt ni \\leq para representar angulos.\n"
+    "- Usa < o \\leq solo cuando la imagen muestre una desigualdad real, por ejemplo $x<5$ o $x\\leq 5$.\n"
+    "- Si dudas entre angulo e inecuacion, marca [ilegible] antes de convertirlo en desigualdad.\n"
+)
+
 
 STRUCTURED_REGRESSION_GUARDS = (
     "REGLAS DE NUMERACION Y CONTINUIDAD:\n"
@@ -195,6 +204,7 @@ def build_prompt_profile_instructions(
                 "- Si el texto visible muestra grados, usa $^\\circ$.\n"
                 "- Estas reglas no autorizan completar datos: no agregues relaciones, medidas, letras o nombres que no esten impresos como texto visible.\n"
                 "- No describas el dibujo ni uses informacion interna del dibujo para completar o ampliar el enunciado; si solo hay dibujo sin texto externo, usa [CONT.] [sin texto OCR visible].\n"
+                f"{RAW_OCR_GEOMETRY_ANGLE_POLICY}"
             )
         return base
     if profile == "geometria":
@@ -312,6 +322,7 @@ def build_faithful_ocr_prompt_compact(
         "Si algo no se lee con seguridad, marca [ilegible] en vez de inferir.\n"
         "No JSON, no markdown, no explicaciones, no eco del prompt.\n"
         "No inventes, no resuelvas, no simplifiques.\n"
+        f"{build_prompt_profile_instructions(curso=curso, tema=tema, book_code=book_code, instance_type=instance_type, stage='ocr')}"
         "Salida final: solo la transcripcion completa."
     )
 

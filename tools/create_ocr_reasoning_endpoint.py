@@ -1,9 +1,36 @@
 from __future__ import annotations
 
 import argparse
+import os
+from pathlib import Path
 
 from huggingface_hub import HfApi, constants, get_token
 from huggingface_hub.utils import get_session, hf_raise_for_status
+
+
+def _read_env_file_token(path: Path) -> str:
+    if not path.exists():
+        return ""
+    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key.strip() in {"HF_TOKEN", "HUGGINGFACEHUB_API_TOKEN"}:
+            return value.strip().strip('"').strip("'")
+    return ""
+
+
+def _resolve_token(env_file: str = "") -> str:
+    if env_file:
+        token = _read_env_file_token(Path(env_file).expanduser().resolve())
+        if token:
+            return token
+    for name in ("HF_TOKEN", "HUGGINGFACEHUB_API_TOKEN"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return (get_token() or "").strip()
 
 
 def main() -> int:
@@ -11,8 +38,9 @@ def main() -> int:
     parser.add_argument("--name", default="math-ocr-lora-v1")
     parser.add_argument("--repository", default="Jhoan12/math-ocr-qwen2.5-vl-3b-merged-v1")
     parser.add_argument("--timeout", type=int, default=180, help="Segundos de inactividad antes de apagar la GPU.")
+    parser.add_argument("--env-file", default=".env.local")
     args = parser.parse_args()
-    token = get_token()
+    token = _resolve_token(args.env_file)
     if not token:
         raise RuntimeError("No se encontro token Hugging Face.")
     api = HfApi(token=token)

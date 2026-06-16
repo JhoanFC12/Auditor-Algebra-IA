@@ -17,9 +17,44 @@ def _load_jsonl(path: Path, *, limit: int = 0) -> list[dict[str, Any]]:
     return rows[:limit] if limit and limit > 0 else rows
 
 
-def inspect_dataset(dataset_dir: Path, *, max_train_samples: int = 0, max_eval_samples: int = 0) -> dict[str, Any]:
+def _oversample_rows(rows: list[dict[str, Any]], *, error_type: str = "", factor: int = 1) -> list[dict[str, Any]]:
+    selected_error = str(error_type or "").strip()
+    repeat_factor = max(1, int(factor or 1))
+    if not selected_error or repeat_factor <= 1:
+        return list(rows)
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        out.append(row)
+        errors = row.get("error_types") if isinstance(row.get("error_types"), list) else []
+        if selected_error in {str(item) for item in errors}:
+            out.extend(row for _ in range(repeat_factor - 1))
+    return out
+
+
+def inspect_dataset(
+    dataset_dir: Path,
+    *,
+    max_train_samples: int = 0,
+    max_eval_samples: int = 0,
+    oversample_error_type: str = "",
+    oversample_factor: int = 1,
+) -> dict[str, Any]:
     dataset_dir = Path(dataset_dir).expanduser().resolve()
-    train_rows = _load_jsonl(dataset_dir / "train.jsonl", limit=max_train_samples)
+    raw_train_rows = _load_jsonl(dataset_dir / "train.jsonl")
+    hard_error_rows = [
+        row
+        for row in raw_train_rows
+        if str(oversample_error_type or "").strip()
+        and str(oversample_error_type or "").strip()
+        in {str(item) for item in row.get("error_types", []) if item is not None}
+    ]
+    train_rows = _oversample_rows(
+        raw_train_rows,
+        error_type=oversample_error_type,
+        factor=oversample_factor,
+    )
+    if max_train_samples and max_train_samples > 0:
+        train_rows = train_rows[:max_train_samples]
     validation_rows = _load_jsonl(dataset_dir / "validation.jsonl", limit=max_eval_samples)
     test_rows = _load_jsonl(dataset_dir / "test.jsonl")
     sample = train_rows[0] if train_rows else {}
@@ -32,6 +67,8 @@ def inspect_dataset(dataset_dir: Path, *, max_train_samples: int = 0, max_eval_s
     return {
         "dataset_dir": str(dataset_dir),
         "train": len(train_rows),
+        "train_base": len(raw_train_rows),
+        "train_hard_error_rows": len(hard_error_rows),
         "validation": len(validation_rows),
         "test": len(test_rows),
         "sample_image": image_info,
@@ -64,7 +101,16 @@ def _import_training_stack():
 
 
 class LocalOcrDataset:
-    def __init__(self, dataset_cls: type, root: Path, split: str, *, limit: int = 0) -> None:
+    def __init__(
+        self,
+        dataset_cls: type,
+        root: Path,
+        split: str,
+        *,
+        limit: int = 0,
+        oversample_error_type: str = "",
+        oversample_factor: int = 1,
+    ) -> None:
         class _Dataset(dataset_cls):
             def __init__(self, rows: list[dict[str, Any]]) -> None:
                 self.rows = rows
@@ -75,7 +121,12 @@ class LocalOcrDataset:
             def __getitem__(self, index: int) -> dict[str, Any]:
                 return self.rows[index]
 
-        self.dataset = _Dataset(_load_jsonl(root / f"{split}.jsonl", limit=limit))
+        rows = _load_jsonl(root / f"{split}.jsonl")
+        if split == "train":
+            rows = _oversample_rows(rows, error_type=oversample_error_type, factor=oversample_factor)
+        if limit and limit > 0:
+            rows = rows[:limit]
+        self.dataset = _Dataset(rows)
 
 
 def train(args: argparse.Namespace) -> dict[str, Any]:
@@ -98,7 +149,14 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             "Usa --allow-cpu solo para pruebas muy pequenas."
         )
 
-    train_dataset = LocalOcrDataset(Dataset, dataset_dir, "train", limit=args.max_train_samples).dataset
+    train_dataset = LocalOcrDataset(
+        Dataset,
+        dataset_dir,
+        "train",
+        limit=args.max_train_samples,
+        oversample_error_type=args.oversample_error_type,
+        oversample_factor=args.oversample_factor,
+    ).dataset
     eval_dataset = LocalOcrDataset(Dataset, dataset_dir, "validation", limit=args.max_eval_samples).dataset
     if len(train_dataset) == 0:
         raise ValueError("El dataset no tiene muestras train.")
@@ -201,6 +259,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "learning_rate": args.learning_rate,
         "batch": args.batch,
         "grad_accum": args.grad_accum,
+        "oversample_error_type": args.oversample_error_type,
+        "oversample_factor": args.oversample_factor,
         "cuda": cuda_available,
         "dtype": "bf16" if use_bf16 else ("fp16" if use_fp16 else "fp32"),
     }
@@ -227,6 +287,8 @@ def main() -> int:
     parser.add_argument("--lora-rank", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument("--lora-dropout", type=float, default=0.05)
+    parser.add_argument("--oversample-error-type", default="", help="Repite en train las filas que tengan este error_type.")
+    parser.add_argument("--oversample-factor", type=int, default=1, help="Factor de repeticion para --oversample-error-type.")
     parser.add_argument("--logging-steps", type=int, default=2)
     parser.add_argument("--dry-run", action="store_true", help="Solo inspecciona dataset y GPU; no descarga modelo.")
     parser.add_argument("--allow-cpu", action="store_true")
@@ -236,7 +298,13 @@ def main() -> int:
         Path(args.dataset_dir),
         max_train_samples=max(0, int(args.max_train_samples or 0)),
         max_eval_samples=max(0, int(args.max_eval_samples or 0)),
+        oversample_error_type=args.oversample_error_type,
+        oversample_factor=args.oversample_factor,
     )
+    summary["oversample"] = {
+        "error_type": str(args.oversample_error_type or ""),
+        "factor": max(1, int(args.oversample_factor or 1)),
+    }
     try:
         import torch
 

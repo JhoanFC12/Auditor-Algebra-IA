@@ -82,8 +82,10 @@ const state = {
   selectedPageRecordId: "",
   syncDetectedPages: false,
   selectedRecordId: "",
+  selectedReviewBatchIds: new Set(),
   ocrQueueIds: new Set(),
   ocrJobId: "",
+  normalizerJobId: "",
   selectedOcrIndex: 0,
   boxes: [],
   boxMode: "select",
@@ -107,6 +109,7 @@ const state = {
   ocrEndpoint: null,
   ocrEndpointLoading: false,
   ocrJobPolling: false,
+  normalizerJobPolling: false,
   trainingCycle: null,
   trainingCycleFetchedAt: 0,
   normalizerTraining: null,
@@ -136,6 +139,7 @@ const LIBRARY_BOOKS_LIMIT_STEP = 60;
 const LIBRARY_INSTANCES_INITIAL_LIMIT = 40;
 const LIBRARY_INSTANCES_LIMIT_STEP = 40;
 const LIBRARY_SEARCH_DEBOUNCE_MS = 180;
+const PROJECT_ROADMAP_PATH = "E:\\Github\\Auditor-IA\\docs\\plan_maestro_app_aprendizaje_adaptativo.md";
 const APP_VERSION_POLL_MS = 15000;
 const APP_VERSION_HIDDEN_POLL_MS = 60000;
 const APP_VERSION_RESTART_POLL_MS = 30000;
@@ -492,6 +496,7 @@ async function refresh(message = "") {
   refreshNormalizerTrainingStatusLater({ silent: true, renderNotice: true });
   setStatus(message || "Listo para trabajar.");
   resumeOcrJobIfRunning({ silent: true });
+  resumeNormalizerJobIfRunning({ silent: true });
 }
 
 function render() {
@@ -839,8 +844,10 @@ function persistFactoryUiState() {
       selectedPageRecordId: state.selectedPageRecordId,
       syncDetectedPages: Boolean(state.syncDetectedPages),
       selectedRecordId: state.selectedRecordId,
+      selectedReviewBatchIds: [...state.selectedReviewBatchIds].sort(),
       ocrQueueIds: [...state.ocrQueueIds].sort(),
       ocrJobId: state.ocrJobId,
+      normalizerJobId: state.normalizerJobId,
       selectedOcrIndex: state.selectedOcrIndex,
       savedAt: new Date().toISOString(),
     }));
@@ -856,7 +863,13 @@ function restoreFactoryUiState({ preserveCurrentStage = false } = {}) {
   const validRecordIds = new Set(records.map((record) => String(record.record_id || "")));
   const persistedQueueIds = Array.isArray(persisted.ocrQueueIds) ? persisted.ocrQueueIds : [];
   state.ocrQueueIds = new Set(persistedQueueIds.map((id) => String(id || "")).filter((id) => validRecordIds.has(id)));
+  const reviewRecordIds = new Set(reviewRecords(records).map((record) => String(record.record_id || "")));
+  const persistedReviewBatchIds = Array.isArray(persisted.selectedReviewBatchIds) ? persisted.selectedReviewBatchIds : [];
+  state.selectedReviewBatchIds = new Set(
+    persistedReviewBatchIds.map((id) => String(id || "")).filter((id) => reviewRecordIds.has(id)),
+  );
   state.ocrJobId = String(persisted.ocrJobId || state.ocrJobId || "").trim();
+  state.normalizerJobId = String(persisted.normalizerJobId || state.normalizerJobId || "").trim();
   const detectedPages = detectedPageNumbers(pages);
   const persistedPages = sortedPageNumbers(persisted.selectedPages || []).filter((page) => !pageCount || page <= pageCount);
   const legacyDefaultPageOne = persistedPages.length === 1
@@ -1513,6 +1526,9 @@ function renderLibraryFilters() {
         <button class="filter-chip ${state.library.screen === "concepts" ? "active" : ""}" data-library-screen="concepts" type="button">
           <span>Conceptos</span><strong>CON</strong>
         </button>
+        <button class="filter-chip ${state.library.screen === "roadmap" ? "active" : ""}" data-library-screen="roadmap" type="button">
+          <span>Ruta</span><strong>MAP</strong>
+        </button>
       </div>
       <div class="filter-stack" aria-label="Filtros por estado">
         ${[
@@ -1536,8 +1552,136 @@ function renderLibraryFilters() {
 function renderLibraryStage() {
   if (state.library.screen === "similarity") return renderLibrarySimilarityStage();
   if (state.library.screen === "concepts") return renderLibraryConceptsStage();
+  if (state.library.screen === "roadmap") return renderLibraryRoadmapStage();
   if (state.library.screen === "book") return renderLibraryBookStage();
   return renderLibraryBooksStage();
+}
+
+function roadmapStages() {
+  return [
+    {
+      number: "0",
+      title: "Fabrica PDF estable",
+      status: "en curso",
+      body: "Paginas, boxes, crops, OCR y graficos sin perder trazabilidad.",
+      focus: "Estabilidad y velocidad",
+    },
+    {
+      number: "1",
+      title: "Bancos de entrenamiento",
+      status: "activo",
+      body: "Correcciones humanas para detector, OCR, graficos y normalizador.",
+      focus: "500 muestras por ciclo",
+    },
+    {
+      number: "2",
+      title: "BD final",
+      status: "en curso",
+      body: "Problemas revisados con imagenes canonicas, origen y compatibilidad con Modulo 7.",
+      focus: "Trazabilidad",
+    },
+    {
+      number: "3",
+      title: "Perfil semantico V1",
+      status: "iniciado",
+      body: "Descriptor de enunciado, grafico, solucion, dificultad y texto para embeddings.",
+      focus: "Datos revisables",
+    },
+    {
+      number: "4",
+      title: "Similitud revisable",
+      status: "iniciado",
+      body: "Relaciona problemas por conceptos, grafico, solucion, dificultad y estructura.",
+      focus: "Top-k revisable",
+    },
+    {
+      number: "5",
+      title: "Catalogo de conceptos",
+      status: "iniciado",
+      body: "Conceptos, propiedades, tecnicas y enlaces problema-concepto con revision humana.",
+      focus: "Grafo pedagogico",
+    },
+    {
+      number: "6",
+      title: "Diagnostico alumno",
+      status: "futuro",
+      body: "Examen de entrada y lectura de respuestas escritas para detectar debilidades.",
+      focus: "Esperar BD semantica",
+    },
+    {
+      number: "7",
+      title: "App alumno",
+      status: "futuro",
+      body: "Plan adaptativo, practicas recomendadas y evaluaciones constantes.",
+      focus: "Despues del MVP interno",
+    },
+  ];
+}
+
+function roadmapStatusClass(status) {
+  const key = String(status || "").toLowerCase();
+  if (key.includes("activo")) return "roadmap-status-active";
+  if (key.includes("curso") || key.includes("iniciado")) return "roadmap-status-current";
+  return "roadmap-status-future";
+}
+
+function renderRoadmapCard(stage, index) {
+  return `
+    <article class="roadmap-card ${roadmapStatusClass(stage.status)}">
+      <div class="roadmap-card-top">
+        <span class="roadmap-node">${escapeHtml(stage.number)}</span>
+        <span class="status-pill">${escapeHtml(stage.status)}</span>
+      </div>
+      <h3>${escapeHtml(stage.title)}</h3>
+      <p>${escapeHtml(stage.body)}</p>
+      <div class="roadmap-focus">
+        <strong>Foco</strong>
+        <span>${escapeHtml(stage.focus)}</span>
+      </div>
+      ${index < roadmapStages().length - 1 ? `<span class="roadmap-link" aria-hidden="true"></span>` : ""}
+    </article>
+  `;
+}
+
+function renderLibraryRoadmapStage() {
+  const stages = roadmapStages();
+  const ideas = [
+    "Problemas limpios antes de IA adaptativa",
+    "Conceptos revisados por humano",
+    "Geometria necesita grafico y solucion",
+    "Similitud hibrida por curso",
+    "Practicas docentes antes de alumnos",
+  ];
+  return `
+    <div class="stage-header library-header roadmap-hero">
+      <div>
+        <span class="section-label">Plan maestro</span>
+        <h2>Ruta del proyecto</h2>
+        <p class="muted">Del escaneo de libros a una base pedagogica capaz de recomendar practicas y diagnosticar alumnos.</p>
+      </div>
+      <button id="copyRoadmapPathBtn" class="secondary" type="button">Copiar ruta del plan</button>
+    </div>
+    <section class="roadmap-current" aria-label="Ubicacion actual">
+      <div>
+        <span class="section-label">Donde estamos</span>
+        <strong>BD final + similitud semilla + grafo de conceptos</strong>
+      </div>
+      <p>La prioridad inmediata es calidad de datos: problemas limpios, conceptos revisados y relaciones utiles. La app del alumno queda despues de consolidar esta base.</p>
+    </section>
+    <section class="roadmap-grid" aria-label="Etapas del proyecto">
+      ${stages.map(renderRoadmapCard).join("")}
+    </section>
+    <section class="roadmap-ideas" aria-label="Ideas guia">
+      <div>
+        <span class="section-label">Ideas guia</span>
+        <h3>Decisiones que mantienen el rumbo</h3>
+      </div>
+      <div class="roadmap-idea-list">
+        ${ideas.map((idea) => `<span>${escapeHtml(idea)}</span>`).join("")}
+      </div>
+      <code>${escapeHtml(PROJECT_ROADMAP_PATH)}</code>
+    </section>
+  `;
 }
 
 function renderLibraryBooksStage() {
@@ -2451,6 +2595,16 @@ function renderLibraryInspector() {
           <div class="inspector-line"><strong>Estado</strong><span>${escapeHtml(conceptState.status || "Todos")}</span></div>
         </div>
       </div>
+    ` : state.library.screen === "roadmap" ? `
+      <div class="panel">
+        <h2>Ruta</h2>
+        <div id="inspector" class="inspector-body">
+          <div class="inspector-line"><strong>Plan</strong><span>Plan maestro app adaptativa</span></div>
+          <div class="inspector-line"><strong>Etapas</strong><span>${roadmapStages().length}</span></div>
+          <div class="inspector-line"><strong>Actual</strong><span>BD final + semantica</span></div>
+          <div class="inspector-line"><strong>Archivo</strong><span>${escapeHtml(PROJECT_ROADMAP_PATH)}</span></div>
+        </div>
+      </div>
     ` : `
     <div class="panel">
       <h2>Seleccion</h2>
@@ -2506,7 +2660,7 @@ function bindLibrarySidebarEvents() {
     btn.onclick = () => {
       cancelLibrarySearchRender();
       const screen = String(btn.dataset.libraryScreen || "books");
-      state.library.screen = ["similarity", "concepts"].includes(screen) ? screen : "books";
+      state.library.screen = ["similarity", "concepts", "roadmap"].includes(screen) ? screen : "books";
       state.library.showBookForm = false;
       state.library.showInstanceForm = false;
       state.library.editingBookId = "";
@@ -2566,6 +2720,7 @@ function cancelLibrarySearchRender() {
 function bindLibraryContentEvents() {
   bindSimilarityEvents();
   bindConceptEvents();
+  bindRoadmapEvents();
   if ($("loadMoreBooks")) $("loadMoreBooks").onclick = () => {
     state.library.visibleBooksLimit = Math.max(state.library.visibleBooksLimit || 0, LIBRARY_BOOKS_INITIAL_LIMIT) + LIBRARY_BOOKS_LIMIT_STEP;
     renderLibraryContent();
@@ -2760,6 +2915,19 @@ function bindSimilarityEvents() {
       }
     };
   });
+}
+
+function bindRoadmapEvents() {
+  const copyBtn = $("copyRoadmapPathBtn");
+  if (!copyBtn) return;
+  copyBtn.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(PROJECT_ROADMAP_PATH);
+      setStatus("Ruta del plan maestro copiada.");
+    } catch (_) {
+      setStatus(`Plan maestro: ${PROJECT_ROADMAP_PATH}`);
+    }
+  };
 }
 
 function bindConceptEvents() {
@@ -3337,6 +3505,25 @@ function syncLibraryBottomAction() {
     $("actionHint").textContent = "Consulta un problema de la base local para revisar parecidos.";
     $("primaryAction").textContent = "Buscar similares";
     $("primaryAction").onclick = () => loadProblemSimilarity().catch((err) => setStatus(`Error de similitud: ${err.message}`));
+    return;
+  }
+  if (state.library.screen === "concepts") {
+    $("actionHint").textContent = "Revisa el catalogo pedagogico y sus problemas vinculados.";
+    $("primaryAction").textContent = "Actualizar conceptos";
+    $("primaryAction").onclick = () => loadConceptCatalog().catch((err) => setStatus(`Error de conceptos: ${err.message}`));
+    return;
+  }
+  if (state.library.screen === "roadmap") {
+    $("actionHint").textContent = "Esta ruta resume las etapas e ideas actuales del proyecto.";
+    $("primaryAction").textContent = "Copiar ruta del plan";
+    $("primaryAction").onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(PROJECT_ROADMAP_PATH);
+        setStatus("Ruta del plan maestro copiada.");
+      } catch (_) {
+        setStatus(`Plan maestro: ${PROJECT_ROADMAP_PATH}`);
+      }
+    };
     return;
   }
   $("actionHint").textContent = state.library.screen === "book"
@@ -4655,6 +4842,51 @@ function isReviewContinuationRecord(record) {
 
 function reviewRecords(allRecords = state.snapshot?.records || []) {
   return (allRecords || []).filter((record) => !isReviewContinuationRecord(record));
+}
+
+function reviewBatchSelectionIds() {
+  if (!(state.selectedReviewBatchIds instanceof Set)) {
+    state.selectedReviewBatchIds = new Set(Array.from(state.selectedReviewBatchIds || []).map((id) => String(id || "")).filter(Boolean));
+  }
+  return state.selectedReviewBatchIds;
+}
+
+function pruneReviewBatchSelection(records = reviewRecords(state.snapshot?.records || [])) {
+  const validIds = new Set((records || []).map((record) => String(record?.record_id || "")).filter(Boolean));
+  const ids = reviewBatchSelectionIds();
+  let changed = false;
+  [...ids].forEach((id) => {
+    if (!validIds.has(id)) {
+      ids.delete(id);
+      changed = true;
+    }
+  });
+  return changed;
+}
+
+function selectedReviewBatchRecords(records = reviewRecords(state.snapshot?.records || [])) {
+  pruneReviewBatchSelection(records);
+  const ids = reviewBatchSelectionIds();
+  if (!ids.size) return [];
+  return (records || []).filter((record) => ids.has(String(record?.record_id || "")));
+}
+
+function batchModeUsesReviewSelection(mode = state.batchMode) {
+  return ["normalizer_input", "normalization", "final_latex"].includes(String(mode || ""));
+}
+
+function batchRecordsForMode(mode = state.batchMode) {
+  const allRecords = state.snapshot?.records || [];
+  if (!batchModeUsesReviewSelection(mode)) return allRecords;
+  const visibleRecords = reviewRecords(allRecords);
+  const selected = selectedReviewBatchRecords(visibleRecords);
+  return selected.length ? selected : allRecords;
+}
+
+function batchRecordsSelectionLabel(mode = state.batchMode) {
+  if (!batchModeUsesReviewSelection(mode)) return "todos los crops de staging";
+  const selectedCount = selectedReviewBatchRecords().length;
+  return selectedCount ? `${selectedCount} problema(s) seleccionado(s)` : "todos los registros de staging";
 }
 
 function findParentForContinuation(record, allRecords = state.snapshot?.records || []) {
@@ -6387,7 +6619,7 @@ function batchModeConfig(mode = state.batchMode) {
       description: "Pega el formato LaTeX final por imagen. Se guarda como salida final para futura BD y como ejemplo de entrenamiento.",
       action: "Guardar formato final",
       empty: "No hay registros de staging para guardar formato final.",
-      placeholder: "----imagen.png-----\n\\item[\\textbf{01.}] [[curso=Geometria]] [[tema=Triangulos]] [[Estado=sin_revisar]] [[Clave=C]] Enunciado... [[Imagen=img-01]] Â£A)...Ã¦B)...Ã¦C)...Â£D)...Ã¦Ã¦E)...Â£",
+      placeholder: "----imagen.png-----\n\\item[\\textbf{01.}] [[curso=Geometria]] [[tema=Triangulos]] [[Estado=sin_revisar]] [[Clave=C]] Enunciado... [[Imagen=img-01]] £A)...æB)...æC)...£D)...ææE)...£",
       saving: "Guardando formato final por lote...",
       done: "Formato final por lote terminado.",
     };
@@ -6448,7 +6680,7 @@ function closeBatchMode({ rerender = true } = {}) {
 
 function renderBatchEditor() {
   const config = batchModeConfig();
-  const records = state.snapshot?.records || [];
+  const records = batchRecordsForMode(config.mode);
   if (!state.batchText && !state.batchResults.length && records.length) {
     state.batchText = buildBatchText(config.mode);
   }
@@ -6467,7 +6699,7 @@ function renderBatchEditor() {
       <div class="panel-heading-row">
         <div>
           <h3>Editor por lote</h3>
-          <p class="muted">${records.length ? `${records.length} imagen(es) en el lote. El guardado usa el orden actual de staging.` : config.empty}</p>
+          <p class="muted">${records.length ? `${records.length} item(s) en el lote: ${escapeHtml(batchRecordsSelectionLabel(config.mode))}. El guardado usa el orden actual.` : config.empty}</p>
         </div>
         <div class="batch-actions">
           <button id="copyBatchText" type="button" ${records.length ? "" : "disabled"}>Copiar lote</button>
@@ -6484,7 +6716,7 @@ function renderBatchEditor() {
   setInspector({
     "Modo": config.title,
     "Registros": records.length,
-    "Mapeo": "orden de staging",
+    "Mapeo": batchModeUsesReviewSelection(config.mode) ? "seleccion de revision u orden de staging" : "orden de staging",
   });
   syncWorkspaceMode();
   syncPrimaryAction();
@@ -6524,7 +6756,7 @@ async function copyBatchText() {
 }
 
 function buildBatchText(mode) {
-  const records = state.snapshot?.records || [];
+  const records = batchRecordsForMode(mode);
   return records.map((record, index) => {
     let body = String(record.raw_ocr || "").trim();
     if (mode === "normalizer_input") body = normalizerInputJsonFromRecord(record, index);
@@ -6566,7 +6798,7 @@ function normalizerInputFromRecord(record, index = 0) {
       suggested_course: String(normalized.curso || "SIN_CURSO"),
       suggested_topic: String(normalized.tema || "SIN_TEMA"),
       continuation: Boolean(isReviewContinuationRecord(record) || isFinalLatexContinuation(record?.raw_ocr)),
-      final_format: "\\item[\\textbf{n.}] [[curso=...]] [[tema=...]] [[Estado=sin_revisar]] [[Clave=...]] Enunciado... [[Imagen=img-n]] Â£A)...Ã¦B)...Ã¦C)...Â£D)...Ã¦Ã¦E)...Â£",
+      final_format: "\\item[\\textbf{n.}] [[curso=...]] [[tema=...]] [[Estado=sin_revisar]] [[Clave=...]] Enunciado... [[Imagen=img-n]] £A)...æB)...æC)...£D)...ææE)...£",
     },
     policy: {
       raw_ocr_is_primary: true,
@@ -6661,7 +6893,7 @@ function finalLatexFromRecord(record) {
     ? ` [[Imagen=${String(normalized.figure_tag || `img-${number || record.record_id}`).trim()}]]`
     : "";
   const alternatives = normalized.alternativas && typeof normalized.alternativas === "object" ? normalized.alternativas : {};
-  const optionText = `Â£A)${String(alternatives.A || "").trim()}Ã¦B)${String(alternatives.B || "").trim()}Ã¦C)${String(alternatives.C || "").trim()}Â£D)${String(alternatives.D || "").trim()}Ã¦Ã¦E)${String(alternatives.E || "").trim()}Â£`;
+  const optionText = `£A)${String(alternatives.A || "").trim()}æB)${String(alternatives.B || "").trim()}æC)${String(alternatives.C || "").trim()}£D)${String(alternatives.D || "").trim()}ææE)${String(alternatives.E || "").trim()}£`;
   return `\\item[\\textbf{${number || ""}.}] [[curso=${curso}]] [[tema=${tema}]] [[Estado=${estado}]] [[Clave=${clave}]] ${statement}${image} ${optionText}`.trim();
 }
 
@@ -6701,12 +6933,16 @@ function batchRecordTitle(record, index) {
 }
 
 function parseBatchBlocks(text) {
-  const lines = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  let cleanText = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  cleanText = cleanText
+    .replace(/^\s*```(?:text|txt|latex|json)?\s*\n/i, "")
+    .replace(/\n\s*```\s*$/i, "");
+  const lines = cleanText.split("\n");
   const blocks = [];
   const preamble = [];
   let current = null;
   lines.forEach((line) => {
-    const match = line.match(/^-{4,}\s*(.*?)\s*-{4,}\s*$/);
+    const match = line.match(/^\s*-{4,}\s*(.*?)\s*-{4,}\s*$/);
     if (match) {
       if (current) blocks.push({ ...current, body: current.lines.join("\n").trim() });
       current = { title: match[1].trim(), lines: [] };
@@ -6717,6 +6953,58 @@ function parseBatchBlocks(text) {
   });
   if (current) blocks.push({ ...current, body: current.lines.join("\n").trim() });
   return { blocks, preamble: preamble.join("\n").trim() };
+}
+
+function compactBatchTitle(value, maxLength = 96) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (text.length <= maxLength) return text;
+  const keep = Math.max(20, Math.floor((maxLength - 5) / 2));
+  return `${text.slice(0, keep)} ... ${text.slice(-keep)}`;
+}
+
+function batchCountMessage(records, parsed) {
+  const expected = Number((records || []).length || 0);
+  const received = Number((parsed?.blocks || []).length || 0);
+  if (expected === received) return "";
+  if (received < expected) {
+    return `Se recibieron ${received} bloque(s) para ${expected} imagen(es). Faltan ${expected - received}.`;
+  }
+  return `Se recibieron ${received} bloque(s) para ${expected} imagen(es). Sobran ${received - expected}.`;
+}
+
+function missingBatchBlockMessage(records, parsed, index) {
+  const expected = Number((records || []).length || 0);
+  const received = Number((parsed?.blocks || []).length || 0);
+  const lastBlock = (parsed?.blocks || [])[received - 1] || null;
+  const lastTitle = compactBatchTitle(lastBlock?.title || "");
+  const position = `${Number(index || 0) + 1} de ${expected || 0}`;
+  const count = batchCountMessage(records, parsed);
+  const suffix = lastTitle ? ` Ultimo bloque recibido: ${lastTitle}.` : " No se recibio ningun bloque.";
+  return `Falta el bloque para esta imagen (${position}). ${count}${suffix}`;
+}
+
+function comparableBatchText(value) {
+  return String(value || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+$/g, ""))
+    .join("\n")
+    .trim();
+}
+
+function rawOcrBlockChanged(record, raw) {
+  return comparableBatchText(record?.raw_ocr || "") !== comparableBatchText(raw);
+}
+
+function rawOcrBatchSaveDecision(record, raw) {
+  if (rawOcrBlockChanged(record, raw)) {
+    return { save: true, forceReview: false, reason: "changed" };
+  }
+  if (!record?.raw_ocr_human_reviewed) {
+    return { save: true, forceReview: true, reason: "accepted_without_change" };
+  }
+  return { save: false, forceReview: false, reason: "already_reviewed" };
 }
 
 function normalizeBatchTitle(value) {
@@ -6849,6 +7137,28 @@ function applyOcrJobRecordUpdates(job) {
   return maxSeq;
 }
 
+function applyNormalizerJobRecordUpdates(job) {
+  const updates = Array.isArray(job?.record_updates) ? job.record_updates : [];
+  let maxSeq = 0;
+  let changed = false;
+  for (const update of updates) {
+    const seq = Number(update?.seq || 0);
+    if (seq > maxSeq) maxSeq = seq;
+    const record = update?.record || null;
+    if (!record?.record_id) continue;
+    const applied = applyRecordSavedPayload({
+      schema_version: "pdf_factory_web_record_saved_v1",
+      record,
+    });
+    changed = Boolean(applied) || changed;
+  }
+  if (changed) {
+    renderMetrics();
+    renderTimeline();
+  }
+  return maxSeq;
+}
+
 function recomputeFactorySummaryLocally() {
   if (!state.snapshot) return null;
   const pages = state.snapshot.pages || [];
@@ -6944,7 +7254,7 @@ async function saveBatchEditor(mode = state.batchMode) {
     setStatus("Esta vista solo prepara la entrada del normalizador. Copiala y pega la respuesta en Formato final en bloque.");
     return;
   }
-  const records = state.snapshot?.records || [];
+  const records = batchRecordsForMode(mode);
   if (!records.length) return setStatus("No hay registros de staging para guardar.");
   const editor = $("batchEditor");
   state.batchText = editor?.value || state.batchText || "";
@@ -6955,6 +7265,7 @@ async function saveBatchEditor(mode = state.batchMode) {
   let failed = 0;
   let skipped = 0;
   const saveBtn = $("saveBatchText");
+  const usedBlocks = new Set();
   if (saveBtn) saveBtn.disabled = true;
   setBusy(batchModeConfig(mode).saving);
   try {
@@ -6964,28 +7275,34 @@ async function saveBatchEditor(mode = state.batchMode) {
       state.batchResults = results.slice();
       updateBatchResultsInline();
     }
+    const countMessage = batchCountMessage(records, parsed);
+    if (countMessage) {
+      results.push({ status: "info", title: "Conteo del lote", message: countMessage });
+      state.batchResults = results.slice();
+      updateBatchResultsInline();
+    }
     if (mode === "final_latex") {
       await saveFinalLatexBatchEditor(records, parsed, { results, failed, saveBtn });
       return;
     }
-    for (let index = 0; index < total; index += 1) {
+    for (let index = 0; index < records.length; index += 1) {
       const record = records[index];
-      const block = parsed.blocks[index];
-      const title = record ? batchRecordTitle(record, index) : (block?.title || `Bloque extra ${index + 1}`);
+      const title = batchRecordTitle(record, index);
       updateBatchProgressInline({ current: index, total, ok, failed, skipped, active: title });
-      if (!record) {
-        failed += 1;
-        results.push({ status: "error", title, message: "Bloque sobrante: no existe un registro de staging en esa posicion." });
-        state.batchResults = results.slice();
-        updateBatchResultsInline();
-        continue;
-      }
+      const picked = takeBatchBlockForRecord(parsed.blocks, usedBlocks, record, index, true);
+      let block = picked?.block || null;
+      let usedCurrentRawOcrFallback = false;
       if (!block) {
-        failed += 1;
-        results.push({ status: "error", title, message: "Falta el bloque para esta imagen." });
-        state.batchResults = results.slice();
-        updateBatchResultsInline();
-        continue;
+        if (mode === "raw_ocr" && index === records.length - 1 && String(record.raw_ocr || "").trim()) {
+          block = { title, body: String(record.raw_ocr || "").trim() };
+          usedCurrentRawOcrFallback = true;
+        } else {
+          failed += 1;
+          results.push({ status: "error", title, message: missingBatchBlockMessage(records, parsed, index) });
+          state.batchResults = results.slice();
+          updateBatchResultsInline();
+          continue;
+        }
       }
       if (recordSourceStale(record) || recordDownstreamInvalidated(record)) {
         skipped += 1;
@@ -7001,13 +7318,30 @@ async function saveBatchEditor(mode = state.batchMode) {
         updateBatchResultsInline();
         continue;
       }
+      const rawOcrDecision = mode === "raw_ocr" ? rawOcrBatchSaveDecision(record, block.body) : null;
+      if (rawOcrDecision && !rawOcrDecision.save) {
+        skipped += 1;
+        results.push({ status: "skipped", title, message: "Sin cambios y ya revisado; no se duplico la correccion." });
+        state.batchResults = results.slice();
+        updateBatchResultsInline();
+        updateBatchProgressInline({ current: index + 1, total, ok, failed, skipped, active: title });
+        continue;
+      }
       try {
         const updated = mode === "normalization"
           ? await saveBatchNormalizationRecord(record, block.body)
-          : await saveBatchRawOcrRecord(record, block.body);
+          : await saveBatchRawOcrRecord(record, block.body, { forceReview: Boolean(rawOcrDecision?.forceReview) });
         replaceRecordInSnapshot(updated);
         ok += 1;
-        results.push({ status: "ok", title, message: "Guardado." });
+        results.push({
+          status: "ok",
+          title,
+          message: usedCurrentRawOcrFallback
+            ? "No vino bloque; se acepto el OCR actual como revision humana."
+            : mode === "raw_ocr"
+            ? (rawOcrDecision?.forceReview ? "Aceptado como revision OCR humana." : "Modificado y guardado como correccion OCR.")
+            : "Guardado.",
+        });
       } catch (err) {
         failed += 1;
         results.push({ status: "error", title, message: err.message || String(err) });
@@ -7016,6 +7350,11 @@ async function saveBatchEditor(mode = state.batchMode) {
       updateBatchResultsInline();
       updateBatchProgressInline({ current: index + 1, total, ok, failed, skipped, active: title });
     }
+    (parsed.blocks || []).forEach((block, blockIndex) => {
+      if (usedBlocks.has(blockIndex)) return;
+      failed += 1;
+      results.push({ status: "error", title: block.title || `Bloque extra ${blockIndex + 1}`, message: "Bloque sobrante: no corresponde a ningun registro de staging." });
+    });
     try {
       await refreshFactorySummary();
       refreshNormalizerTrainingStatusLater({ silent: true, force: true });
@@ -7093,7 +7432,7 @@ async function saveFinalLatexBatchEditor(records, parsed, initial = {}) {
     }
     if (!picked) {
       failed += 1;
-      results.push({ status: "error", title, message: "Falta el bloque para esta imagen." });
+      results.push({ status: "error", title, message: missingBatchBlockMessage(records, parsed, index) });
       state.batchResults = results.slice();
       updateBatchResultsInline();
       continue;
@@ -7164,12 +7503,13 @@ async function saveFinalLatexBatchEditor(records, parsed, initial = {}) {
   setStatus(`Lote terminado: ${ok} guardado(s), ${skipped} omitido(s), ${failed} error(es).`);
 }
 
-async function saveBatchRawOcrRecord(record, raw) {
+async function saveBatchRawOcrRecord(record, raw, options = {}) {
   const payload = await api("/api/ocr/raw", {
     method: "POST",
     body: {
       record_id: record.record_id,
       raw_ocr: raw,
+      force_review: Boolean(options.forceReview),
       compact: true,
       include_summary: false,
     },
@@ -7427,11 +7767,109 @@ function renderReviewImageStack(record, allRecords = state.snapshot?.records || 
   `;
 }
 
+function renderReviewBatchSelection(records, currentRecord) {
+  pruneReviewBatchSelection(records);
+  const ids = reviewBatchSelectionIds();
+  const selectedCount = selectedReviewBatchRecords(records).length;
+  const total = records.length;
+  const currentId = String(currentRecord?.record_id || "");
+  const currentSelected = Boolean(currentId && ids.has(currentId));
+  const allSelected = Boolean(total && selectedCount === total);
+  const normalizerRunning = isTaskRunning("normalize");
+  return `
+    <section class="panel review-batch-selection" aria-label="Seleccion para normalizacion en bloque">
+      <div class="review-batch-summary">
+        <div>
+          <span class="section-label">Seleccion por lote</span>
+          <strong>${selectedCount} de ${total} problema(s)</strong>
+          <p class="muted">Entrada normalizador y Formato final en bloque usaran esta seleccion. Si no eliges nada, se mantiene el comportamiento anterior.</p>
+        </div>
+        <label class="check-field review-batch-current">
+          <input id="reviewBatchCurrent" type="checkbox" ${currentSelected ? "checked" : ""} ${currentId ? "" : "disabled"} />
+          <span>Incluir problema actual</span>
+        </label>
+      </div>
+      <div class="review-batch-actions">
+        <button id="selectAllReviewBatch" type="button" ${allSelected ? "disabled" : ""}>Seleccionar todos</button>
+        <button id="clearReviewBatch" type="button" ${selectedCount ? "" : "disabled"}>Limpiar seleccion</button>
+        <button id="runSelectedNormalizerAiBatch" class="secondary" type="button" ${total && !normalizerRunning ? "" : "disabled"}>Normalizar IA del lote</button>
+        <button id="openSelectedNormalizerInputBatch" class="secondary" type="button" ${total ? "" : "disabled"}>Entrada del lote</button>
+        <button id="openSelectedFinalLatexBatch" class="primary" type="button" ${total ? "" : "disabled"}>Formato final del lote</button>
+      </div>
+    </section>
+  `;
+}
+
+function bindReviewBatchSelection(records, currentRecord) {
+  const ids = reviewBatchSelectionIds();
+  const currentId = String(currentRecord?.record_id || "");
+  const persistAndRender = () => {
+    persistFactoryUiState();
+    renderReviewStage();
+  };
+  const currentToggle = $("reviewBatchCurrent");
+  if (currentToggle) {
+    currentToggle.onchange = (event) => {
+      if (!currentId) return;
+      if (event.target.checked) ids.add(currentId);
+      else ids.delete(currentId);
+      persistAndRender();
+    };
+  }
+  const selectAll = $("selectAllReviewBatch");
+  if (selectAll) {
+    selectAll.onclick = () => {
+      state.selectedReviewBatchIds = new Set((records || []).map((record) => String(record.record_id || "")).filter(Boolean));
+      persistAndRender();
+      setStatus(`${records.length} problema(s) seleccionados para normalizar en bloque.`);
+    };
+  }
+  const clear = $("clearReviewBatch");
+  if (clear) {
+    clear.onclick = () => {
+      ids.clear();
+      persistAndRender();
+      setStatus("Seleccion por lote limpiada.");
+    };
+  }
+  const openInput = $("openSelectedNormalizerInputBatch");
+  if (openInput) {
+    openInput.onclick = () => {
+      if (!selectedReviewBatchRecords(records).length) {
+        state.selectedReviewBatchIds = new Set((records || []).map((record) => String(record.record_id || "")).filter(Boolean));
+        persistFactoryUiState();
+      }
+      openBatchMode("normalizer_input");
+    };
+  }
+  const runAi = $("runSelectedNormalizerAiBatch");
+  if (runAi) {
+    runAi.onclick = () => {
+      const selected = selectedReviewBatchRecords(records);
+      const targets = selected.length ? selected : (records || []);
+      state.selectedReviewBatchIds = new Set(targets.map((record) => String(record.record_id || "")).filter(Boolean));
+      persistFactoryUiState();
+      runNormalizerAiQueue(targets.map((record) => record.record_id)).catch((err) => setStatus(`Error normalizador IA: ${err.message}`));
+    };
+  }
+  const openFinal = $("openSelectedFinalLatexBatch");
+  if (openFinal) {
+    openFinal.onclick = () => {
+      if (!selectedReviewBatchRecords(records).length) {
+        state.selectedReviewBatchIds = new Set((records || []).map((record) => String(record.record_id || "")).filter(Boolean));
+        persistFactoryUiState();
+      }
+      openBatchMode("final_latex");
+    };
+  }
+}
+
 function renderReviewStage() {
   resetLazyTechnicalDetails();
   syncSelectedRecord();
   const allRecords = state.snapshot.records || [];
   const records = reviewRecords(allRecords);
+  pruneReviewBatchSelection(records);
   const record = ensureReviewSelectedRecord(records, allRecords);
   const currentRecordIndex = recordIndex(records);
   const totalRecords = records.length;
@@ -7446,7 +7884,7 @@ function renderReviewStage() {
       </div>
       <div class="stage-actions">
         <button id="openNormalizerInputBatch" type="button">Entrada normalizador</button>
-        <button id="normalizeWithAiBtn" class="secondary" type="button" ${record?.raw_ocr ? "" : "disabled"}>Normalizar con IA</button>
+        <button id="normalizeWithAiBtn" class="secondary" type="button" ${record?.raw_ocr && !isTaskRunning("normalize") ? "" : "disabled"}>Normalizar con IA</button>
         <button id="openFinalLatexBatch" type="button">Formato final en bloque</button>
       </div>
     </div>
@@ -7456,6 +7894,7 @@ function renderReviewStage() {
         Esta etapa guarda el formato final en staging y conserva la correccion como dato de entrenamiento.
       </div>
       ${errorComment ? `<div class="library-notice error-notice"><strong>Error:</strong> ${escapeHtml(errorComment)}</div>` : ""}
+      ${renderReviewBatchSelection(records, record)}
       <div class="record-nav panel review-record-nav" aria-label="Navegacion de problemas en revision">
         <button id="prevRecord" class="nav-arrow" type="button" title="Problema anterior" ${currentRecordIndex <= 0 ? "disabled" : ""}>&larr;</button>
         <div class="record-nav-main">
@@ -7504,9 +7943,10 @@ function renderReviewStage() {
     const normalizerInputBtn = $("openNormalizerInputBatch");
     if (normalizerInputBtn) normalizerInputBtn.onclick = () => openBatchMode("normalizer_input");
     const normalizeWithAiBtn = $("normalizeWithAiBtn");
-    if (normalizeWithAiBtn) normalizeWithAiBtn.onclick = () => normalizeSelectedRecordWithAi(record);
+    if (normalizeWithAiBtn) normalizeWithAiBtn.onclick = () => runNormalizerAiQueue(record?.record_id ? [record.record_id] : []);
     const finalLatexBatchBtn = $("openFinalLatexBatch");
     if (finalLatexBatchBtn) finalLatexBatchBtn.onclick = () => openBatchMode("final_latex");
+    bindReviewBatchSelection(records, record);
     bindRecordNavigation(records);
     $("reviewForm").onsubmit = saveReviewForm;
     $("reviewForm").addEventListener("input", () => {
@@ -7617,10 +8057,12 @@ function latexPreviewSourceKey(kind, value) {
 
 function normalizeFinalLatexForStorage(value) {
   return String(value || "")
-    .replaceAll("Ã‚Â£", "Â£")
-    .replaceAll("ÃƒÂ¦", "Ã¦")
-    .replaceAll("Ã‚Â¦", "Ã¦")
-    .replaceAll("Â¦", "Ã¦")
+    .replaceAll("Ã‚Â£", "£")
+    .replaceAll("Â£", "£")
+    .replaceAll("ÃƒÂ¦", "æ")
+    .replaceAll("Ã¦", "æ")
+    .replaceAll("Ã‚Â¦", "æ")
+    .replaceAll("Â¦", "æ")
     .trim();
 }
 
@@ -7668,7 +8110,7 @@ function renderFinalLatexPreviewHtml(value) {
     .replace(/\\item\s*\[\s*\\textbf\{\s*([^}.]+)\.?\s*\}\s*\]/i, "")
     .replace(/\[\[\s*([^=\]]+?)\s*=\s*([^\]]*?)\s*\]\]/g, "")
     .trim();
-  const optionsMatch = body.match(/Â£A\)([\s\S]*?)Ã¦B\)([\s\S]*?)Ã¦C\)([\s\S]*?)Â£D\)([\s\S]*?)Ã¦Ã¦E\)([\s\S]*?)Â£/);
+  const optionsMatch = body.match(/£A\)([\s\S]*?)æB\)([\s\S]*?)æC\)([\s\S]*?)£D\)([\s\S]*?)ææE\)([\s\S]*?)£/);
   let optionsHtml = "";
   if (optionsMatch) {
     const labels = ["A", "B", "C", "D", "E"];
@@ -7924,7 +8366,7 @@ function updateFinalLatexReviewStatus() {
     return;
   }
   const hasItem = /\\item\s*\[\s*\\textbf\{/i.test(text);
-  const hasOptions = /Â£A\)[\s\S]*?Ã¦B\)[\s\S]*?Ã¦C\)[\s\S]*?Â£D\)[\s\S]*?Ã¦Ã¦E\)[\s\S]*?Â£/.test(text);
+  const hasOptions = /£A\)[\s\S]*?æB\)[\s\S]*?æC\)[\s\S]*?£D\)[\s\S]*?ææE\)[\s\S]*?£/.test(text);
   if (hasItem && hasOptions) {
     host.textContent = "Formato listo";
     return;
@@ -8508,6 +8950,172 @@ async function resumeOcrJobIfRunning({ silent = true } = {}) {
     pollOcrJob(job.job_id || "").catch((err) => setStatus(`Error consultando OCR: ${err.message}`));
   } catch (_) {
     // El servidor puede ser una version anterior; en ese caso no bloqueamos el arranque.
+  }
+}
+
+function normalizerAiRunnableRecords(records = reviewRecords(state.snapshot?.records || [])) {
+  return (records || []).filter((record) => (
+    record?.record_id
+    && !recordSourceStale(record)
+    && !recordDownstreamInvalidated(record)
+    && hasText(record.raw_ocr)
+  ));
+}
+
+async function runNormalizerAiQueue(recordIds = null) {
+  if (isTaskRunning("normalize") || state.normalizerJobPolling) {
+    return setStatus("El normalizador IA ya esta trabajando una cola.");
+  }
+  const allRecords = state.snapshot?.records || [];
+  const visibleReviewRecords = reviewRecords(allRecords);
+  const explicitIds = Array.isArray(recordIds)
+    ? recordIds.map((id) => String(id || "").trim()).filter(Boolean)
+    : [];
+  const selected = selectedReviewBatchRecords(visibleReviewRecords);
+  const fallbackRecords = selected.length ? selected : (selectedRecord()?.record_id ? [selectedRecord()] : visibleReviewRecords);
+  const targetRecords = explicitIds.length
+    ? explicitIds.map((id) => findRecordById(id, allRecords)).filter(Boolean)
+    : fallbackRecords;
+  const pending = normalizerAiRunnableRecords(targetRecords)
+    .map((record) => String(record.record_id || ""))
+    .filter(Boolean);
+  const uniquePending = [...new Set(pending)];
+  if (!uniquePending.length) {
+    const requestedCount = targetRecords.length || explicitIds.length;
+    return setStatus(requestedCount
+      ? "No hay problemas listos para normalizar: revisa que tengan OCR crudo y staging vigente."
+      : "Selecciona problemas con OCR crudo para normalizar con IA.");
+  }
+  const total = uniquePending.length;
+  state.selectedReviewBatchIds = new Set(uniquePending);
+  state.taskProgress = {
+    type: "normalize",
+    running: true,
+    label: "Normalizador IA",
+    phase: "queued",
+    phaseLabel: "Cola preparada",
+    total,
+    current: 0,
+    activePosition: 0,
+    progressLabel: `0/${total}`,
+    ok: 0,
+    failed: 0,
+    message: `Preparando normalizador 0/${total}`,
+    activeId: uniquePending[0] || "",
+    activeName: recordLabelById(uniquePending[0]),
+  };
+  state.stage = "review";
+  persistFactoryUiState();
+  render();
+  setBusy(`Normalizador IA 0 de ${total}...`);
+  try {
+    const job = await startNormalizerJob(uniquePending);
+    state.normalizerJobId = String(job.job_id || "");
+    persistFactoryUiState();
+    await pollNormalizerJob(job.job_id || "");
+  } finally {
+    state.taskProgress = null;
+    $("busyText").textContent = "";
+  }
+}
+
+async function startNormalizerJob(recordIds) {
+  return api("/api/normalize/ai/jobs/start", {
+    method: "POST",
+    body: { record_ids: recordIds },
+  });
+}
+
+async function pollNormalizerJob(jobId = "") {
+  if (state.normalizerJobPolling) return null;
+  state.normalizerJobPolling = true;
+  state.normalizerJobId = String(jobId || state.normalizerJobId || "").trim();
+  persistFactoryUiState();
+  let lastActiveId = "";
+  let lastRecordUpdateSeq = 0;
+  try {
+    while (true) {
+      const params = new URLSearchParams();
+      if (state.normalizerJobId) params.set("job_id", state.normalizerJobId);
+      if (lastRecordUpdateSeq > 0) params.set("since_update", String(lastRecordUpdateSeq));
+      const query = params.toString() ? `?${params.toString()}` : "";
+      const job = await api(`/api/normalize/ai/jobs/status${query}`);
+      if (!job || job.status === "idle") return job;
+      if (job.job_id) state.normalizerJobId = String(job.job_id || "");
+      lastRecordUpdateSeq = Math.max(lastRecordUpdateSeq, applyNormalizerJobRecordUpdates(job));
+      const total = Number(job.total || 0);
+      const current = Number(job.current || 0);
+      const activeId = String(job.active_id || "");
+      if (activeId) {
+        lastActiveId = activeId;
+        state.selectedRecordId = activeId;
+      }
+      state.taskProgress = {
+        type: "normalize",
+        running: Boolean(job.running),
+        label: "Normalizador IA",
+        phase: String(job.phase || "normalizer"),
+        phaseLabel: String(job.phase_label || "Normalizador IA"),
+        total,
+        current,
+        activePosition: Number(job.active_position || 0),
+        progressLabel: String(job.progress_label || ""),
+        ok: Number(job.ok || 0),
+        failed: Number(job.failed || 0),
+        message: String(job.message || "Normalizando con IA..."),
+        activeId,
+        activeName: activeId ? recordLabelById(activeId) : "",
+      };
+      setBusy(job.running ? `Normalizador IA ${current} de ${total}...` : "");
+      if (job.running && !updateTaskProgressDom("normalize")) render();
+      if (!job.running) {
+        const expectedRecordUpdateSeq = Number(job.record_update_seq || 0);
+        const fullySynced = expectedRecordUpdateSeq > 0
+          && lastRecordUpdateSeq >= expectedRecordUpdateSeq
+          && Number(job.failed || 0) === 0;
+        if (fullySynced) {
+          await refreshFactorySummary();
+        } else {
+          applyFactorySnapshot(await loadFactorySnapshot());
+        }
+        state.stage = "review";
+        state.selectedRecordId = lastActiveId || activeId || state.selectedRecordId;
+        state.selectedOcrIndex = 0;
+        state.reviewDraft = null;
+        state.taskProgress = null;
+        state.normalizerJobId = "";
+        persistFactoryUiState();
+        render();
+        setStatus(job.message || "Cola normalizador IA terminada.");
+        return job;
+      }
+      await sleep(1500);
+    }
+  } finally {
+    state.normalizerJobPolling = false;
+  }
+}
+
+async function resumeNormalizerJobIfRunning({ silent = true } = {}) {
+  if (state.view !== "factory" || state.normalizerJobPolling) return;
+  try {
+    const savedJobId = String(state.normalizerJobId || "").trim();
+    const savedQuery = savedJobId ? `?job_id=${encodeURIComponent(savedJobId)}` : "";
+    let job = await api(`/api/normalize/ai/jobs/status${savedQuery}`);
+    if (!job?.running && savedJobId) {
+      state.normalizerJobId = "";
+      persistFactoryUiState();
+      job = await api("/api/normalize/ai/jobs/status");
+    }
+    if (!job?.running) return;
+    state.stage = "review";
+    state.normalizerJobId = String(job.job_id || state.normalizerJobId || "").trim();
+    state.selectedReviewBatchIds = new Set((job.record_ids || []).map((id) => String(id || "")).filter(Boolean));
+    persistFactoryUiState();
+    if (!silent) setStatus("Normalizador IA sigue en segundo plano; reconectando progreso.");
+    pollNormalizerJob(job.job_id || "").catch((err) => setStatus(`Error consultando normalizador IA: ${err.message}`));
+  } catch (_) {
+    // Servidores antiguos no tienen esta ruta; seguimos con la UI normal.
   }
 }
 
@@ -9336,6 +9944,7 @@ async function bootApp() {
     refreshNormalizerTrainingStatusLater({ silent: true, renderNotice: true });
     setStatus("Fabrica lista.");
     resumeOcrJobIfRunning({ silent: true });
+    resumeNormalizerJobIfRunning({ silent: true });
     return;
   } catch (_) {
     state.view = "library";

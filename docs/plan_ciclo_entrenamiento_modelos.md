@@ -34,6 +34,8 @@ flowchart LR
 | Segmentacion de graficos | `segment_training_live` | Imagen donde se corrigieron boxes de grafico | 500 |
 | Normalizador final | `normalizer_training_bank` | Problema principal con formato final humano | 500 |
 
+Plan especifico del OCR por router/especialistas: `docs/plan_ocr_especialistas.md`.
+
 ## Registro Comun
 
 La Fabrica expone el estado consolidado en:
@@ -145,6 +147,7 @@ Activar nuevo detector solo si mejora `problem_recall`, baja `split_error_rate` 
 | `cer` | Error por caracter | Bajar |
 | `wer` | Error por palabra | Bajar |
 | `latex_token_accuracy` | Simbolos LaTeX correctos | Subir |
+| `angle_symbol_accuracy` | En Geometria, `\sphericalangle` no se confunde con `<` ni `\leq` | Subir |
 | `option_label_accuracy` | Alternativas A-E correctas | Subir |
 | `number_accuracy` | Numero de problema correcto | Subir |
 | `hallucination_rate` | Texto inventado por el modelo | Bajar |

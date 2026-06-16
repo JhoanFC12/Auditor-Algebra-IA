@@ -690,6 +690,41 @@ class InstanceStagingStore:
                 return record
         return None
 
+    def delete_record(self, record_id: str, *, rewrite_manifest: bool = True) -> int:
+        try:
+            candidates = self._record_path_candidates(record_id)
+        except ValueError:
+            return 0
+        wanted = str(record_id or "").strip()
+        deleted = 0
+        seen: set[Path] = set()
+        for path in candidates:
+            seen.add(path.resolve())
+            try:
+                path.unlink()
+                deleted += 1
+            except FileNotFoundError:
+                pass
+        for path, record in self._load_record_entries():
+            if str(record.record_id or "") != wanted and str(record.crop_id or "") != wanted:
+                continue
+            try:
+                resolved = path.resolve()
+            except Exception:
+                resolved = path
+            if resolved in seen:
+                continue
+            try:
+                path.unlink()
+                deleted += 1
+            except FileNotFoundError:
+                pass
+        if deleted:
+            self._invalidate_records_cache()
+            if rewrite_manifest:
+                self.rewrite_manifest()
+        return deleted
+
     def upsert_record(
         self,
         record: StagingProblemRecord,

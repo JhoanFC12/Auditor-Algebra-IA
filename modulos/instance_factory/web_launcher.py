@@ -19,9 +19,17 @@ _ACTIVE_RUNTIMES: list[Any] = []
 _ACTIVE_PROCESSES: list[subprocess.Popen] = []
 
 
+def _runtime_host() -> str:
+    raw = str(os.getenv("PDF_FACTORY_WEB_HOST", "") or os.getenv("AUDITOR_LIBRARY_HOST", "") or "").strip()
+    return raw or "127.0.0.1"
+
+
 def open_factory_web_app(parent: Any = None, *, context: InstancePipelineContext) -> str:
     load_factory_runtime_env()
-    runtime = FactoryWebRuntime(context)
+    try:
+        runtime = FactoryWebRuntime(context, host=_runtime_host())
+    except TypeError:
+        runtime = FactoryWebRuntime(context)
     url = runtime.start()
     _ACTIVE_RUNTIMES.append(runtime)
     title = f"Fabrica PDF - {context.book_code} / {context.instance_type}"
@@ -54,7 +62,7 @@ def open_biblioteca_web_app(
 
     try:
         try:
-            runtime = runtime_cls(default_db_name=str(os.getenv("DB_NAME", "") or "").strip())
+            runtime = runtime_cls(default_db_name=str(os.getenv("DB_NAME", "") or "").strip(), host=_runtime_host())
         except TypeError:
             runtime = runtime_cls()
         url = str(runtime.start())

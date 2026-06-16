@@ -1,0 +1,59 @@
+{
+  "schema_version": "hf_geometry_ocr_agent_job_submission_v1",
+  "created_at": "2026-06-15T22:21:42",
+  "hf_user": "Jhoan12",
+  "dataset_dir": "E:\\Github\\Auditor-IA\\.cache\\transcriptor_runs\\datasets\\local_ocr_geometry_agent_v1",
+  "dataset_manifest": {
+    "schema_version": "local_math_ocr_lab_dataset_v1",
+    "created_at": "2026-06-15T22:07:42",
+    "sources": [
+      "E:\\Github\\Auditor-IA\\.cache\\transcriptor_runs\\datasets\\ocr_geometry_golden_live",
+      "E:\\Github\\Auditor-IA\\.cache\\transcriptor_runs\\datasets\\ocr_golden_live",
+      ".cache\\transcriptor_runs\\staging"
+    ],
+    "counts": {
+      "train": 346,
+      "validation": 49,
+      "test": 51
+    },
+    "total": 446,
+    "skipped_total": 3861,
+    "task": "image_crop_to_corrected_raw_math_ocr",
+    "target_policy": "Entrenar solo OCR crudo fiel revisado; normalizacion queda fuera de este dataset.",
+    "filters": {
+      "domains": [
+        "geometria"
+      ],
+      "required_notation_flags": []
+    },
+    "files": {
+      "train": "train.jsonl",
+      "validation": "validation.jsonl",
+      "test": "test.jsonl",
+      "skipped": "skipped_records.jsonl"
+    }
+  },
+  "dataset_repo_id": "Jhoan12/math-ocr-geometry-agent-angle-policy-v1-dataset",
+  "model_repo_id": "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-agent-angle-policy-lora-v1",
+  "base_model": "Qwen/Qwen2.5-VL-3B-Instruct",
+  "epochs": 3.0,
+  "learning_rate": 0.0002,
+  "batch": 1,
+  "grad_accum": 8,
+  "max_train_samples": 0,
+  "max_eval_samples": 0,
+  "min_side_tokens": 256,
+  "max_side_tokens": 768,
+  "lora_rank": 16,
+  "lora_alpha": 32,
+  "lora_dropout": 0.05,
+  "oversample_error_type": "angle_symbol_confusion",
+  "oversample_factor": 4,
+  "logging_steps": 2,
+  "image": "pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime",
+  "flavor": "a10g-small",
+  "timeout_seconds": 21600,
+  "train_script": "E:\\Github\\Auditor-IA\\submitted_jobs\\train_geometry_ocr_agent_hf.py",
+  "submitted_at": "2026-06-15T22:21:57",
+  "hf_job_id": "6a30c155fb114ff24a387c8f"
+}

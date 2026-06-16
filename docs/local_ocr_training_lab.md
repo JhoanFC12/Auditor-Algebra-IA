@@ -8,6 +8,8 @@ imagen crop -> OCR crudo corregido en nuestro formato
 
 La normalizacion se planifica aparte en `docs/plan_entrenamiento_normalizador.md`.
 
+La arquitectura por router y especialistas OCR esta en `docs/plan_ocr_especialistas.md`.
+
 ## 1. Preparar Dataset
 
 Usar las golden bases revisadas:
@@ -34,7 +36,21 @@ python tools/prepare_local_ocr_lab_dataset.py `
   --staging-root .cache/transcriptor_runs/staging
 ```
 
-El exportador incluye solo staging con traza `human_raw_ocr_editor`, salvo que se use `--include-unreviewed-staging`.
+Para entrenar el agente OCR de Geometria con foco en confusiones de angulo:
+
+```powershell
+python tools/prepare_local_ocr_lab_dataset.py `
+  --out-dir .cache/transcriptor_runs/datasets/local_ocr_geometry_agent_v1 `
+  --staging-root .cache/transcriptor_runs/staging `
+  --domain geometria
+```
+
+El exportador incluye solo staging con revision OCR humana, por ahora:
+
+- `human_raw_ocr_editor`;
+- `human_raw_ocr_batch_acceptance`.
+
+Para incluir staging sin revisar se puede usar `--include-unreviewed-staging`.
 
 ## 2. Revisar Entorno Local
 
@@ -98,6 +114,19 @@ python tools/train_local_ocr_lora.py `
   --max-eval-samples 20
 ```
 
+Entrenamiento enfocado del agente de Geometria:
+
+```powershell
+python tools/train_local_ocr_lora.py `
+  --dataset-dir .cache/transcriptor_runs/datasets/local_ocr_geometry_agent_v1 `
+  --output-dir models/local_ocr/geometry_agent_angle_policy_v1 `
+  --epochs 1 `
+  --max-train-samples 500 `
+  --max-eval-samples 100 `
+  --oversample-error-type angle_symbol_confusion `
+  --oversample-factor 4
+```
+
 Recomendacion inicial:
 
 - GPU local de 24 GB: Qwen2.5-VL 3B LoRA es el primer candidato.
@@ -117,6 +146,7 @@ Mediremos:
 - alucinaciones: texto agregado que no aparece;
 - respeto del formato `<n.>` y `[CONT.]`;
 - calidad de LaTeX;
+- `angle_symbol_accuracy`: en geometria, `\sphericalangle` no debe salir como `<` ni `\leq`;
 - alternativas A-E preservadas;
 - velocidad por imagen;
 - memoria usada;

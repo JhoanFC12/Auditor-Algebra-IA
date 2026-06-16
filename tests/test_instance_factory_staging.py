@@ -408,6 +408,7 @@ class InstanceFactoryStagingTests(unittest.TestCase):
                     crop_path=str(crop),
                     source={"problem_number": 1},
                     normalized={"numero": "99", "enunciado_latex": "viejo"},
+                    review={"final_latex": "viejo"},
                 )
             )
             service = InstancePdfPipelineService(context, staging_store=store)
@@ -422,11 +423,13 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertEqual(updated.raw_ocr[:5], "<01.>")
             self.assertEqual(updated.structured_ocr, {})
             self.assertEqual(updated.normalized, {})
+            self.assertEqual(updated.review, {})
             self.assertEqual(updated.step_status(PipelineStep.OCR), StageStatus.READY)
             self.assertEqual(updated.step_status(PipelineStep.NORMALIZATION), StageStatus.PENDING)
             loaded = store.get_record("crop_001")
             self.assertEqual(loaded.structured_ocr, {})
             self.assertEqual(loaded.normalized, {})
+            self.assertEqual(loaded.review, {})
             manifest = json.loads((ocr_bank / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["records_corrected"], 1)
             self.assertEqual(manifest["revision_events_total"], 1)
@@ -436,6 +439,76 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertEqual(training_record["corrected_text"], updated.raw_ocr)
             self.assertEqual(training_record["revision_count"], 1)
             self.assertTrue((ocr_bank / training_record["copied_image_rel"]).exists())
+
+    def test_update_raw_ocr_same_text_does_not_create_training_revision(self) -> None:
+        try:
+            from modulos.instance_factory.pipeline import InstancePdfPipelineService
+        except Exception as exc:  # pragma: no cover - optional detector/OCR dependencies.
+            self.skipTest(f"pipeline deps unavailable: {exc}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            crop = Path(tmp) / "crop_001.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="GEO", instance_type="s03")
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(crop),
+                    raw_ocr="<01.> Texto modelo",
+                    structured_ocr={"items_total": 1},
+                    normalized={"numero": "1", "enunciado_latex": "preservar"},
+                )
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+            ocr_bank = Path(tmp) / "ocr_golden_live"
+
+            with patch.dict(os.environ, {"OCR_TRAINING_BANK_ROOTS": str(ocr_bank)}):
+                updated = service.update_raw_ocr("crop_001", "<01.> Texto modelo   \n")
+
+            self.assertEqual(updated.raw_ocr, "<01.> Texto modelo")
+            self.assertEqual(updated.structured_ocr, {"items_total": 1})
+            self.assertEqual(updated.normalized["enunciado_latex"], "preservar")
+            self.assertFalse((ocr_bank / "manifest.json").exists())
+
+    def test_update_raw_ocr_force_review_accepts_same_text_once(self) -> None:
+        try:
+            from modulos.instance_factory.pipeline import InstancePdfPipelineService
+        except Exception as exc:  # pragma: no cover - optional detector/OCR dependencies.
+            self.skipTest(f"pipeline deps unavailable: {exc}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            crop = Path(tmp) / "crop_001.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="GEO", instance_type="s03")
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(crop),
+                    raw_ocr="<01.> Texto modelo",
+                    normalized={"numero": "1", "enunciado_latex": "preservar"},
+                    review={"final_latex": "preservar"},
+                )
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+            ocr_bank = Path(tmp) / "ocr_golden_live"
+
+            with patch.dict(os.environ, {"OCR_TRAINING_BANK_ROOTS": str(ocr_bank)}):
+                accepted = service.update_raw_ocr("crop_001", "<01.> Texto modelo", force_review=True)
+                repeated = service.update_raw_ocr("crop_001", "<01.> Texto modelo", force_review=True)
+
+            self.assertEqual(accepted.raw_ocr, "<01.> Texto modelo")
+            self.assertEqual(accepted.normalized["enunciado_latex"], "preservar")
+            self.assertEqual(accepted.review["final_latex"], "preservar")
+            self.assertEqual(accepted.trace["last_raw_ocr_review"]["source"], "human_raw_ocr_batch_acceptance")
+            self.assertTrue(accepted.trace["last_raw_ocr_review"]["accepted_without_text_change"])
+            self.assertEqual(repeated.trace["last_raw_ocr_review"]["source"], "human_raw_ocr_batch_acceptance")
+            manifest = json.loads((ocr_bank / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["records_corrected"], 1)
+            self.assertEqual(manifest["revision_events_total"], 1)
 
     def test_update_raw_ocr_accumulates_recorrections_without_duplicate_samples(self) -> None:
         try:
@@ -473,6 +546,68 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertEqual(training_record["revision_count"], 2)
             self.assertEqual(training_record["correction_history"][0]["corrected_text"], "texto corregido v1")
             self.assertEqual(updated.artifacts["ocr_training_revision_count"], 2)
+
+    def test_update_figure_segments_resets_normalization_and_review(self) -> None:
+        try:
+            from modulos.instance_factory.pipeline import InstancePdfPipelineService
+        except Exception as exc:  # pragma: no cover - optional detector/OCR dependencies.
+            self.skipTest(f"pipeline deps unavailable: {exc}")
+
+        class FakeSegmenter:
+            last_detector_payload = {
+                "detector_source": "test",
+                "review_status": "corrected",
+            }
+
+            def __init__(self, *_args, **_kwargs) -> None:
+                pass
+
+            def save_reviewed_segments(self, crop_path, boxes, *, detector_payload=None):
+                segment_path = Path(crop_path).parent / "seg_01.png"
+                segment_path.write_bytes(b"png")
+                return [
+                    SimpleNamespace(
+                        idx=1,
+                        bbox=tuple(boxes[0]),
+                        image_path=segment_path,
+                    )
+                ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            crop = Path(tmp) / "crop_001.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="GEO", instance_type="s03")
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            record = StagingProblemRecord(
+                record_id="crop_001",
+                crop_id="crop_001",
+                crop_path=str(crop),
+                raw_ocr="<01.> Halle x",
+                figure_segmentation={"segments_total": 1},
+                normalized={"numero": "1", "enunciado_latex": "viejo"},
+                review={"final_latex": "viejo"},
+            )
+            for step in (
+                PipelineStep.CROPS,
+                PipelineStep.OCR,
+                PipelineStep.SEGMENTATION,
+                PipelineStep.NORMALIZATION,
+                PipelineStep.REVIEW,
+            ):
+                record.set_step(step, StageStatus.READY, "listo")
+            store.upsert_record(record)
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            with patch("modulos.modulo0_transcriptor.segmentador_v2.SegmentadorProblemasV2", FakeSegmenter):
+                updated = service.update_figure_segments("crop_001", [[1, 2, 30, 40]])
+
+            self.assertEqual(updated.raw_ocr, "<01.> Halle x")
+            self.assertEqual(updated.figure_segmentation["segments_total"], 1)
+            self.assertEqual(updated.normalized, {})
+            self.assertEqual(updated.review, {})
+            self.assertEqual(updated.step_status(PipelineStep.SEGMENTATION), StageStatus.READY)
+            self.assertEqual(updated.step_status(PipelineStep.NORMALIZATION), StageStatus.PENDING)
+            self.assertEqual(updated.step_status(PipelineStep.REVIEW), StageStatus.PENDING)
 
     def test_normalize_existing_ocr_prepares_review_from_raw_ocr_only(self) -> None:
         try:
@@ -1246,6 +1381,102 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertEqual(loaded.step_status(PipelineStep.SEGMENTATION), StageStatus.PENDING)
             self.assertEqual(loaded.audit["downstream_state"]["status"], "invalidated")
             self.assertEqual(loaded.trace["downstream_invalidations"][-1]["reason"], "crop_source_changed")
+
+    def test_materialization_relinks_unchanged_bbox_when_new_box_shifts_crop_ids(self) -> None:
+        try:
+            from modulos.instance_factory.pipeline import InstancePdfPipelineService
+        except Exception as exc:  # pragma: no cover - optional detector/OCR dependencies.
+            self.skipTest(f"pipeline deps unavailable: {exc}")
+
+        class FakeGolden:
+            def __init__(self, root: Path) -> None:
+                self.root = root
+
+            def materialize_problem_crops_for_downstream(self, *_args, **_kwargs):
+                target = self.root / "problem_crops_live"
+                records = target / "records"
+                images = target / "images"
+                records.mkdir(parents=True, exist_ok=True)
+                images.mkdir(parents=True, exist_ok=True)
+                payloads = [
+                    ("crop_01", 1, 1, [10, 10, 40, 40]),
+                    ("crop_02", 2, 2, [50, 10, 80, 40]),
+                    ("crop_03", 3, 3, [10, 60, 40, 90]),
+                ]
+                for crop_id, source_order, box_index, bbox in payloads:
+                    (images / f"{crop_id}.png").write_bytes(b"png")
+                    payload = {
+                        "schema_version": "problem_crop_live_v1",
+                        "crop_id": crop_id,
+                        "source_pdf_path": "E:/Banco/libro.pdf",
+                        "source_page_number": 1,
+                        "source_order": source_order,
+                        "box_index": box_index,
+                        "page_problem_index": box_index,
+                        "problem_index": box_index,
+                        "bbox_px": bbox,
+                        "crop_image_rel": f"images/{crop_id}.png",
+                        "source_record_id": "page_0001",
+                    }
+                    (records / f"{crop_id}.json").write_text(json.dumps(payload), encoding="utf-8")
+                return target, ["crop_01", "crop_02", "crop_03"]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s05", pdf_path="E:/Banco/libro.pdf")
+            store = InstanceStagingStore(context, root=root / "staging")
+            for crop_id, bbox, raw, number in [
+                ("crop_01", [10, 10, 40, 40], "OCR A", "1"),
+                ("crop_02", [10, 60, 40, 90], "OCR B", "2"),
+            ]:
+                crop = root / f"{crop_id}.png"
+                crop.write_bytes(b"png")
+                record = StagingProblemRecord(
+                    record_id=crop_id,
+                    crop_id=crop_id,
+                    crop_path=str(crop),
+                    status=StageStatus.READY,
+                    source={
+                        "book_code": "ALG01",
+                        "instance_type": "s05",
+                        "pdf_path": "E:/Banco/libro.pdf",
+                        "page_number": 1,
+                        "source_record_id": "page_0001",
+                        "bbox_px": bbox,
+                    },
+                    raw_ocr=raw,
+                    structured_ocr={"items_total": 1},
+                    figure_segmentation={"segments_total": 1},
+                    normalized={"numero": number},
+                    review={"final_latex": f"final {number}"},
+                )
+                for step in (
+                    PipelineStep.CROPS,
+                    PipelineStep.OCR,
+                    PipelineStep.SEGMENTATION,
+                    PipelineStep.NORMALIZATION,
+                    PipelineStep.REVIEW,
+                ):
+                    record.set_step(step, StageStatus.READY, "listo")
+                store.upsert_record(record)
+            service = InstancePdfPipelineService(context, golden_controller=FakeGolden(root), staging_store=store)
+
+            out = service.materialize_crops_to_staging(rows=[])
+
+            self.assertEqual([record.record_id for record in out], ["crop_01", "crop_02", "crop_03"])
+            self.assertEqual(store.get_record("crop_01").raw_ocr, "OCR A")
+            inserted = store.get_record("crop_02")
+            assert inserted is not None
+            self.assertEqual(inserted.raw_ocr, "")
+            self.assertEqual(inserted.normalized, {})
+            self.assertEqual(inserted.step_status(PipelineStep.OCR), StageStatus.PENDING)
+            relinked = store.get_record("crop_03")
+            assert relinked is not None
+            self.assertEqual(relinked.raw_ocr, "OCR B")
+            self.assertEqual(relinked.normalized["numero"], "2")
+            self.assertEqual(relinked.review["final_latex"], "final 2")
+            self.assertEqual(relinked.source["bbox_px"], [10, 60, 40, 90])
+            self.assertEqual(relinked.trace["source_relinks"][-1]["previous_record_id"], "crop_02")
 
     def test_materialization_uses_crop_payload_order_not_crop_id_order(self) -> None:
         try:

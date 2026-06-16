@@ -287,6 +287,18 @@ def _is_transient_promotion_error(exc: Exception) -> bool:
     return _db_error_code(exc) in TRANSIENT_PROMOTION_SQLSTATES
 
 
+def _database_manager_from_profile(db_profile: str, target_db: str):
+    from database.connection import DatabaseManager
+
+    return DatabaseManager.from_profile(db_profile, db_name=target_db)
+
+
+def _transcriptor_controller_factory():
+    from modulos.modulo0_transcriptor.controlador_transcriptor import TranscriptorController
+
+    return TranscriptorController()
+
+
 def _retry_delay_seconds(attempt: int) -> float:
     return min(0.25 * max(int(attempt), 1), 1.0)
 
@@ -579,11 +591,8 @@ def promote_staging_records_to_db(
     if dry_run:
         return report
 
-    from database.connection import DatabaseManager
-    from modulos.modulo0_transcriptor.controlador_transcriptor import TranscriptorController
-
-    db = DatabaseManager.from_profile(db_profile, db_name=target_db)
-    controller = TranscriptorController()
+    db = _database_manager_from_profile(db_profile, target_db)
+    controller = _transcriptor_controller_factory()
     controller.db = db
     conn = db.get_connection(target_db)
     try:
