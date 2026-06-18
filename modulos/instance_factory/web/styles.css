@@ -1547,6 +1547,11 @@ canvas {
   background: var(--amber-soft);
 }
 
+.batch-result.info {
+  border-color: rgba(59, 130, 246, 0.42);
+  background: color-mix(in srgb, var(--accent-soft) 70%, transparent);
+}
+
 .batch-result.error {
   border-color: rgba(190, 18, 60, 0.55);
   background: var(--red-soft);

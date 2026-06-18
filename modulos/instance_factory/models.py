@@ -112,6 +112,7 @@ class InstancePipelineContext:
     session_path: str = ""
     db_name: str = ""
     book_id: int | None = None
+    staging_root_override: str = ""
 
     @classmethod
     def from_library_instance(
@@ -171,6 +172,9 @@ class InstancePipelineContext:
             return None
 
     def staging_root(self) -> Path:
+        override = str(self.staging_root_override or "").strip()
+        if override:
+            return Path(override).expanduser()
         if str(self.workspace_dir or "").strip():
             layout = project_dirs(Path(self.workspace_dir), self.normalized_instance_type)
             return layout["datasets_dir"] / "pdf_factory_staging"
@@ -187,6 +191,7 @@ class InstancePipelineContext:
             "session_path": self.session_path,
             "db_name": self.db_name,
             "book_id": self.book_id,
+            "staging_root_override": self.staging_root_override,
         }
 
 

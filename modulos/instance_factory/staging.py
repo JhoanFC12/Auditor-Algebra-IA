@@ -140,6 +140,11 @@ class InstanceStagingStore:
     def __init__(self, context: InstancePipelineContext, root: Path | None = None) -> None:
         self.context = context
         self.root = Path(root or context.staging_root()).expanduser().resolve()
+        if root is not None:
+            try:
+                self.context.staging_root_override = str(self.root)
+            except Exception:
+                pass
         self.records_dir = self.root / "records"
         self.root.mkdir(parents=True, exist_ok=True)
         self.records_dir.mkdir(parents=True, exist_ok=True)

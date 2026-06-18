@@ -50,6 +50,53 @@ WEB_APP_VERSION_CACHE_TTL_S = 1.5
 _WEB_APP_VERSION_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
+def _reload_signal_fallback_path() -> Path:
+    root = str(Path(__file__).resolve().parents[2])
+    digest = hashlib.sha1(root.encode("utf-8", errors="ignore")).hexdigest()[:12]
+    return Path(tempfile.gettempdir()) / "auditor_ia_instance_factory" / digest / "web_reload_signal.json"
+
+
+def _reload_signal_paths() -> list[Path]:
+    return [WEB_RELOAD_SIGNAL_PATH, _reload_signal_fallback_path()]
+
+
+def _read_reload_token() -> str:
+    best_mtime = -1.0
+    best_token = ""
+    for path in _reload_signal_paths():
+        try:
+            stat = path.stat()
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and float(stat.st_mtime) >= best_mtime:
+                best_mtime = float(stat.st_mtime)
+                best_token = str(payload.get("token") or "")
+        except Exception:
+            continue
+    return best_token
+
+
+def _write_reload_signal(payload: dict[str, Any]) -> Path:
+    last_error: Exception | None = None
+    for path in _reload_signal_paths():
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+            tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp_path.replace(path)
+            return path
+        except Exception as exc:
+            last_error = exc
+            try:
+                if "tmp_path" in locals() and tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                pass
+            continue
+    if last_error is not None:
+        raise last_error
+    raise PermissionError("No se pudo escribir la senal de recarga de la app.")
+
+
 def _version_rows(paths: list[Path] | tuple[Path, ...]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for path in paths:
@@ -92,13 +139,7 @@ def build_web_app_version(static_root: Path, *, force: bool = False) -> dict[str
     rows = _version_rows(tuple(root / name for name in WEB_APP_ASSET_NAMES))
     backend = _backend_source_version()
     backend_version = str(backend.get("backend_version") or "")
-    reload_token = ""
-    try:
-        payload = json.loads(WEB_RELOAD_SIGNAL_PATH.read_text(encoding="utf-8"))
-        if isinstance(payload, dict):
-            reload_token = str(payload.get("token") or "")
-    except Exception:
-        reload_token = ""
+    reload_token = _read_reload_token()
     payload = {
         "schema_version": "pdf_factory_web_app_version_v1",
         "asset_version": _digest_rows(rows),
@@ -114,14 +155,13 @@ def build_web_app_version(static_root: Path, *, force: bool = False) -> dict[str
 
 
 def signal_web_app_reload(static_root: Path) -> dict[str, Any]:
-    WEB_RELOAD_SIGNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
     token = uuid.uuid4().hex
     payload = {
         "schema_version": "pdf_factory_web_reload_signal_v1",
         "token": token,
         "asset_version": build_web_app_version(static_root).get("asset_version", ""),
     }
-    WEB_RELOAD_SIGNAL_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_reload_signal(payload)
     return {
         **build_web_app_version(static_root, force=True),
         "reload_requested": True,
@@ -1908,6 +1948,7 @@ class FactoryWebRuntime:
             self.cache_root,
             self.static_root,
             Path(getattr(self.service.staging, "root", "")),
+            self.context.staging_root(),
             Path(DEFAULT_PROBLEM_CROPS_LIVE_ROOT),
         ]
         pdf_path = self.context.resolved_pdf_path()

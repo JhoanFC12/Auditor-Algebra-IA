@@ -1492,10 +1492,11 @@ class InstancePdfPipelineService:
         record_id: str = "",
         record_ids: list[str] | None = None,
     ) -> list[StagingProblemRecord]:
-        records = self.staging.load_records()
+        all_records = self.staging.load_records()
+        records = list(all_records)
         selected_record_ids = [str(item or "").strip() for item in list(record_ids or []) if str(item or "").strip()]
         if selected_record_ids:
-            by_id = {str(record.record_id or ""): record for record in records}
+            by_id = {str(record.record_id or ""): record for record in all_records}
             missing = [item for item in selected_record_ids if item not in by_id]
             if missing:
                 raise KeyError(missing[0])
@@ -1512,7 +1513,8 @@ class InstancePdfPipelineService:
                 record.models = {**record.models, **self._model_snapshot()}
                 if str(record.raw_ocr or "").strip():
                     record.set_step(PipelineStep.OCR, StageStatus.READY, "OCR crudo disponible para preparar revision")
-                    record.normalized = self._draft_normalized_from_raw_ocr(record)
+                    continuations = self._continuation_records_for_parent(record, all_records)
+                    record.normalized = self._draft_normalized_from_raw_ocr(record, continuations=continuations)
                 else:
                     record.normalized = {}
                 if record.normalized:
@@ -1542,10 +1544,15 @@ class InstancePdfPipelineService:
         if not str(record.raw_ocr or "").strip():
             raise ValueError("Este registro no tiene OCR crudo para normalizar con IA.")
 
+        all_records = self.staging.load_records()
+        current = next((row for row in all_records if str(row.record_id or "") == record_id), None)
+        if current is not None:
+            record = current
+        continuations = self._continuation_records_for_parent(record, all_records)
         base_normalized = dict(record.normalized or {})
         if not base_normalized:
-            base_normalized = self._draft_normalized_from_raw_ocr(record)
-        input_payload = normalizer_input_from_record(self.context, record)
+            base_normalized = self._draft_normalized_from_raw_ocr(record, continuations=continuations)
+        input_payload = normalizer_input_from_record(self.context, record, continuations=continuations)
         client = HfOcrNormalizerClient(model=str(self.models.normalizer or ""))
         prediction = client.generate_final_latex(input_payload)
         final_latex = str(prediction.get("final_latex") or "").strip()
@@ -1771,25 +1778,125 @@ class InstancePdfPipelineService:
             initial_items=None,
         )
 
-    def _draft_normalized_from_raw_ocr(self, record: StagingProblemRecord) -> dict[str, Any]:
+    @staticmethod
+    def _is_continuation_record(record: StagingProblemRecord | None) -> bool:
+        if record is None:
+            return False
+        normalized = dict(record.normalized or {})
+        continuation = normalized.get("continuacion") if isinstance(normalized.get("continuacion"), dict) else {}
         raw = str(record.raw_ocr or "").strip()
+        return bool(
+            continuation.get("es_continuacion")
+            or continuation.get("fusionar_con_anterior")
+            or raw.lower().startswith("[cont.")
+        )
+
+    @staticmethod
+    def _strip_continuation_marker(value: str) -> str:
+        import re
+
+        return re.sub(r"^\s*\[CONT\.?\]\s*", "", str(value or ""), flags=re.IGNORECASE).strip()
+
+    def _continuation_text_for_normalization(self, record: StagingProblemRecord) -> str:
+        normalized = dict(record.normalized or {})
+        candidates = [
+            record.raw_ocr,
+            normalized.get("enunciado_latex"),
+            normalized.get("latex_rendered_item"),
+        ]
+        for candidate in candidates:
+            text = str(candidate or "").strip()
+            if text:
+                return self._strip_continuation_marker(text)
+        return ""
+
+    def _continuation_records_for_parent(
+        self,
+        parent: StagingProblemRecord,
+        all_records: list[StagingProblemRecord],
+    ) -> list[StagingProblemRecord]:
+        parent_id = str(parent.record_id or "").strip()
+        if not parent_id:
+            return []
+        by_id = {str(row.record_id or ""): row for row in all_records if str(row.record_id or "")}
+        rows: list[StagingProblemRecord] = []
+        seen: set[str] = set()
+
+        def add(row: StagingProblemRecord | None, *, allow_unmarked: bool = False) -> None:
+            if row is None:
+                return
+            row_id = str(row.record_id or "").strip()
+            if not row_id or row_id == parent_id or row_id in seen:
+                return
+            if not allow_unmarked and not self._is_continuation_record(row):
+                return
+            rows.append(row)
+            seen.add(row_id)
+
+        normalized = dict(parent.normalized or {})
+        fused = normalized.get("continuaciones_fusionadas") if isinstance(normalized.get("continuaciones_fusionadas"), list) else []
+        for item in fused:
+            if isinstance(item, dict):
+                add(by_id.get(str(item.get("record_id") or "").strip()), allow_unmarked=True)
+
+        for row in all_records:
+            continuation = dict(row.normalized.get("continuacion") or {}) if isinstance(row.normalized.get("continuacion"), dict) else {}
+            if str(continuation.get("parent_record_id") or "").strip() == parent_id:
+                add(row, allow_unmarked=True)
+
+        try:
+            parent_index = next(
+                index for index, row in enumerate(all_records) if str(row.record_id or "") == parent_id
+            )
+        except StopIteration:
+            parent_index = -1
+        if parent_index >= 0:
+            for row in all_records[parent_index + 1 :]:
+                if not self._is_continuation_record(row):
+                    break
+                add(row)
+        return rows
+
+    def _merged_raw_ocr_for_normalization(
+        self,
+        record: StagingProblemRecord,
+        continuations: list[StagingProblemRecord] | None = None,
+    ) -> str:
+        parts = [str(record.raw_ocr or "").strip()]
+        for row in list(continuations or []):
+            text = self._continuation_text_for_normalization(row)
+            if text:
+                parts.append(text)
+        return "\n".join(part for part in parts if part).strip()
+
+    def _draft_normalized_from_raw_ocr(
+        self,
+        record: StagingProblemRecord,
+        *,
+        continuations: list[StagingProblemRecord] | None = None,
+    ) -> dict[str, Any]:
+        continuation_rows = list(continuations or [])
+        raw = self._merged_raw_ocr_for_normalization(record, continuation_rows)
         if not raw:
             return {}
         source = dict(record.source or {})
+        base_normalized = dict(record.normalized or {})
         try:
-            number = str(int(record.normalized.get("numero") or source.get("problem_number") or source.get("n") or "")).strip()
+            number = str(int(base_normalized.get("numero") or source.get("problem_number") or source.get("n") or "")).strip()
         except Exception:
-            number = str(record.normalized.get("numero") or source.get("problem_number") or source.get("n") or "").strip()
-        has_figure = bool((record.figure_segmentation or {}).get("segments_total"))
-        return {
+            number = str(base_normalized.get("numero") or source.get("problem_number") or source.get("n") or "").strip()
+        has_figure = bool((record.figure_segmentation or {}).get("segments_total")) or any(
+            bool((row.figure_segmentation or {}).get("segments_total")) for row in continuation_rows
+        )
+        draft = {
             "schema_version": "normalized_problem_staging_v1",
             "normalizer": "manual_raw_ocr_review",
             "status": StageStatus.NEEDS_REVIEW,
             "updated_at": utc_now_text(),
             "source_record_id": record.record_id,
             "numero": number,
-            "curso": str((record.normalized or {}).get("curso") or "SIN_CURSO"),
-            "tema": str((record.normalized or {}).get("tema") or "SIN_TEMA"),
+            "curso": str(base_normalized.get("curso") or "SIN_CURSO"),
+            "tema": str(base_normalized.get("tema") or "SIN_TEMA"),
             "enunciado_latex": raw,
             "alternativas": {"A": "", "B": "", "C": "", "D": "", "E": ""},
             "respuesta_correcta": "",
@@ -1802,9 +1909,14 @@ class InstancePdfPipelineService:
                 "source": source,
                 "models": dict(record.models),
                 "confidence": dict(record.confidence),
-                "raw_ocr_source": "raw_ocr_only",
+                "raw_ocr_source": "raw_ocr_plus_continuations" if continuation_rows else "raw_ocr_only",
+                "continuation_record_ids": [str(row.record_id or "") for row in continuation_rows],
+                "continuations_total": len(continuation_rows),
             },
         }
+        if isinstance(base_normalized.get("continuaciones_fusionadas"), list):
+            draft["continuaciones_fusionadas"] = list(base_normalized.get("continuaciones_fusionadas") or [])
+        return draft
 
     def _normalize_from_pipeline_record(self, record: StagingProblemRecord, report: dict[str, Any]) -> dict[str, Any]:
         items = list(report.get("items") or []) if isinstance(report, dict) else []

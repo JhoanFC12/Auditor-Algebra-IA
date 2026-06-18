@@ -96,18 +96,83 @@ def _compact_figure(figure: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _strip_continuation_marker(value: str) -> str:
+    return re.sub(r"^\s*\[CONT\.?\]\s*", "", str(value or ""), flags=re.IGNORECASE).strip()
+
+
+def _record_ocr_text_for_normalizer(record: StagingProblemRecord) -> str:
+    normalized = dict(record.normalized or {})
+    candidates = [
+        record.raw_ocr,
+        normalized.get("enunciado_latex"),
+        normalized.get("latex_rendered_item"),
+    ]
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if text:
+            return text
+    return ""
+
+
 def normalizer_input_from_record(
     context: InstancePipelineContext,
     record: StagingProblemRecord,
+    *,
+    continuations: list[StagingProblemRecord] | None = None,
 ) -> dict[str, Any]:
     source = dict(record.source or {})
     normalized = dict(record.normalized or {})
     figure = dict(record.figure_segmentation or {})
     crop_path = Path(str(record.crop_path or ""))
+    continuation_entries: list[dict[str, Any]] = []
+    continuation_images: list[dict[str, str]] = []
+    for index, row in enumerate(list(continuations or []), start=1):
+        row_source = dict(row.source or {})
+        row_crop_path = Path(str(row.crop_path or ""))
+        row_raw_ocr = _strip_continuation_marker(_record_ocr_text_for_normalizer(row))
+        continuation_entries.append(
+            {
+                "record_id": str(row.record_id or ""),
+                "crop_id": str(row.crop_id or row.record_id or ""),
+                "raw_ocr": row_raw_ocr,
+                "source": {
+                    "page_number": row_source.get("page_number")
+                    if row_source.get("page_number") is not None
+                    else row_source.get("source_page_number"),
+                    "problem_number": row_source.get("problem_number")
+                    if row_source.get("problem_number") is not None
+                    else row_source.get("n"),
+                    "box_index": row_source.get("box_index")
+                    if row_source.get("box_index") is not None
+                    else row_source.get("page_problem_index"),
+                    "crop_name": row_crop_path.name,
+                },
+                "figure_segmentation": _compact_figure(dict(row.figure_segmentation or {})),
+            }
+        )
+        continuation_images.append(
+            {
+                "role": f"continuation_{index:02d}",
+                "crop_id": str(row.crop_id or row.record_id or ""),
+                "file_name": row_crop_path.name,
+            }
+        )
+    raw_parts = [str(record.raw_ocr or "").strip()]
+    raw_parts.extend(
+        f"[CONT. {index}] {entry['raw_ocr']}".strip()
+        for index, entry in enumerate(continuation_entries, start=1)
+        if str(entry.get("raw_ocr") or "").strip()
+    )
+    has_figure_hint = (
+        bool(normalized.get("tiene_grafico"))
+        or int(figure.get("segments_total") or 0) > 0
+        or any(bool(dict(entry.get("figure_segmentation") or {}).get("has_figure")) for entry in continuation_entries)
+    )
     return {
         "schema_version": "normalizer_training_input_v1",
         "record_id": str(record.record_id or ""),
-        "raw_ocr": str(record.raw_ocr or ""),
+        "raw_ocr": "\n\n".join(part for part in raw_parts if part),
+        "main_raw_ocr": str(record.raw_ocr or ""),
         "source": {
             "book_code": str(source.get("book_code") or context.book_code or ""),
             "instance_type": str(source.get("instance_type") or context.instance_type or ""),
@@ -120,17 +185,17 @@ def normalizer_input_from_record(
         "human_hints": {
             "curso": str(normalized.get("curso") or ""),
             "tema": str(normalized.get("tema") or ""),
-            "has_figure": bool(normalized.get("tiene_grafico")) or int(figure.get("segments_total") or 0) > 0,
+            "has_figure": has_figure_hint,
             "figure_tag": str(normalized.get("figure_tag") or ""),
         },
-        "continuations": [],
+        "continuations": continuation_entries,
         "images": [
             {
                 "role": "main",
                 "crop_id": str(record.crop_id or record.record_id or ""),
                 "file_name": crop_path.name,
             }
-        ],
+        ] + continuation_images,
     }
 
 

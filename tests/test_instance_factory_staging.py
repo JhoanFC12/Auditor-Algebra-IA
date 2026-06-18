@@ -643,6 +643,61 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertEqual(loaded.normalized["normalizer"], "manual_raw_ocr_review")
             self.assertEqual(loaded.normalized["enunciado_latex"], "<01.> Determinar x. A) $10^\\circ$ B) $20^\\circ$")
 
+    def test_normalize_existing_ocr_merges_continuation_raw_ocr_into_parent(self) -> None:
+        try:
+            from modulos.instance_factory.pipeline import InstancePdfPipelineService
+        except Exception as exc:  # pragma: no cover - optional detector/OCR dependencies.
+            self.skipTest(f"pipeline deps unavailable: {exc}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            main_crop = Path(tmp) / "crop_001.png"
+            cont_crop = Path(tmp) / "crop_002.png"
+            main_crop.write_bytes(b"png")
+            cont_crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="GEO", instance_type="s03")
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="crop_001",
+                        crop_id="crop_001",
+                        crop_path=str(main_crop),
+                        raw_ocr="<08.> Indique el valor de verdad.",
+                        source={"problem_number": 8},
+                        normalized={
+                            "numero": "8",
+                            "curso": "Geometria",
+                            "tema": "angulos",
+                            "continuaciones_fusionadas": [{"record_id": "crop_002"}],
+                        },
+                    ),
+                    StagingProblemRecord(
+                        record_id="crop_002",
+                        crop_id="crop_002",
+                        crop_path=str(cont_crop),
+                        raw_ocr="A) FVVF B) FFVF C) FFFF D) FVFV E) FFVF",
+                        normalized={
+                            "continuacion": {
+                                "es_continuacion": True,
+                                "fusionar_con_anterior": True,
+                                "parent_record_id": "crop_001",
+                            }
+                        },
+                    ),
+                ]
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            out = service.normalize_existing_ocr(record_id="crop_001")
+            loaded = store.get_record("crop_001")
+
+            self.assertEqual([record.record_id for record in out], ["crop_001"])
+            self.assertIn("Indique el valor", loaded.normalized["enunciado_latex"])
+            self.assertIn("A) FVVF", loaded.normalized["enunciado_latex"])
+            self.assertEqual(loaded.normalized["metadata_tecnica"]["raw_ocr_source"], "raw_ocr_plus_continuations")
+            self.assertEqual(loaded.normalized["metadata_tecnica"]["continuation_record_ids"], ["crop_002"])
+            self.assertEqual(loaded.normalized["continuaciones_fusionadas"][0]["record_id"], "crop_002")
+
     def test_normalize_with_ai_stores_review_draft_without_marking_ready(self) -> None:
         class FakeNormalizerClient:
             calls: list[dict] = []
@@ -688,6 +743,67 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertEqual(FakeNormalizerClient.calls[0]["schema_version"], "normalizer_training_input_v1")
             self.assertEqual(FakeNormalizerClient.calls[0]["raw_ocr"], "<01.> Determinar x. A) $10$ B) $20$ C) $30$ D) $40$ E) $50$")
             self.assertEqual(store.get_record("crop_001").status, StageStatus.NEEDS_REVIEW)
+
+    def test_normalize_with_ai_sends_parent_and_continuations(self) -> None:
+        class FakeNormalizerClient:
+            calls: list[dict] = []
+
+            def __init__(self, *, model: str):
+                self.model = model
+
+            def generate_final_latex(self, input_payload: dict) -> dict:
+                self.calls.append(input_payload)
+                return {
+                    "model": self.model,
+                    "base_url": "fake://normalizer",
+                    "final_latex": "\\item[\\textbf{8.}] [[curso=GEO]] [[tema=ANGULOS]] [[Estado=sin_revisar]] [[Clave=A]] Indique el valor de verdad. \u00a3A)FVVF\u00e6B)FFVF\u00e6C)FFFF\u00a3D)FVFV\u00e6\u00e6E)FFVF\u00a3",
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            main_crop = Path(tmp) / "crop_001.png"
+            cont_crop = Path(tmp) / "crop_002.png"
+            main_crop.write_bytes(b"png")
+            cont_crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="GEO", instance_type="s03")
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="crop_001",
+                        crop_id="crop_001",
+                        crop_path=str(main_crop),
+                        raw_ocr="<08.> Indique el valor de verdad.",
+                        source={"problem_number": 8, "page_number": 1},
+                        normalized={"continuaciones_fusionadas": [{"record_id": "crop_002"}]},
+                    ),
+                    StagingProblemRecord(
+                        record_id="crop_002",
+                        crop_id="crop_002",
+                        crop_path=str(cont_crop),
+                        raw_ocr="A) FVVF B) FFVF C) FFFF D) FVFV E) FFVF",
+                        source={"page_number": 1, "box_index": 2},
+                        normalized={
+                            "continuacion": {
+                                "es_continuacion": True,
+                                "fusionar_con_anterior": True,
+                                "parent_record_id": "crop_001",
+                            }
+                        },
+                    ),
+                ]
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+            service.models.normalizer = "Jhoan12/fake-normalizer"
+
+            with patch("modulos.instance_factory.pipeline.HfOcrNormalizerClient", FakeNormalizerClient):
+                service.normalize_with_ai("crop_001")
+
+            sent = FakeNormalizerClient.calls[0]
+            self.assertIn("Indique el valor", sent["raw_ocr"])
+            self.assertIn("FVVF", sent["raw_ocr"])
+            self.assertEqual(len(sent["continuations"]), 1)
+            self.assertEqual(sent["continuations"][0]["record_id"], "crop_002")
+            self.assertEqual(len(sent["images"]), 2)
 
     def test_trained_ocr_rejects_hf_router_as_dedicated_endpoint(self) -> None:
         try:

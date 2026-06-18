@@ -103,6 +103,7 @@ class LatexWordBridgeWindow(tk.Toplevel):
         self._db_selected_problem_order: list[int] = []
         self._db_selected_problem_map: dict[int, dict[str, object]] = {}
         self._db_selection_json_path: Path | None = None
+        self._db_selection_json_loaded_explicitly = False
         self._db_preview_window: tk.Toplevel | None = None
         self._db_practice_editor_window: tk.Toplevel | None = None
         self.db_preview_tree: ttk.Treeview | None = None
@@ -2168,6 +2169,7 @@ class LatexWordBridgeWindow(tk.Toplevel):
             messagebox.showwarning("Modulo 7", "El JSON no contiene una seleccion reconstruible.")
             return
         self._db_selection_json_path = json_path
+        self._db_selection_json_loaded_explicitly = True
         self._db_selected_problem_ids.clear()
         self._db_selected_problem_order.clear()
         self._db_selected_problem_map.clear()
@@ -2192,8 +2194,13 @@ class LatexWordBridgeWindow(tk.Toplevel):
     def _open_practice_editor_from_db_source_window(self) -> None:
         self._sync_db_source_structure_to_main()
         self.source_mode_var.set("db")
-        json_path = self._db_selection_json_path or self._db_selection_output_path(output_docx=None)
-        if not self._selection_json_has_editable_items(json_path):
+        if (
+            self._db_selection_json_loaded_explicitly
+            and self._db_selection_json_path is not None
+            and self._selection_json_has_editable_items(self._db_selection_json_path)
+        ):
+            json_path = self._db_selection_json_path
+        elif self._db_selected_problem_ids:
             try:
                 json_path = self._save_db_selected_problem_ids()
             except Exception as exc:
@@ -2203,6 +2210,12 @@ class LatexWordBridgeWindow(tk.Toplevel):
                     f"{exc}",
                 )
                 return
+        else:
+            messagebox.showwarning(
+                "Modulo 7",
+                "Primero selecciona problemas en el visualizador o carga manualmente un JSON de seleccion.",
+            )
+            return
         self._db_selection_json_path = json_path
         try:
             if self._db_practice_editor_window is not None and self._db_practice_editor_window.winfo_exists():
@@ -3251,6 +3264,8 @@ class LatexWordBridgeWindow(tk.Toplevel):
             self._db_selected_problem_ids.clear()
             self._db_selected_problem_order.clear()
             self._db_selected_problem_map.clear()
+            self._db_selection_json_path = None
+            self._db_selection_json_loaded_explicitly = False
         if self.db_preview_tree is not None and self.db_preview_tree.winfo_exists():
             for item_id in self.db_preview_tree.get_children():
                 self.db_preview_tree.delete(item_id)
@@ -3578,6 +3593,8 @@ class LatexWordBridgeWindow(tk.Toplevel):
         pid = int(problem.get("id") or 0)
         if pid <= 0:
             return
+        self._db_selection_json_path = None
+        self._db_selection_json_loaded_explicitly = False
         self._db_selected_problem_ids.add(pid)
         if pid not in self._db_selected_problem_order:
             self._db_selected_problem_order.append(pid)
@@ -3587,6 +3604,8 @@ class LatexWordBridgeWindow(tk.Toplevel):
         pid = int(problem_id or 0)
         if pid <= 0:
             return
+        self._db_selection_json_path = None
+        self._db_selection_json_loaded_explicitly = False
         self._db_selected_problem_ids.discard(pid)
         self._db_selected_problem_map.pop(pid, None)
         self._db_selected_problem_order = [current_id for current_id in self._db_selected_problem_order if current_id != pid]
@@ -3602,6 +3621,8 @@ class LatexWordBridgeWindow(tk.Toplevel):
         self._db_selected_problem_ids.clear()
         self._db_selected_problem_order.clear()
         self._db_selected_problem_map.clear()
+        self._db_selection_json_path = None
+        self._db_selection_json_loaded_explicitly = False
         self._refresh_db_preview_tree_marks()
 
     def _refresh_db_preview_tree_marks(self) -> None:
@@ -3840,33 +3861,14 @@ class LatexWordBridgeWindow(tk.Toplevel):
         if not db_name:
             return []
 
-        candidate_paths: list[Path] = []
-        primary_path = self._db_selection_output_path(output_docx=output_docx)
-        candidate_paths.append(primary_path)
-        if self._db_selection_json_path is not None and self._db_selection_json_path not in candidate_paths:
-            candidate_paths.append(self._db_selection_json_path)
-        fallback_path = self._db_selection_output_path(output_docx=None)
-        if fallback_path not in candidate_paths:
-            candidate_paths.append(fallback_path)
+        selected_items = self._selected_db_preview_items()
+        if selected_items:
+            return selected_items
 
-        ordered_ids: list[int] = []
-        by_id: dict[int, dict[str, object]] = {}
+        if self._db_selection_json_loaded_explicitly and self._db_selection_json_path is not None:
+            return self._load_saved_db_selection_items(self._db_selection_json_path, db_name=db_name)
 
-        def merge_items(items: list[dict[str, object]], *, overwrite: bool = True) -> None:
-            for item in items:
-                pid = int(item.get("id") or 0)
-                if pid <= 0:
-                    continue
-                if pid not in by_id:
-                    ordered_ids.append(pid)
-                if overwrite or pid not in by_id:
-                    by_id[pid] = dict(item)
-
-        merge_items(self._selected_db_preview_items(), overwrite=True)
-        for path in candidate_paths:
-            merge_items(self._load_saved_db_selection_items(path, db_name=db_name), overwrite=True)
-
-        return [by_id[pid] for pid in ordered_ids if pid in by_id]
+        return []
 
     def _selection_json_has_editable_items(self, path: Path) -> bool:
         if not path.exists():
@@ -3923,6 +3925,7 @@ class LatexWordBridgeWindow(tk.Toplevel):
         }
         target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         self._db_selection_json_path = target
+        self._db_selection_json_loaded_explicitly = False
         self._log(f"IDs de seleccion BD guardados: {target} | total={len(problemas)}")
         return target
 

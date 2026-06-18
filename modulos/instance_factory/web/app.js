@@ -4880,13 +4880,13 @@ function batchRecordsForMode(mode = state.batchMode) {
   if (!batchModeUsesReviewSelection(mode)) return allRecords;
   const visibleRecords = reviewRecords(allRecords);
   const selected = selectedReviewBatchRecords(visibleRecords);
-  return selected.length ? selected : allRecords;
+  return selected.length ? selected : visibleRecords;
 }
 
 function batchRecordsSelectionLabel(mode = state.batchMode) {
   if (!batchModeUsesReviewSelection(mode)) return "todos los crops de staging";
   const selectedCount = selectedReviewBatchRecords().length;
-  return selectedCount ? `${selectedCount} problema(s) seleccionado(s)` : "todos los registros de staging";
+  return selectedCount ? `${selectedCount} problema(s) seleccionado(s)` : "todos los problemas principales";
 }
 
 function findParentForContinuation(record, allRecords = state.snapshot?.records || []) {
@@ -6774,15 +6774,19 @@ function normalizerInputFromRecord(record, index = 0) {
   const source = record?.source && typeof record.source === "object" ? record.source : {};
   const normalized = record?.normalized && typeof record.normalized === "object" ? record.normalized : {};
   const figure = normalizerFigureSegmentationFromRecord(record, normalized);
+  const continuations = normalizerContinuationInputsFromRecord(record);
+  const hasFigure = Boolean(figure.has_figure || continuations.some((item) => item.figure_segmentation?.has_figure));
   return {
     schema_version: "normalizer_input_staging_v1",
     record_id: String(record?.record_id || ""),
     crop_id: String(record?.crop_id || record?.record_id || ""),
     crop_name: batchRecordTitle(record, index),
     crop_path: String(record?.crop_path || ""),
-    raw_ocr: String(record?.raw_ocr || ""),
+    raw_ocr: mergedRawOcrForNormalizer(record, continuations),
+    main_raw_ocr: String(record?.raw_ocr || ""),
     structured_ocr: {},
     figure_segmentation: figure,
+    continuations,
     source: {
       book_code: String(source.book_code || state.snapshot?.context?.book_code || ""),
       instance_type: String(source.instance_type || state.snapshot?.context?.instance_type || ""),
@@ -6798,16 +6802,61 @@ function normalizerInputFromRecord(record, index = 0) {
       suggested_course: String(normalized.curso || "SIN_CURSO"),
       suggested_topic: String(normalized.tema || "SIN_TEMA"),
       continuation: Boolean(isReviewContinuationRecord(record) || isFinalLatexContinuation(record?.raw_ocr)),
+      continuations_total: continuations.length,
       final_format: "\\item[\\textbf{n.}] [[curso=...]] [[tema=...]] [[Estado=sin_revisar]] [[Clave=...]] Enunciado... [[Imagen=img-n]] £A)...æB)...æC)...£D)...ææE)...£",
     },
     policy: {
       raw_ocr_is_primary: true,
       do_not_invent_information: true,
       do_not_describe_graphics: true,
-      add_image_tag_when_has_figure: Boolean(figure.has_figure),
+      add_image_tag_when_has_figure: hasFigure,
       output_only_final_latex: true,
     },
   };
+}
+
+function normalizerContinuationInputsFromRecord(record) {
+  return continuationRecordsForParent(record, state.snapshot?.records || []).map((row, index) => {
+    const source = row?.source && typeof row.source === "object" ? row.source : {};
+    const normalized = row?.normalized && typeof row.normalized === "object" ? row.normalized : {};
+    const cropName = String(row?.crop_path || "").split(/[\\/]/).filter(Boolean).pop() || batchRecordTitle(row, index);
+    return {
+      record_id: String(row?.record_id || ""),
+      crop_id: String(row?.crop_id || row?.record_id || ""),
+      crop_name: cropName,
+      raw_ocr: stripFinalContinuationMarker(recordTextForNormalizer(row)),
+      source: {
+        page_number: source.page_number ?? source.source_page_number ?? null,
+        problem_number: source.problem_number ?? source.n ?? normalized.numero ?? "",
+        box_index: source.box_index ?? source.page_problem_index ?? source.problem_index ?? null,
+        bbox_px: Array.isArray(source.bbox_px) ? source.bbox_px : [],
+      },
+      figure_segmentation: normalizerFigureSegmentationFromRecord(row, normalized),
+    };
+  });
+}
+
+function recordTextForNormalizer(record) {
+  const normalized = record?.normalized && typeof record.normalized === "object" ? record.normalized : {};
+  const candidates = [
+    record?.raw_ocr,
+    normalized.enunciado_latex,
+    normalized.latex_rendered_item,
+  ];
+  for (const candidate of candidates) {
+    const text = String(candidate || "").trim();
+    if (text) return text;
+  }
+  return "";
+}
+
+function mergedRawOcrForNormalizer(record, continuationInputs = normalizerContinuationInputsFromRecord(record)) {
+  const parts = [String(record?.raw_ocr || "").trim()];
+  (continuationInputs || []).forEach((item, index) => {
+    const text = String(item?.raw_ocr || "").trim();
+    if (text) parts.push(`[CONT. ${index + 1}] ${text}`);
+  });
+  return parts.filter(Boolean).join("\n\n");
 }
 
 function normalizerFigureSegmentationFromRecord(record, normalized = {}) {
@@ -6848,11 +6897,14 @@ function normalizerTrainingInputFromRecord(record, index = 0) {
   const source = record?.source && typeof record.source === "object" ? record.source : {};
   const normalized = record?.normalized && typeof record.normalized === "object" ? record.normalized : {};
   const figure = normalizerFigureSegmentationFromRecord(record, normalized);
+  const continuations = normalizerContinuationInputsFromRecord(record);
+  const hasFigure = Boolean(figure.has_figure || continuations.some((item) => item.figure_segmentation?.has_figure));
   const cropName = String(record?.crop_path || "").split(/[\\/]/).filter(Boolean).pop() || batchRecordTitle(record, index);
   return {
     schema_version: "normalizer_training_input_v1",
     record_id: String(record?.record_id || ""),
-    raw_ocr: String(record?.raw_ocr || ""),
+    raw_ocr: mergedRawOcrForNormalizer(record, continuations),
+    main_raw_ocr: String(record?.raw_ocr || ""),
     source: {
       book_code: String(source.book_code || state.snapshot?.context?.book_code || ""),
       instance_type: String(source.instance_type || state.snapshot?.context?.instance_type || ""),
@@ -6863,19 +6915,26 @@ function normalizerTrainingInputFromRecord(record, index = 0) {
     },
     figure_segmentation: {
       status: String(record?.figure_segmentation?.status || ""),
-      has_figure: Boolean(figure.has_figure),
-      segments_total: Number(figure.segments_total || 0),
+      has_figure: hasFigure,
+      segments_total: Number(figure.segments_total || 0) + continuations.reduce((total, item) => total + Number(item.figure_segmentation?.segments_total || 0), 0),
       detector_source: String(figure.detector?.detector_source || ""),
       review_status: String(figure.detector?.review_status || ""),
     },
     human_hints: {
       curso: String(normalized.curso || ""),
       tema: String(normalized.tema || ""),
-      has_figure: Boolean(figure.has_figure),
+      has_figure: hasFigure,
       figure_tag: String(normalized.figure_tag || ""),
     },
-    continuations: [],
-    images: [{ role: "main", crop_id: String(record?.crop_id || record?.record_id || ""), file_name: cropName }],
+    continuations,
+    images: [
+      { role: "main", crop_id: String(record?.crop_id || record?.record_id || ""), file_name: cropName },
+      ...continuations.map((item, idx) => ({
+        role: `continuation_${String(idx + 1).padStart(2, "0")}`,
+        crop_id: String(item.crop_id || item.record_id || ""),
+        file_name: String(item.crop_name || ""),
+      })),
+    ],
   };
 }
 
@@ -7285,11 +7344,12 @@ async function saveBatchEditor(mode = state.batchMode) {
       await saveFinalLatexBatchEditor(records, parsed, { results, failed, saveBtn });
       return;
     }
+    const allowSequentialFallback = (parsed.blocks || []).length === records.length;
     for (let index = 0; index < records.length; index += 1) {
       const record = records[index];
       const title = batchRecordTitle(record, index);
       updateBatchProgressInline({ current: index, total, ok, failed, skipped, active: title });
-      const picked = takeBatchBlockForRecord(parsed.blocks, usedBlocks, record, index, true);
+      const picked = takeBatchBlockForRecord(parsed.blocks, usedBlocks, record, index, allowSequentialFallback);
       let block = picked?.block || null;
       let usedCurrentRawOcrFallback = false;
       if (!block) {
@@ -7914,7 +7974,7 @@ function renderReviewStage() {
       <div class="record-layout">
         <div>
           ${renderReviewImageStack(record, allRecords)}
-          ${renderTechnicalDetails("OCR crudo", record.raw_ocr || "(sin OCR crudo)", "text")}
+          ${renderTechnicalDetails("OCR crudo usado para normalizacion", mergedRawOcrForNormalizer(record) || "(sin OCR crudo)", "text")}
           ${renderTechnicalDetails("Contexto tecnico del registro", {
             record_id: record.record_id,
             status: record.status,
@@ -9246,7 +9306,7 @@ async function normalizeRecords() {
 }
 
 function normalizableRecords() {
-  const records = state.snapshot?.records || [];
+  const records = reviewRecords(state.snapshot?.records || []);
   const hasNormalizableData = (record) => !recordSourceStale(record)
     && !recordDownstreamInvalidated(record)
     && hasText(record.raw_ocr);
