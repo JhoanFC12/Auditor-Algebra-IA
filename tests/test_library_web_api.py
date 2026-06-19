@@ -1675,6 +1675,128 @@ class LibraryWebApiTests(unittest.TestCase):
             finally:
                 runtime.stop()
 
+    def test_library_runtime_lists_latex_word_db_problems_via_api(self) -> None:
+        class _PracticeController:
+            def contar_problemas(self, db_name, **filters):
+                self.db_name = db_name
+                self.filters = filters
+                return 1
+
+            def obtener_problemas(self, _db_name, *, cantidad, **_filters):
+                self.cantidad = cantidad
+                return [
+                    {
+                        "id": 91,
+                        "numero_original": 12,
+                        "curso": "Geometria",
+                        "tema": "Triangulos",
+                        "subtema": "Angulos",
+                        "autor": "Autor",
+                        "editorial": "Editorial",
+                        "respuesta_correcta": "D",
+                        "enunciado_latex": r"\item[\textbf{12.}] Calcule $x$.",
+                    }
+                ]
+
+            def listar_cursos(self, _db_name):
+                return ["Geometria"]
+
+            def listar_temas(self, _db_name, *, curso=""):
+                return [{"id": 7, "nombre": "Triangulos", "curso": curso}]
+
+            def listar_subtemas(self, _db_name, *, tema_id=None):
+                return [{"id": 8, "nombre": "Angulos", "tema_id": tema_id}]
+
+            def listar_autores(self, _db_name, **_filters):
+                return ["Autor"]
+
+            def listar_editoriales(self, _db_name, **_filters):
+                return ["Editorial"]
+
+        runtime = LibraryWebRuntime(controller=_FakeController())
+        practice = _PracticeController()
+        runtime.word_service.practice_controller = practice
+        try:
+            base = runtime.start()
+            payload = _get_json(
+                base,
+                "api/word/problems?db_name=demo_db&curso=Geometria&tema_id=7&subtema_id=8&autor=Autor&editorial=Editorial&estado=Todos&clave=D&limit=25",
+            )
+
+            self.assertEqual(payload["schema_version"], "latex_word_problem_selection_v1")
+            self.assertEqual(payload["count"], 1)
+            self.assertEqual(payload["problems"][0]["id"], 91)
+            self.assertEqual(practice.filters["tema_id"], 7)
+            self.assertEqual(practice.filters["subtema_id"], 8)
+            self.assertEqual(practice.filters["autor"], "Autor")
+            self.assertEqual(practice.filters["editorial"], "Editorial")
+            self.assertEqual(practice.filters["clave"], "D")
+            self.assertEqual(payload["options"]["temas"][0]["id"], 7)
+        finally:
+            runtime.stop()
+
+    def test_library_runtime_converts_latex_word_db_problems_via_api(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "Editor_de_practicas"
+            repo.mkdir()
+            (repo / "latex_to_word.py").write_text(
+                "\n".join(
+                    [
+                        "from pathlib import Path",
+                        "import sys",
+                        "out = Path(sys.argv[2])",
+                        "out.write_bytes(b'docx')",
+                        "print(f'Word generado en: {out}')",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            image = root / "figura.png"
+            image.write_bytes(b"png")
+
+            class _PracticeController:
+                def obtener_problemas_por_ids(self, _db_name, *, problem_ids):
+                    self.problem_ids = list(problem_ids)
+                    return [
+                        {
+                            "id": 44,
+                            "numero_original": 9,
+                            "curso": "Geometria",
+                            "tema": "Triangulos",
+                            "respuesta_correcta": "A",
+                            "enunciado_latex": r"\item[\textbf{9.}] Calcule $x$.",
+                            "imagenes": [str(image)],
+                            "ruta_carpeta": str(root),
+                        }
+                    ]
+
+            output = root / "bd_practica.docx"
+            runtime = LibraryWebRuntime(controller=_FakeController())
+            runtime.word_service.practice_controller = _PracticeController()
+            try:
+                base = runtime.start()
+                payload = _post_json(
+                    base,
+                    "api/word/convert-problems",
+                    {
+                        "db_name": "demo_db",
+                        "problem_ids": [44],
+                        "output_docx": str(output),
+                        "repo": str(repo),
+                        "python": sys.executable,
+                        "title": "Practica BD",
+                    },
+                )
+
+                self.assertEqual(payload["schema_version"], "latex_word_db_conversion_v1")
+                self.assertTrue(payload["word_exists"])
+                self.assertTrue(output.exists())
+                self.assertTrue((root / "bd_practica__db_images" / "p44_figura.png").exists())
+                self.assertIn("/api/library/file/", payload["word_url"])
+            finally:
+                runtime.stop()
+
     def test_library_runtime_hides_internal_tracebacks_from_client_with_request_id(self) -> None:
         class _BrokenController(_FakeController):
             def listar_libros(self, *_args, **_kwargs):

@@ -290,11 +290,42 @@ class LibraryWebRuntime:
                 root = self._first(query, "root", "")
                 self.word_service.controller = self._word_controller()
                 return self.word_service.list_sessions(db_name=db_name, root=root)
+            if method == "GET" and path == "/api/word/problems":
+                db_name = self._first(query, "db_name", self.default_db_name)
+                self.word_service.controller = self._word_controller()
+                return self.word_service.list_db_problems(
+                    db_name=db_name,
+                    curso=self._first(query, "curso", ""),
+                    tema_id=self._optional_int(self._first(query, "tema_id", "")),
+                    subtema_id=self._optional_int(self._first(query, "subtema_id", "")),
+                    autor=self._first(query, "autor", ""),
+                    editorial=self._first(query, "editorial", ""),
+                    estado=self._first(query, "estado", "Todos") or "Todos",
+                    clave=self._first(query, "clave", "Todos") or "Todos",
+                    limit=self._bounded_int(self._first(query, "limit", "100"), "limit", minimum=1, maximum=500),
+                    aleatorio=self._bool(self._first(query, "aleatorio", ""), default=False),
+                )
             if method == "POST" and path == "/api/word/convert":
                 self.word_service.controller = self._word_controller()
                 return self.word_service.convert_session(
                     session_path=self._required_str(payload, "session_path"),
                     output_docx=str(payload.get("output_docx") or ""),
+                    repo=str(payload.get("repo") or ""),
+                    python=str(payload.get("python") or ""),
+                    template=str(payload.get("template") or ""),
+                    style=str(payload.get("style") or "Estilo_plantilla"),
+                )
+            if method == "POST" and path == "/api/word/convert-problems":
+                self.word_service.controller = self._word_controller()
+                problem_ids = payload.get("problem_ids")
+                if not isinstance(problem_ids, list):
+                    raise ValueError("problem_ids debe ser una lista.")
+                return self.word_service.convert_db_problems(
+                    db_name=str(payload.get("db_name") or self.default_db_name),
+                    problem_ids=problem_ids,
+                    output_docx=str(payload.get("output_docx") or ""),
+                    title=str(payload.get("title") or ""),
+                    structure=str(payload.get("structure") or ""),
                     repo=str(payload.get("repo") or ""),
                     python=str(payload.get("python") or ""),
                     template=str(payload.get("template") or ""),
@@ -1042,6 +1073,12 @@ class LibraryWebRuntime:
         return number
 
     @staticmethod
+    def _optional_int(value: Any) -> int | None:
+        if value in (None, ""):
+            return None
+        return int(value)
+
+    @staticmethod
     def _bool(value: Any, *, default: bool = False) -> bool:
         if value is None or value == "":
             return bool(default)
@@ -1060,7 +1097,9 @@ class LibraryWebRuntime:
             "/api/library/instance/factory": {"POST"},
             "/api/training/status": {"GET"},
             "/api/word/sessions": {"GET"},
+            "/api/word/problems": {"GET"},
             "/api/word/convert": {"POST"},
+            "/api/word/convert-problems": {"POST"},
         }
         if path in exact:
             return exact[path]

@@ -16,6 +16,7 @@ from utils.project_layout import infer_workspace_from_session_path, normalize_in
 
 
 IMAGE_MARKER_RE = re.compile(r"\[\[\s*Imagen\s*=\s*([^\]\r\n]+?)\s*\]\]", re.IGNORECASE)
+ESTADO_TAG_RE = re.compile(r"\[\[\s*Estado\s*=\s*([^\]\r\n]+?)\s*\]\]", re.IGNORECASE)
 ANSWER_KEY_SECTION_RE = re.compile(
     r"(?is)(?:^|\n)\s*(?:"
     r"\\(?:section|subsection|subsubsection)\*?\{\s*claves?\s+de\s+respuestas?\s*\}"
@@ -48,10 +49,12 @@ class LatexWordService:
         self,
         *,
         controller: Any | None = None,
+        practice_controller: Any | None = None,
         file_url_resolver: Callable[[str], str] | None = None,
         log: Callable[[str], None] | None = None,
     ) -> None:
         self.controller = controller
+        self.practice_controller = practice_controller
         self.file_url_resolver = file_url_resolver
         self.log = log or (lambda _text: None)
 
@@ -95,6 +98,9 @@ class LatexWordService:
 
     def list_sessions(self, *, db_name: str = "", root: str = "") -> dict[str, Any]:
         db_name = str(db_name or "").strip()
+        root = str(root or "").strip()
+        if root:
+            return self._list_sessions_from_root(Path(root).expanduser())
         if db_name and self.controller is not None:
             try:
                 payload = self._list_sessions_from_library(db_name)
@@ -261,6 +267,606 @@ class LatexWordService:
             "word_exists": produced.exists(),
             "word_url": self.file_url_resolver(str(produced)) if produced.exists() and self.file_url_resolver else "",
         }
+
+    def list_db_problems(
+        self,
+        *,
+        db_name: str,
+        curso: str = "",
+        tema_id: Any | None = None,
+        subtema_id: Any | None = None,
+        autor: str = "",
+        editorial: str = "",
+        estado: str = "Todos",
+        clave: str = "Todos",
+        limit: int = 100,
+        aleatorio: bool = False,
+    ) -> dict[str, Any]:
+        controller = self._practice_controller()
+        db = str(db_name or "").strip()
+        if not db:
+            raise ValueError("db_name es requerido.")
+        bounded_limit = max(1, min(int(limit or 100), 500))
+        curso_value = str(curso or "").strip()
+        normalizar_curso = getattr(controller, "normalizar_curso", None)
+        if curso_value and callable(normalizar_curso):
+            curso_value = str(normalizar_curso(curso_value) or curso_value).strip()
+        filters = {
+            "curso": curso_value,
+            "tema_id": tema_id,
+            "subtema_id": subtema_id,
+            "autor": str(autor or "").strip(),
+            "editorial": str(editorial or "").strip(),
+            "estado": str(estado or "Todos").strip() or "Todos",
+            "clave": str(clave or "Todos").strip() or "Todos",
+        }
+        total = int(controller.contar_problemas(db, **filters))
+        rows = []
+        if total > 0:
+            rows = controller.obtener_problemas(
+                db,
+                cantidad=min(total, bounded_limit),
+                **filters,
+                aleatorio=bool(aleatorio),
+            )
+        return {
+            "schema_version": "latex_word_problem_selection_v1",
+            "db_name": db,
+            "filters": filters,
+            "limit": bounded_limit,
+            "total": total,
+            "count": len(rows),
+            "options": self._db_problem_options(controller, db, filters),
+            "problems": [self._problem_payload(row) for row in rows],
+        }
+
+    def convert_db_problems(
+        self,
+        *,
+        db_name: str,
+        problem_ids: list[int],
+        output_docx: str = "",
+        title: str = "",
+        structure: str = "",
+        repo: str = "",
+        python: str = "",
+        template: str = "",
+        style: str = "Estilo_plantilla",
+    ) -> dict[str, Any]:
+        controller = self._practice_controller()
+        db = str(db_name or "").strip()
+        if not db:
+            raise ValueError("db_name es requerido.")
+        ids = self._normalize_problem_ids(problem_ids)
+        if not ids:
+            raise ValueError("Selecciona al menos un problema.")
+        problems = controller.obtener_problemas_por_ids(db, problem_ids=ids)
+        if not problems:
+            raise RuntimeError("No se encontraron problemas para convertir.")
+        output = self._normalize_output_docx_path(output_docx or self._default_db_output_name(title, db))
+        job = self._build_word_job(
+            output_docx=str(output),
+            repo=repo,
+            python=python,
+            template=template,
+            style=style,
+        )
+        source_text = self._build_scan_source_text_from_db(problems, structure=structure, title=title)
+        if not source_text:
+            raise RuntimeError("Los problemas seleccionados no tienen enunciado_latex utilizable.")
+        input_tex = self._write_scan_source_tex(output_docx=job.output_docx, suffix="__db_source", source_text=source_text)
+        images_dir = self.prepare_images_dir_for_db(problems, output_docx=job.output_docx)
+        produced = self.run_tex_to_word(job=job, input_tex=input_tex, images_dir=images_dir)
+        return {
+            "schema_version": "latex_word_db_conversion_v1",
+            "ok": True,
+            "db_name": db,
+            "problem_ids": ids,
+            "count": len(problems),
+            "input_tex": str(input_tex),
+            "images_dir": str(images_dir or ""),
+            "output_docx": str(produced),
+            "word_path": str(produced),
+            "word_exists": produced.exists(),
+            "word_url": self.file_url_resolver(str(produced)) if produced.exists() and self.file_url_resolver else "",
+        }
+
+    def _practice_controller(self) -> Any:
+        if self.practice_controller is None:
+            from modulos.modulo6_practicas.controlador_practicas import PracticeBuilderController
+
+            self.practice_controller = PracticeBuilderController()
+        return self.practice_controller
+
+    def _db_problem_options(self, controller: Any, db_name: str, filters: dict[str, Any]) -> dict[str, Any]:
+        def safe_call(name: str, *args: Any, **kwargs: Any) -> list[Any]:
+            fn = getattr(controller, name, None)
+            if not callable(fn):
+                return []
+            try:
+                value = fn(*args, **kwargs)
+            except Exception as exc:
+                self.log(f"No se pudo cargar opcion BD {name}: {exc}")
+                return []
+            return list(value or []) if isinstance(value, (list, tuple)) else []
+
+        curso = str(filters.get("curso") or "").strip()
+        tema_id = filters.get("tema_id")
+        subtema_id = filters.get("subtema_id")
+        autor = str(filters.get("autor") or "").strip()
+        return {
+            "cursos": safe_call("listar_cursos", db_name),
+            "temas": safe_call("listar_temas", db_name, curso=curso),
+            "subtemas": safe_call("listar_subtemas", db_name, tema_id=tema_id) if tema_id not in (None, "") else [],
+            "autores": safe_call("listar_autores", db_name, curso=curso, tema_id=tema_id, subtema_id=subtema_id),
+            "editoriales": safe_call(
+                "listar_editoriales",
+                db_name,
+                curso=curso,
+                tema_id=tema_id,
+                subtema_id=subtema_id,
+                autor=autor,
+            ),
+            "estados": ["Todos", "sin_revisar", "consistente", "inconsistente"],
+            "claves": ["Todos", "A", "B", "C", "D", "E", "Sin clave"],
+        }
+
+    def _problem_payload(self, row: dict[str, Any]) -> dict[str, Any]:
+        text = str(row.get("enunciado_latex") or "").strip()
+        images = row.get("imagenes") if isinstance(row.get("imagenes"), list) else []
+        return {
+            "id": int(row.get("id") or 0),
+            "numero_original": int(row.get("numero_original") or 0),
+            "curso": str(row.get("curso") or "").strip(),
+            "tema": str(row.get("tema") or "").strip(),
+            "subtema": str(row.get("subtema") or "").strip(),
+            "autor": str(row.get("autor") or "").strip(),
+            "editorial": str(row.get("editorial") or "").strip(),
+            "respuesta_correcta": str(row.get("respuesta_correcta") or "").strip(),
+            "consistencia_matematica": str(row.get("consistencia_matematica") or "").strip(),
+            "tipo_problema": str(row.get("tipo_problema") or "").strip(),
+            "examen": str(row.get("examen") or "").strip(),
+            "imagenes_count": len(images),
+            "has_image_marker": bool(IMAGE_MARKER_RE.search(text)),
+            "enunciado_latex": text,
+            "preview": self._compact_problem_preview(text),
+        }
+
+    def _compact_problem_preview(self, text: str, limit: int = 240) -> str:
+        clean = re.sub(r"\s+", " ", str(text or "")).strip()
+        return clean if len(clean) <= limit else clean[: max(0, limit - 1)].rstrip() + "..."
+
+    def _normalize_problem_ids(self, problem_ids: list[int] | tuple[int, ...] | Any) -> list[int]:
+        if not isinstance(problem_ids, (list, tuple)):
+            return []
+        ids: list[int] = []
+        seen: set[int] = set()
+        for raw in problem_ids:
+            try:
+                pid = int(raw)
+            except Exception:
+                continue
+            if pid <= 0 or pid in seen:
+                continue
+            seen.add(pid)
+            ids.append(pid)
+        return ids
+
+    def _build_word_job(
+        self,
+        *,
+        output_docx: str,
+        repo: str,
+        python: str,
+        template: str,
+        style: str,
+    ) -> SessionWordJob:
+        output = self._normalize_output_docx_path(output_docx)
+        repo_path = self._normalize_path(Path(repo).expanduser()) if str(repo or "").strip() else self.default_editor_repo()
+        script = repo_path / "latex_to_word.py"
+        if not script.exists():
+            raise FileNotFoundError(f"No existe script de conversion: {script}")
+        py, errors = self.resolve_python(repo_path, python)
+        for error in errors[:4]:
+            self.log(f"Python candidato descartado: {error}")
+        template_path = self._normalize_path(Path(template).expanduser()) if str(template or "").strip() else self.default_template(repo_path)
+        if template_path is not None and not template_path.exists():
+            template_path = None
+        return SessionWordJob(
+            session_path=Path(),
+            output_docx=output,
+            repo=repo_path,
+            python=py,
+            template=template_path,
+            style=str(style or "Estilo_plantilla").strip() or "Estilo_plantilla",
+        )
+
+    def _default_db_output_name(self, title: str, db_name: str) -> str:
+        base = str(title or "").strip() or f"practica_{db_name}"
+        safe = self._safe_filename(base, fallback="practica_bd")
+        return str((Path.cwd() / f"{safe}.docx").resolve())
+
+    def _safe_filename(self, value: str, *, fallback: str = "archivo", limit: int = 120) -> str:
+        clean = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "").strip()).strip("._-")
+        return (clean[:limit].strip("._-") or fallback)
+
+    def _write_scan_source_tex(self, *, output_docx: Path, suffix: str, source_text: str) -> Path:
+        generated = output_docx.with_suffix(".tex")
+        generated = generated.with_name(f"{generated.stem}{suffix}.tex")
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        generated.write_text(self._ensure_enumerate_wrapper(str(source_text or "").strip()) + "\n", encoding="utf-8")
+        return generated
+
+    def _build_scan_source_text_from_db(
+        self,
+        problems: list[dict[str, Any]],
+        *,
+        structure: str = "",
+        title: str = "",
+    ) -> str:
+        blocks: list[tuple[int, str]] = []
+        for idx, problem in enumerate(problems, start=1):
+            raw = self._build_db_problem_text(problem).strip()
+            if not raw:
+                continue
+            clave = str(problem.get("respuesta_correcta") or "").strip().upper()
+            if clave and not CLAVE_TAG_RE.search(raw):
+                raw = f"{raw} [[clave={clave}]]"
+            estado = self._normalize_state_tag(str(problem.get("consistencia_matematica") or "").strip())
+            if estado and not ESTADO_TAG_RE.search(raw):
+                raw = f"{raw} [[Estado={estado}]]"
+            blocks.append((self._extract_tex_item_number(raw, idx), raw))
+        if not blocks:
+            return ""
+        return "\n".join(self._apply_practice_structure_to_blocks(blocks, structure=structure, title=title)).strip()
+
+    def _build_db_problem_text(self, problem: dict[str, Any]) -> str:
+        body = self._normalize_db_text_separators(str(problem.get("enunciado_latex") or "").strip())
+        if not body:
+            return ""
+        metadata_tags = self._collect_db_display_tags(problem)
+        marker_names = self._db_problem_markers(problem)
+        prefix_match = re.match(
+            r"""^\s*(\\item\s*\[\s*\\textbf\{\s*\d+\.?\s*\}\s*\]\s*)""",
+            body,
+            flags=re.IGNORECASE,
+        )
+        prefix = ""
+        remainder = body
+        if prefix_match:
+            prefix = prefix_match.group(1)
+            remainder = body[prefix_match.end() :].lstrip()
+        remainder = IMAGE_MARKER_RE.sub(" ", remainder)
+        remainder = self._strip_generic_db_tags(remainder)
+        remainder = re.sub(r"\s+(£|æ)", r"\1", remainder)
+        remainder = re.sub(r"(£|æ)\s+", r"\1", remainder)
+        remainder = re.sub(r"[ \t]{2,}", " ", remainder).strip()
+        remainder = self._inject_db_markers_before_options(remainder, marker_names)
+        if not metadata_tags:
+            return f"{prefix}{remainder}".strip()
+        if prefix:
+            return f"{prefix}{' '.join(metadata_tags)} {remainder}".strip()
+        return f"{' '.join(metadata_tags)} {remainder}".strip()
+
+    def _normalize_db_text_separators(self, text: str) -> str:
+        normalized = str(text or "")
+        replacements = {
+            "Ã‚Â£": "£",
+            "ÃƒÂ¦": "æ",
+            "Â£": "£",
+            "Ã¦": "æ",
+            "\u00a0": " ",
+        }
+        for source, target in replacements.items():
+            normalized = normalized.replace(source, target)
+        return normalized
+
+    def _strip_generic_db_tags(self, text: str) -> str:
+        cleaned = str(text or "")
+        for pattern in (
+            r"\[\[\s*curso\s*=[^\]\r\n]+?\]\]",
+            r"\[\[\s*tema\s*=[^\]\r\n]+?\]\]",
+            r"\[\[\s*subtema\s*=[^\]\r\n]+?\]\]",
+            r"\[\[\s*examen\s*=[^\]\r\n]+?\]\]",
+        ):
+            cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
+        return cleaned
+
+    def _collect_db_display_tags(self, problem: dict[str, Any]) -> list[str]:
+        tags: list[str] = []
+        seen: set[str] = set()
+
+        def add(name: str, value: Any) -> None:
+            clean = str(value or "").strip()
+            if not clean:
+                return
+            tag = f"[[{name}={clean}]]"
+            key = tag.lower()
+            if key not in seen:
+                seen.add(key)
+                tags.append(tag)
+
+        add("curso", problem.get("curso"))
+        add("tema", problem.get("tema"))
+        add("subtema", problem.get("subtema"))
+        add("examen", problem.get("examen"))
+        return tags
+
+    def _inject_db_markers_before_options(self, text: str, marker_names: list[str]) -> str:
+        clean_text = str(text or "").strip()
+        marker_block = " ".join(f"[[Imagen={marker}]]" for marker in marker_names if str(marker or "").strip())
+        if not marker_block:
+            return clean_text
+        option_match = re.search(r"(?=(?:£|æ|\r?\n|^)\s*[A-E]\))", clean_text)
+        if option_match:
+            left = clean_text[: option_match.start()].rstrip()
+            right = clean_text[option_match.start() :]
+            return f"{left} {marker_block} {right.lstrip()}".strip() if left else f"{marker_block} {right.lstrip()}".strip()
+        return f"{clean_text} {marker_block}".strip()
+
+    def _db_problem_markers(self, problem: dict[str, Any]) -> list[str]:
+        structured = self._resolve_db_structured_images(problem)
+        if structured:
+            return [marker for marker, _path in structured]
+        raw = self._normalize_db_text_separators(str(problem.get("enunciado_latex") or "").strip())
+        markers: list[str] = []
+        seen: set[str] = set()
+        for match in IMAGE_MARKER_RE.finditer(raw):
+            marker = str(match.group(1) or "").strip()
+            key = marker.lower()
+            if marker and key not in seen:
+                seen.add(key)
+                markers.append(marker)
+        return markers
+
+    def _structured_db_image_paths(self, problem: dict[str, Any]) -> list[str]:
+        raw_images = problem.get("imagenes", [])
+        if not isinstance(raw_images, (list, tuple)):
+            return []
+        paths: list[str] = []
+        seen: set[str] = set()
+        for raw in raw_images:
+            value = str(raw or "").strip()
+            key = value.lower()
+            if value and key not in seen:
+                seen.add(key)
+                paths.append(value)
+        return paths
+
+    def _db_marker_prefix(self, problem: dict[str, Any]) -> str:
+        for field in ("id", "problema_id"):
+            try:
+                value = int(problem.get(field) or 0)
+            except Exception:
+                value = 0
+            if value > 0:
+                return f"p{value}"
+        try:
+            number = int(problem.get("numero_original") or 0)
+        except Exception:
+            number = 0
+        if number > 0:
+            return f"n{number}"
+        seed = json.dumps(problem, ensure_ascii=False, sort_keys=True, default=str)
+        return f"p{hashlib.sha1(seed.encode('utf-8', errors='ignore')).hexdigest()[:10]}"
+
+    def _db_structured_marker_name(self, problem: dict[str, Any], raw_path: str, counts: dict[str, int]) -> str:
+        raw_marker = Path(str(raw_path or "")).stem.strip() or "img"
+        base = self._safe_filename(f"{self._db_marker_prefix(problem)}_{raw_marker}", fallback="img")
+        key = base.lower()
+        counts[key] = counts.get(key, 0) + 1
+        return self._safe_filename(f"{base}_{counts[key]}", fallback="img") if counts[key] > 1 else base
+
+    def _resolve_db_structured_images(self, problem: dict[str, Any]) -> list[tuple[str, Path]]:
+        entries: list[tuple[str, Path]] = []
+        counts: dict[str, int] = {}
+        candidate_dirs = self._iter_db_image_dirs(problem)
+        ruta = str(problem.get("ruta_carpeta") or "").strip()
+        if ruta:
+            candidate_dirs.insert(0, self._normalize_path(Path(ruta)))
+        for raw_path in self._structured_db_image_paths(problem):
+            resolved = self._resolve_db_image_path(raw_path, candidate_dirs)
+            if resolved is not None:
+                entries.append((self._db_structured_marker_name(problem, raw_path, counts), resolved))
+        return entries
+
+    def _iter_db_image_dirs(self, problem: dict[str, Any]) -> list[Path]:
+        dirs: list[Path] = []
+        seen: set[str] = set()
+
+        def add(path: Path | None) -> None:
+            if path is None:
+                return
+            normalized = self._normalize_path(path)
+            key = str(normalized).lower()
+            if key in seen:
+                return
+            seen.add(key)
+            dirs.append(normalized)
+
+        for field in ("ruta_carpeta", "archivo_origen", "pdf_path"):
+            raw = str(problem.get(field) or "").strip()
+            if not raw:
+                continue
+            path = self._normalize_path(Path(raw))
+            add(path if not path.suffix else path.parent)
+            add((path if not path.suffix else path.parent) / "crops")
+            add((path if not path.suffix else path.parent) / "segments")
+        return dirs
+
+    def _resolve_db_image_path(self, raw_path: str, candidate_dirs: list[Path]) -> Path | None:
+        value = str(raw_path or "").strip()
+        if not value:
+            return None
+        candidate = self._normalize_path(Path(value))
+        try:
+            if candidate.is_absolute() and candidate.exists() and candidate.is_file():
+                return candidate
+        except Exception:
+            pass
+        name = Path(value).name.strip()
+        for directory in candidate_dirs:
+            for current in (directory / value, directory / name):
+                try:
+                    resolved = self._normalize_path(current)
+                    if resolved.exists() and resolved.is_file():
+                        return resolved
+                except Exception:
+                    continue
+        return None
+
+    def _resolve_db_marker_paths(self, marker_name: str, problem: dict[str, Any]) -> list[Path]:
+        marker = str(marker_name or "").strip()
+        if not marker:
+            return []
+        for structured_marker, structured_path in self._resolve_db_structured_images(problem):
+            if structured_marker.lower() == marker.lower():
+                return [structured_path]
+        suffixes = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
+        matches: list[Path] = []
+        seen: set[str] = set()
+        for directory in self._iter_db_image_dirs(problem):
+            try:
+                if not directory.exists() or not directory.is_dir():
+                    continue
+            except Exception:
+                continue
+            for suffix in suffixes:
+                candidate = directory / f"{marker}{suffix}"
+                key = str(candidate).lower()
+                try:
+                    if key not in seen and candidate.exists() and candidate.is_file():
+                        seen.add(key)
+                        matches.append(self._normalize_path(candidate))
+                except Exception:
+                    continue
+            if matches:
+                return matches
+        return matches
+
+    def prepare_images_dir_for_db(self, problems: list[dict[str, Any]], *, output_docx: Path) -> Path | None:
+        if not problems:
+            return None
+        images_dir = output_docx.with_name(f"{output_docx.stem}__db_images")
+        images_dir.mkdir(parents=True, exist_ok=True)
+        copied = 0
+        for problem in problems:
+            for marker in self._db_problem_markers(problem):
+                if self._marker_output_exists(images_dir, marker):
+                    continue
+                paths = self._resolve_db_marker_paths(marker, problem)
+                if not paths:
+                    self.log(f"BD Word: no se resolvio imagen {marker} para problema {problem.get('id')}")
+                    continue
+                source = paths[0]
+                target = images_dir / f"{marker}{source.suffix or '.png'}"
+                try:
+                    if source.resolve() == target.resolve():
+                        continue
+                except Exception:
+                    pass
+                shutil.copy2(str(source), str(target))
+                copied += 1
+        if copied > 0:
+            self.log(f"BD Word: se materializaron {copied} imagen(es) en {images_dir}")
+        return images_dir if any(images_dir.iterdir()) else None
+
+    def _normalize_state_tag(self, value: str) -> str:
+        state = str(value or "").strip().lower()
+        if not state:
+            return "sin_revisar"
+        replacements = {
+            "sin revisar": "sin_revisar",
+            "pendiente revision": "sin_revisar",
+            "pendiente revision": "sin_revisar",
+            "bien planteado": "consistente",
+            "bien_planteado": "consistente",
+            "mal planteado": "inconsistente",
+            "mal_planteado": "inconsistente",
+            "ambiguo": "inconsistente",
+            "ambigua": "inconsistente",
+        }
+        return replacements.get(state, state.replace(" ", "_"))
+
+    def _latex_escape_heading(self, value: str) -> str:
+        replacements = {
+            "\\": r"\textbackslash{}",
+            "&": r"\&",
+            "%": r"\%",
+            "$": r"\$",
+            "#": r"\#",
+            "_": r"\_",
+            "{": r"\{",
+            "}": r"\}",
+        }
+        return "".join(replacements.get(ch, ch) for ch in str(value or "").strip())
+
+    def _parse_practice_ranges(self, value: str) -> set[int]:
+        numbers: set[int] = set()
+        for part in re.split(r"[,;]", str(value or "")):
+            chunk = part.strip()
+            if not chunk:
+                continue
+            match_range = re.match(r"^(\d+)\s*[-\u2013]\s*(\d+)$", chunk)
+            if match_range:
+                start = int(match_range.group(1))
+                end = int(match_range.group(2))
+                if start > end:
+                    start, end = end, start
+                numbers.update(range(start, end + 1))
+                continue
+            if re.match(r"^\d+$", chunk):
+                numbers.add(int(chunk))
+        return numbers
+
+    def _parse_practice_structure(self, structure: str = "", title: str = "") -> tuple[str, dict[int, list[str]]]:
+        heading = str(title or "").strip()
+        subtitles_by_number: dict[int, list[str]] = {}
+        for raw_line in str(structure or "").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("##"):
+                content = line[2:].strip()
+                subtitle, sep, ranges = content.partition(":")
+                if not sep or not subtitle.strip():
+                    continue
+                for number in self._parse_practice_ranges(ranges):
+                    subtitles_by_number.setdefault(number, []).append(subtitle.strip())
+            elif line.startswith("#") and not heading:
+                heading = line[1:].strip()
+        return heading, subtitles_by_number
+
+    def _extract_tex_item_number(self, item_text: str, fallback: int) -> int:
+        match = re.search(r"\\item\s*\[\s*\\textbf\{\s*(\d+)\.?\s*\}", str(item_text or ""))
+        if not match:
+            return int(fallback)
+        try:
+            return int(match.group(1))
+        except Exception:
+            return int(fallback)
+
+    def _apply_practice_structure_to_blocks(
+        self,
+        blocks: list[tuple[int, str]],
+        *,
+        structure: str = "",
+        title: str = "",
+    ) -> list[str]:
+        heading, subtitles_by_number = self._parse_practice_structure(structure, title)
+        out: list[str] = []
+        if heading:
+            out.append(rf"\section*{{{self._latex_escape_heading(heading)}}}")
+        emitted: set[tuple[int, str]] = set()
+        for number, block in blocks:
+            for subtitle in subtitles_by_number.get(number, []):
+                key = (number, subtitle)
+                if key in emitted:
+                    continue
+                emitted.add(key)
+                out.append(rf"\subsection*{{{self._latex_escape_heading(subtitle)}}}")
+            out.append(block)
+        return out
 
     def _build_session_job(
         self,

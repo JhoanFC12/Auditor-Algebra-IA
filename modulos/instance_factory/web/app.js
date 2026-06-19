@@ -80,12 +80,47 @@ const state = {
       error: "",
       catalog: null,
       query: "",
+      root: "",
       wordFilter: "all",
       selectedKey: "",
       convertingKey: "",
       selectedKeys: new Set(),
       batchRunning: false,
       batchProgress: null,
+      settings: {
+        repo: "",
+        python: "",
+        template: "",
+        style: "Estilo_plantilla",
+      },
+      manualSession: {
+        sessionPath: "",
+        outputDocx: "",
+        converting: false,
+        error: "",
+        lastResult: null,
+      },
+      problemSelection: {
+        loading: false,
+        converting: false,
+        error: "",
+        result: null,
+        selectedIds: new Set(),
+        curso: "",
+        estado: "Todos",
+        clave: "Todos",
+        temaId: "",
+        subtemaId: "",
+        autor: "",
+        editorial: "",
+        limit: 100,
+        aleatorio: false,
+        title: "",
+        outputDocx: "",
+        structure: "",
+        lastResult: null,
+        previewProblemId: "",
+      },
     },
   },
   stage: "pages",
@@ -131,6 +166,40 @@ const state = {
   taskProgress: null,
   promotionUploadReport: null,
 };
+
+function createEmptyWordProblemSelection() {
+  return {
+    loading: false,
+    converting: false,
+    error: "",
+    result: null,
+    selectedIds: new Set(),
+    curso: "",
+    estado: "Todos",
+    clave: "Todos",
+    temaId: "",
+    subtemaId: "",
+    autor: "",
+    editorial: "",
+    limit: 100,
+    aleatorio: false,
+    title: "",
+    outputDocx: "",
+    structure: "",
+    lastResult: null,
+    previewProblemId: "",
+  };
+}
+
+function createEmptyManualWordSession() {
+  return {
+    sessionPath: "",
+    outputDocx: "",
+    converting: false,
+    error: "",
+    lastResult: null,
+  };
+}
 
 const $ = (id) => document.getElementById(id);
 const THEME_STORAGE_KEY = "pdfFactoryTheme";
@@ -1503,6 +1572,10 @@ function renderLibraryContent() {
   $("stageHost").innerHTML = renderLibraryStage();
   bindLibraryContentEvents();
   syncLibraryBottomAction();
+  if (state.library?.screen === "word") {
+    const preview = $("wordProblemPreview");
+    if (preview) window.setTimeout(() => typesetMath(preview), 0);
+  }
 }
 
 function renderLibraryFilters() {
@@ -1705,6 +1778,7 @@ function renderLibraryWordStage() {
   const selectedRows = selectedWordInstances();
   const pendingVisible = visibleRows.filter(({ instance }) => instance.session_exists && !instance.word_exists);
   const queueDisabled = word.loading || word.batchRunning || !catalog.schema_version;
+  const settings = wordConversionSettings();
   return `
     <div class="stage-header library-header word-hero">
       <div>
@@ -1722,6 +1796,10 @@ function renderLibraryWordStage() {
         <input id="wordSearchInput" value="${escapeAttr(word.query || "")}" placeholder="Semana, libro, curso" />
       </label>
       <label>
+        <span class="muted">Raiz alternativa</span>
+        <input id="wordRootInput" value="${escapeAttr(word.root || "")}" placeholder="Vacio = Biblioteca" ${word.loading || word.batchRunning ? "disabled" : ""} />
+      </label>
+      <label>
         <span class="muted">Estado Word</span>
         <select id="wordStatusFilter">
           ${[
@@ -1733,12 +1811,42 @@ function renderLibraryWordStage() {
         </select>
       </label>
       <div class="word-summary-strip">
+        <div><span>Origen</span><strong>${escapeHtml(catalog.source || "BD")}</strong></div>
         <div><span>Libros</span><strong>${Number(summary.books_total || 0)}</strong></div>
         <div><span>Instancias</span><strong>${Number(summary.instances_total || 0)}</strong></div>
         <div><span>Sesiones</span><strong>${Number(summary.sessions_found || 0)}</strong></div>
         <div><span>Word listo</span><strong>${Number(summary.word_ready || 0)}</strong></div>
       </div>
     </section>
+    <section class="panel word-config-panel">
+      <div class="word-config-heading">
+        <div>
+          <strong>Configuracion de conversion</strong>
+          <p class="muted">Valores usados por conversion individual y cola Word.</p>
+        </div>
+        <button id="resetWordSettingsBtn" type="button" ${!catalog.schema_version || word.batchRunning ? "disabled" : ""}>Usar valores detectados</button>
+      </div>
+      <div class="word-config-grid">
+        <label>
+          <span class="muted">Repo conversor</span>
+          <input id="wordRepoInput" value="${escapeAttr(settings.repo)}" placeholder="Ruta a Editor_de_practicas" ${word.batchRunning ? "disabled" : ""} />
+        </label>
+        <label>
+          <span class="muted">Python</span>
+          <input id="wordPythonInput" value="${escapeAttr(settings.python)}" placeholder="Auto" ${word.batchRunning ? "disabled" : ""} />
+        </label>
+        <label>
+          <span class="muted">Plantilla .docx</span>
+          <input id="wordTemplateInput" value="${escapeAttr(settings.template)}" placeholder="Auto" ${word.batchRunning ? "disabled" : ""} />
+        </label>
+        <label>
+          <span class="muted">Estilo</span>
+          <input id="wordStyleInput" value="${escapeAttr(settings.style || "Estilo_plantilla")}" placeholder="Estilo_plantilla" ${word.batchRunning ? "disabled" : ""} />
+        </label>
+      </div>
+    </section>
+    ${renderManualWordSession()}
+    ${renderWordProblemSelection()}
     <section class="panel word-queue-bar">
       <div>
         <strong>Cola Word</strong>
@@ -1778,6 +1886,276 @@ function renderLibraryWordStage() {
       </section>
     ` : ""}
   `;
+}
+
+function renderManualWordSession() {
+  const manual = manualWordSessionState();
+  const disabled = Boolean(manual.converting || state.library.word?.batchRunning);
+  const result = manual.lastResult || {};
+  return `
+    <section class="panel word-manual-panel">
+      <div class="word-manual-heading">
+        <div>
+          <strong>Convertir sesion suelta</strong>
+          <p class="muted">Pega la ruta de un .json de sesion cuando no quieras cargar todo el catalogo.</p>
+        </div>
+        <span class="word-manual-badge">${result.word_exists ? "Word listo" : "Manual"}</span>
+      </div>
+      <div class="word-manual-grid">
+        <label>
+          <span class="muted">Archivo .json de sesion</span>
+          <input id="manualWordSessionPath" value="${escapeAttr(manual.sessionPath || "")}" placeholder="E:\\...\\sessions\\semana_1.json" ${disabled ? "disabled" : ""} />
+        </label>
+        <label>
+          <span class="muted">Salida .docx opcional</span>
+          <input id="manualWordOutputDocx" value="${escapeAttr(manual.outputDocx || "")}" placeholder="Vacio = junto a la sesion" ${disabled ? "disabled" : ""} />
+        </label>
+      </div>
+      <div class="word-manual-actions">
+        <button id="convertManualWordSessionBtn" class="primary" type="button" ${disabled || !String(manual.sessionPath || "").trim() ? "disabled" : ""}>
+          ${manual.converting ? "Convirtiendo..." : "Convertir sesion"}
+        </button>
+        <button id="openManualWordSessionBtn" type="button" ${result.word_url ? "" : "disabled"}>Abrir Word generado</button>
+        <button id="clearManualWordSessionBtn" type="button" ${disabled || (!manual.sessionPath && !manual.outputDocx && !manual.lastResult) ? "disabled" : ""}>Limpiar</button>
+      </div>
+      ${manual.error ? `<div class="library-notice error-notice">${escapeHtml(manual.error)}</div>` : ""}
+      ${result.word_path ? `
+        <div class="library-notice success-notice word-manual-result">
+          <span>${escapeHtml(result.word_path)}</span>
+        </div>
+      ` : ""}
+    </section>
+  `;
+}
+
+function renderWordProblemSelection() {
+  const word = state.library.word || {};
+  const ps = wordProblemSelectionState();
+  const result = ps.result || {};
+  const options = result.options || {};
+  const problems = Array.isArray(result.problems) ? result.problems : [];
+  const selected = wordProblemSelectionIds();
+  const previewProblem = selectedWordProblemPreview(problems, ps, selected);
+  const disabled = ps.loading || ps.converting || word.batchRunning;
+  const cursoOptions = ["", ...(options.cursos || [])];
+  const temaOptions = [{ id: "", nombre: "Todos" }, ...(options.temas || [])];
+  const subtemaOptions = [{ id: "", nombre: "Todos" }, ...(options.subtemas || [])];
+  const autorOptions = ["", ...(options.autores || [])];
+  const editorialOptions = ["", ...(options.editoriales || [])];
+  const estadoOptions = options.estados || ["Todos", "sin_revisar", "consistente", "inconsistente"];
+  const claveOptions = options.claves || ["Todos", "A", "B", "C", "D", "E", "Sin clave"];
+  return `
+    <section class="panel word-problem-panel">
+      <div class="word-problem-heading">
+        <div>
+          <strong>Seleccionar problemas desde BD</strong>
+          <p class="muted">Usa la base local para armar una practica y convertirla directamente a Word.</p>
+        </div>
+        <div class="word-problem-stats">
+          <span>${Number(result.total || 0)} disponibles</span>
+          <strong>${selected.size} seleccionados</strong>
+        </div>
+      </div>
+      <div class="word-problem-controls">
+        <label>
+          <span class="muted">Curso</span>
+          <select id="wordProblemCurso" ${disabled ? "disabled" : ""}>
+            ${cursoOptions.map((value) => `<option value="${escapeAttr(value)}" ${String(ps.curso || "") === String(value || "") ? "selected" : ""}>${escapeHtml(value || "Todos")}</option>`).join("")}
+          </select>
+        </label>
+        <label>
+          <span class="muted">Tema</span>
+          <select id="wordProblemTema" ${disabled ? "disabled" : ""}>
+            ${temaOptions.map((item) => renderWordProblemOption(item, ps.temaId || "")).join("")}
+          </select>
+        </label>
+        <label>
+          <span class="muted">Subtema</span>
+          <select id="wordProblemSubtema" ${disabled ? "disabled" : ""}>
+            ${subtemaOptions.map((item) => renderWordProblemOption(item, ps.subtemaId || "")).join("")}
+          </select>
+        </label>
+        <label>
+          <span class="muted">Autor</span>
+          <select id="wordProblemAutor" ${disabled ? "disabled" : ""}>
+            ${autorOptions.map((value) => `<option value="${escapeAttr(value)}" ${String(ps.autor || "") === String(value || "") ? "selected" : ""}>${escapeHtml(value || "Todos")}</option>`).join("")}
+          </select>
+        </label>
+        <label>
+          <span class="muted">Editorial</span>
+          <select id="wordProblemEditorial" ${disabled ? "disabled" : ""}>
+            ${editorialOptions.map((value) => `<option value="${escapeAttr(value)}" ${String(ps.editorial || "") === String(value || "") ? "selected" : ""}>${escapeHtml(value || "Todos")}</option>`).join("")}
+          </select>
+        </label>
+        <label>
+          <span class="muted">Estado</span>
+          <select id="wordProblemEstado" ${disabled ? "disabled" : ""}>
+            ${estadoOptions.map((value) => `<option value="${escapeAttr(value)}" ${String(ps.estado || "Todos") === String(value || "Todos") ? "selected" : ""}>${escapeHtml(value)}</option>`).join("")}
+          </select>
+        </label>
+        <label>
+          <span class="muted">Clave</span>
+          <select id="wordProblemClave" ${disabled ? "disabled" : ""}>
+            ${claveOptions.map((value) => `<option value="${escapeAttr(value)}" ${String(ps.clave || "Todos") === String(value || "Todos") ? "selected" : ""}>${escapeHtml(value)}</option>`).join("")}
+          </select>
+        </label>
+        <label>
+          <span class="muted">Limite</span>
+          <input id="wordProblemLimit" type="number" min="1" max="500" value="${Number(ps.limit || 100)}" ${disabled ? "disabled" : ""} />
+        </label>
+        <label class="word-problem-check">
+          <input id="wordProblemRandom" type="checkbox" ${ps.aleatorio ? "checked" : ""} ${disabled ? "disabled" : ""} />
+          <span>Aleatorio</span>
+        </label>
+      </div>
+      <div class="word-problem-output">
+        <label>
+          <span class="muted">Titulo</span>
+          <input id="wordProblemTitle" value="${escapeAttr(ps.title || "")}" placeholder="Titulo opcional de la practica" ${disabled ? "disabled" : ""} />
+        </label>
+        <label>
+          <span class="muted">Salida .docx</span>
+          <input id="wordProblemOutput" value="${escapeAttr(ps.outputDocx || "")}" placeholder="Vacio = archivo automatico" ${disabled ? "disabled" : ""} />
+        </label>
+      </div>
+      <details class="word-problem-structure">
+        <summary>Estructura opcional</summary>
+        <textarea id="wordProblemStructure" ${disabled ? "disabled" : ""} placeholder="# Titulo&#10;## Subtitulo: 1-10">${escapeHtml(ps.structure || "")}</textarea>
+      </details>
+      <div class="word-problem-actions">
+        <button id="loadWordProblemsBtn" type="button" ${disabled ? "disabled" : ""}>Cargar problemas</button>
+        <button id="selectVisibleWordProblemsBtn" type="button" ${disabled || !problems.length ? "disabled" : ""}>Seleccionar visibles</button>
+        <button id="clearWordProblemsBtn" type="button" ${disabled || !selected.size ? "disabled" : ""}>Limpiar</button>
+        <button id="convertWordProblemsBtn" class="primary" type="button" ${disabled || !selected.size ? "disabled" : ""}>
+          ${ps.converting ? "Convirtiendo..." : "Convertir seleccionados"}
+        </button>
+      </div>
+      ${ps.error ? `<div class="library-notice error-notice">${escapeHtml(ps.error)}</div>` : ""}
+      ${ps.lastResult?.word_path ? `
+        <div class="library-notice success-notice word-problem-success">
+          <span>Word generado: ${escapeHtml(ps.lastResult.word_path)}</span>
+          <button id="openWordProblemResultBtn" type="button" ${ps.lastResult?.word_url ? "" : "disabled"}>Abrir Word generado</button>
+        </div>
+      ` : ""}
+      ${ps.loading ? `<div class="muted">Cargando problemas de la BD...</div>` : ""}
+      ${problems.length ? `
+        <div class="word-problem-workspace">
+          <div class="word-problem-list">
+            ${problems.map((problem) => renderWordProblemRow(problem, selected, previewProblem)).join("")}
+          </div>
+          ${renderWordProblemPreview(previewProblem)}
+        </div>
+      ` : `
+        <div class="word-problem-empty muted">Carga problemas para seleccionar una practica desde la base local.</div>
+      `}
+    </section>
+  `;
+}
+
+function selectedWordProblemPreview(problems, ps, selected) {
+  const rows = Array.isArray(problems) ? problems : [];
+  if (!rows.length) return null;
+  const explicitId = Number(ps.previewProblemId || 0);
+  if (explicitId > 0) {
+    const explicit = rows.find((problem) => Number(problem.id || 0) === explicitId);
+    if (explicit) return explicit;
+  }
+  const firstSelected = rows.find((problem) => selected.has(Number(problem.id || 0)));
+  return firstSelected || rows[0];
+}
+
+function renderWordProblemOption(item, selectedValue) {
+  const value = wordProblemOptionValue(item);
+  const label = wordProblemOptionLabel(item);
+  return `<option value="${escapeAttr(value)}" ${String(selectedValue || "") === String(value || "") ? "selected" : ""}>${escapeHtml(label || "Todos")}</option>`;
+}
+
+function wordProblemOptionValue(item) {
+  if (item && typeof item === "object") {
+    return String(item.id ?? item.value ?? "");
+  }
+  return String(item || "");
+}
+
+function wordProblemOptionLabel(item) {
+  if (item && typeof item === "object") {
+    return String(item.nombre ?? item.name ?? item.label ?? item.titulo ?? item.id ?? "");
+  }
+  return String(item || "");
+}
+
+function renderWordProblemRow(problem, selected, previewProblem) {
+  const id = Number(problem.id || 0);
+  const checked = selected.has(id);
+  const active = previewProblem && Number(previewProblem.id || 0) === id;
+  const meta = [problem.curso, problem.tema, problem.subtema].filter(Boolean).join(" | ");
+  const key = String(problem.respuesta_correcta || "-").trim() || "-";
+  const preview = compactText(wordProblemReadableLatex(problem.preview || problem.enunciado_latex || ""), 220);
+  return `
+    <article class="word-problem-row ${checked ? "selected" : ""} ${active ? "active" : ""}" data-word-problem-row="${id}">
+      <label class="word-row-check" title="Agregar a practica">
+        <input type="checkbox" data-word-problem-select="${id}" ${checked ? "checked" : ""} />
+      </label>
+      <div class="word-problem-main">
+        <div class="word-problem-title">
+          <strong>${escapeHtml(problem.numero_original ? `${problem.numero_original}.` : `ID ${id}`)}</strong>
+          <span>${escapeHtml(meta || "SIN_CLASIFICAR")}</span>
+          <small>Clave ${escapeHtml(key)}${problem.imagenes_count ? ` | ${Number(problem.imagenes_count)} img.` : ""}</small>
+        </div>
+        <p>${escapeHtml(preview)}</p>
+      </div>
+    </article>
+  `;
+}
+
+function renderWordProblemPreview(problem) {
+  if (!problem) {
+    return `
+      <aside class="word-problem-preview">
+        <div class="word-preview-empty muted">Selecciona un problema para ver el LaTeX.</div>
+      </aside>
+    `;
+  }
+  const id = Number(problem.id || 0);
+  const number = String(problem.numero_original || "").trim() || `ID ${id}`;
+  const meta = [problem.curso, problem.tema, problem.subtema].filter(Boolean).join(" | ") || "SIN_CLASIFICAR";
+  const key = String(problem.respuesta_correcta || "-").trim() || "-";
+  const latex = String(problem.enunciado_latex || problem.preview || "").trim();
+  const readableLatex = wordProblemReadableLatex(latex || problem.preview || "");
+  return `
+    <aside class="word-problem-preview">
+      <div class="word-preview-head">
+        <div>
+          <span class="section-label">Visor LaTeX</span>
+          <strong>${escapeHtml(number)}</strong>
+        </div>
+        <div class="word-preview-pill">Clave ${escapeHtml(key)}</div>
+      </div>
+      <div class="word-preview-meta">
+        <span>${escapeHtml(meta)}</span>
+        <span>ID ${id}</span>
+        <span>${Number(problem.imagenes_count || 0)} imagen(es)</span>
+      </div>
+      <div id="wordProblemPreview" class="word-preview-render math-preview">
+        ${formatPreviewText(readableLatex || latex || problem.preview || "")}
+      </div>
+      <details class="word-preview-source">
+        <summary>Fuente LaTeX</summary>
+        <pre>${escapeHtml(latex || "-")}</pre>
+      </details>
+    </aside>
+  `;
+}
+
+function wordProblemReadableLatex(value) {
+  return String(value || "")
+    .replace(/^\\item\s*\[\s*\\textbf\{[^}]*\}\s*\]\s*/u, "")
+    .replace(/\[\[[^\]]+\]\]/g, " ")
+    .replace(/[\u00a3\u00e6\u00a6]+/g, "\n")
+    .replace(/(?:Â£|Ã¦|Â¦)+/g, "\n")
+    .replace(/[ \t]*\n[ \t]*/g, "\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
 }
 
 function renderWordBookCard(book) {
@@ -2719,6 +3097,7 @@ function renderLibraryInspector() {
   const wordState = state.library.word || {};
   const wordSummary = wordState.catalog?.summary || {};
   const selectedWord = findWordInstance(wordState.selectedKey);
+  const selectedWordCount = selectedWordInstances().length;
   return `
     <div class="panel">
       <h2>Estados</h2>
@@ -2758,6 +3137,9 @@ function renderLibraryInspector() {
           <div class="inspector-line"><strong>Instancias</strong><span>${Number(wordSummary.instances_total || 0)}</span></div>
           <div class="inspector-line"><strong>Exportadas</strong><span>${Number(wordSummary.word_ready || 0)}</span></div>
           <div class="inspector-line"><strong>Pendientes</strong><span>${Number(wordSummary.word_pending || 0)}</span></div>
+          <div class="inspector-line"><strong>En cola</strong><span>${Number(selectedWordCount || 0)}</span></div>
+          <div class="inspector-line"><strong>Origen</strong><span>${escapeHtml(wordState.catalog?.source || "Biblioteca")}</span></div>
+          <div class="inspector-line"><strong>Raiz</strong><span>${escapeHtml(wordState.catalog?.root || wordState.root || "-")}</span></div>
           <div class="inspector-line"><strong>Seleccion</strong><span>${escapeHtml(selectedWord?.instance?.title || "Sin seleccion")}</span></div>
           <div class="inspector-line"><strong>Documento</strong><span>${escapeHtml(selectedWord?.instance?.word_path || "-")}</span></div>
         </div>
@@ -2814,7 +3196,17 @@ function bindLibrarySidebarEvents() {
       state.library.screen = "books";
       state.library.semanticStatus = { loading: false, error: "", result: null };
       state.library.concepts = { ...state.library.concepts, loading: false, error: "", result: null };
-      state.library.word = { ...state.library.word, catalog: null, error: "", selectedKey: "", convertingKey: "" };
+      state.library.word = {
+        ...state.library.word,
+        catalog: null,
+        error: "",
+        selectedKey: "",
+        convertingKey: "",
+        selectedKeys: new Set(),
+        batchRunning: false,
+        batchProgress: null,
+        problemSelection: createEmptyWordProblemSelection(),
+      };
       loadLibrary("Base de datos cambiada.").catch((err) => setStatus(`Error de biblioteca: ${err.message}`));
     };
   }
@@ -3010,10 +3402,41 @@ function bindWordEvents() {
       renderLibraryContent();
     };
   }
+  const wordRootInput = $("wordRootInput");
+  if (wordRootInput) {
+    wordRootInput.oninput = (event) => {
+      state.library.word.root = event.target.value || "";
+    };
+  }
+  [
+    ["wordRepoInput", "repo"],
+    ["wordPythonInput", "python"],
+    ["wordTemplateInput", "template"],
+    ["wordStyleInput", "style"],
+  ].forEach(([inputId, key]) => {
+    const input = $(inputId);
+    if (!input) return;
+    input.oninput = (event) => {
+      if (!state.library.word.settings || typeof state.library.word.settings !== "object") {
+        state.library.word.settings = {};
+      }
+      state.library.word.settings[key] = event.target.value;
+    };
+  });
+  const resetSettingsBtn = $("resetWordSettingsBtn");
+  if (resetSettingsBtn) {
+    resetSettingsBtn.onclick = () => {
+      syncWordSettingsFromCatalog({ force: true });
+      renderLibraryContent();
+      setStatus("Configuracion Word restaurada desde el catalogo detectado.");
+    };
+  }
   const refreshBtn = $("refreshWordSessionsBtn") || $("loadWordSessionsBtn");
   if (refreshBtn) {
     refreshBtn.onclick = () => loadWordSessions().catch((err) => setStatus(`Error Word: ${err.message}`));
   }
+  bindManualWordSessionEvents();
+  bindWordProblemEvents();
   const selectVisibleBtn = $("selectVisibleWordBtn");
   if (selectVisibleBtn) {
     selectVisibleBtn.onclick = () => {
@@ -3053,6 +3476,9 @@ function bindWordEvents() {
       renderLibraryContent();
     };
   });
+  document.querySelectorAll(".word-row-check").forEach((label) => {
+    label.onclick = (event) => event.stopPropagation();
+  });
   document.querySelectorAll("[data-convert-word]").forEach((btn) => {
     btn.onclick = () => convertWordSession(btn.dataset.convertWord).catch((err) => setStatus(`Error Word: ${err.message}`));
   });
@@ -3065,6 +3491,157 @@ function bindWordEvents() {
       renderLibraryContent();
     };
     row.ondblclick = () => openWordSession(row.dataset.wordRow);
+  });
+}
+
+function bindManualWordSessionEvents() {
+  const manual = manualWordSessionState();
+  [
+    ["manualWordSessionPath", "sessionPath"],
+    ["manualWordOutputDocx", "outputDocx"],
+  ].forEach(([inputId, key]) => {
+    const input = $(inputId);
+    if (!input) return;
+    input.oninput = (event) => {
+      manual[key] = event.target.value || "";
+      manual.error = "";
+      syncManualWordSessionControls();
+    };
+  });
+  const convertBtn = $("convertManualWordSessionBtn");
+  if (convertBtn) {
+    convertBtn.onclick = () => convertManualWordSession().catch((err) => setStatus(`Error Word manual: ${err.message}`));
+  }
+  const openBtn = $("openManualWordSessionBtn");
+  if (openBtn) {
+    openBtn.onclick = () => openManualWordSession();
+  }
+  const clearBtn = $("clearManualWordSessionBtn");
+  if (clearBtn) {
+    clearBtn.onclick = () => {
+      state.library.word.manualSession = createEmptyManualWordSession();
+      renderLibraryContent();
+      setStatus("Sesion manual limpiada.");
+    };
+  }
+}
+
+function syncManualWordSessionControls() {
+  const manual = manualWordSessionState();
+  const busy = Boolean(manual.converting || state.library.word?.batchRunning);
+  const hasSession = Boolean(String(manual.sessionPath || "").trim());
+  const convertBtn = $("convertManualWordSessionBtn");
+  if (convertBtn) convertBtn.disabled = busy || !hasSession;
+  const clearBtn = $("clearManualWordSessionBtn");
+  if (clearBtn) clearBtn.disabled = busy || (!manual.sessionPath && !manual.outputDocx && !manual.lastResult);
+}
+
+function bindWordProblemEvents() {
+  const ps = wordProblemSelectionState();
+  [
+    ["wordProblemCurso", "curso"],
+    ["wordProblemTema", "temaId"],
+    ["wordProblemSubtema", "subtemaId"],
+    ["wordProblemAutor", "autor"],
+    ["wordProblemEditorial", "editorial"],
+    ["wordProblemEstado", "estado"],
+    ["wordProblemClave", "clave"],
+  ].forEach(([id, key]) => {
+    const el = $(id);
+    if (!el) return;
+    el.onchange = (event) => {
+      const emptyKeys = new Set(["curso", "temaId", "subtemaId", "autor", "editorial"]);
+      ps[key] = event.target.value || (emptyKeys.has(key) ? "" : "Todos");
+      if (key === "curso") {
+        ps.temaId = "";
+        ps.subtemaId = "";
+      }
+      if (key === "temaId") {
+        ps.subtemaId = "";
+      }
+    };
+  });
+  [
+    ["wordProblemTitle", "title"],
+    ["wordProblemOutput", "outputDocx"],
+    ["wordProblemStructure", "structure"],
+  ].forEach(([id, key]) => {
+    const el = $(id);
+    if (!el) return;
+    el.oninput = (event) => {
+      ps[key] = event.target.value || "";
+    };
+  });
+  const limitInput = $("wordProblemLimit");
+  if (limitInput) {
+    limitInput.oninput = (event) => {
+      ps.limit = Math.max(1, Math.min(500, Number(event.target.value || 100)));
+    };
+  }
+  const randomInput = $("wordProblemRandom");
+  if (randomInput) {
+    randomInput.onchange = (event) => {
+      ps.aleatorio = Boolean(event.target.checked);
+    };
+  }
+  const loadBtn = $("loadWordProblemsBtn");
+  if (loadBtn) {
+    loadBtn.onclick = () => loadWordProblems().catch((err) => setStatus(`Error cargando problemas Word: ${err.message}`));
+  }
+  const selectBtn = $("selectVisibleWordProblemsBtn");
+  if (selectBtn) {
+    selectBtn.onclick = () => {
+      const selected = wordProblemSelectionIds();
+      (ps.result?.problems || []).forEach((problem) => {
+        const id = Number(problem.id || 0);
+        if (id > 0) selected.add(id);
+      });
+      if (!ps.previewProblemId && selected.size) {
+        ps.previewProblemId = String([...selected][0]);
+      }
+      renderLibraryContent();
+    };
+  }
+  const clearBtn = $("clearWordProblemsBtn");
+  if (clearBtn) {
+    clearBtn.onclick = () => {
+      wordProblemSelectionIds().clear();
+      renderLibraryContent();
+    };
+  }
+  const convertBtn = $("convertWordProblemsBtn");
+  if (convertBtn) {
+    convertBtn.onclick = () => convertWordProblems().catch((err) => setStatus(`Error convirtiendo problemas Word: ${err.message}`));
+  }
+  const openResultBtn = $("openWordProblemResultBtn");
+  if (openResultBtn) {
+    openResultBtn.onclick = () => openWordProblemResult();
+  }
+  document.querySelectorAll("[data-word-problem-select]").forEach((input) => {
+    input.onclick = (event) => event.stopPropagation();
+    input.onchange = () => {
+      const id = Number(input.dataset.wordProblemSelect || 0);
+      if (id <= 0) return;
+      const selected = wordProblemSelectionIds();
+      if (input.checked) selected.add(id);
+      else selected.delete(id);
+      ps.previewProblemId = String(id);
+      renderLibraryContent();
+    };
+  });
+  document.querySelectorAll(".word-problem-row .word-row-check").forEach((label) => {
+    label.onclick = (event) => event.stopPropagation();
+  });
+  document.querySelectorAll("[data-word-problem-row]").forEach((row) => {
+    row.onclick = () => {
+      const id = Number(row.dataset.wordProblemRow || 0);
+      if (id <= 0) return;
+      const selected = wordProblemSelectionIds();
+      if (selected.has(id)) selected.delete(id);
+      else selected.add(id);
+      ps.previewProblemId = String(id);
+      renderLibraryContent();
+    };
   });
 }
 
@@ -9867,6 +10444,127 @@ function filteredInstances(instances) {
   return rows.filter((item) => instanceWorkflowStatus(item) === state.library.status);
 }
 
+function wordProblemSelectionState() {
+  if (!state.library.word.problemSelection || typeof state.library.word.problemSelection !== "object") {
+    state.library.word.problemSelection = {};
+  }
+  const ps = state.library.word.problemSelection;
+  if (!(ps.selectedIds instanceof Set)) {
+    ps.selectedIds = new Set(Array.from(ps.selectedIds || []).map((id) => Number(id)).filter((id) => id > 0));
+  }
+  if (!ps.estado) ps.estado = "Todos";
+  if (!ps.clave) ps.clave = "Todos";
+  if (ps.temaId === undefined || ps.temaId === null) ps.temaId = "";
+  if (ps.subtemaId === undefined || ps.subtemaId === null) ps.subtemaId = "";
+  if (ps.autor === undefined || ps.autor === null) ps.autor = "";
+  if (ps.editorial === undefined || ps.editorial === null) ps.editorial = "";
+  if (ps.previewProblemId === undefined || ps.previewProblemId === null) ps.previewProblemId = "";
+  if (!ps.limit) ps.limit = 100;
+  return ps;
+}
+
+function wordProblemSelectionIds() {
+  return wordProblemSelectionState().selectedIds;
+}
+
+function pruneWordProblemSelection() {
+  const ps = wordProblemSelectionState();
+  const problems = Array.isArray(ps.result?.problems) ? ps.result.problems : [];
+  if (!problems.length) return;
+  const valid = new Set(problems.map((problem) => Number(problem.id || 0)).filter((id) => id > 0));
+  let changed = false;
+  const previewId = Number(ps.previewProblemId || 0);
+  if (previewId > 0 && !valid.has(previewId)) {
+    ps.previewProblemId = "";
+    changed = true;
+  }
+  [...ps.selectedIds].forEach((id) => {
+    if (!valid.has(id)) {
+      ps.selectedIds.delete(id);
+      changed = true;
+    }
+  });
+  return changed;
+}
+
+async function loadWordProblems({ silent = false } = {}) {
+  const ps = wordProblemSelectionState();
+  ps.loading = true;
+  ps.error = "";
+  if (!silent && state.view === "library" && state.library.screen === "word") renderLibraryContent();
+  try {
+    const params = new URLSearchParams();
+    if (state.library.selectedDb) params.set("db_name", state.library.selectedDb);
+    if (String(ps.curso || "").trim()) params.set("curso", String(ps.curso || "").trim());
+    if (String(ps.temaId || "").trim()) params.set("tema_id", String(ps.temaId || "").trim());
+    if (String(ps.subtemaId || "").trim()) params.set("subtema_id", String(ps.subtemaId || "").trim());
+    if (String(ps.autor || "").trim()) params.set("autor", String(ps.autor || "").trim());
+    if (String(ps.editorial || "").trim()) params.set("editorial", String(ps.editorial || "").trim());
+    if (String(ps.estado || "Todos").trim()) params.set("estado", String(ps.estado || "Todos").trim());
+    if (String(ps.clave || "Todos").trim()) params.set("clave", String(ps.clave || "Todos").trim());
+    params.set("limit", String(Math.max(1, Math.min(500, Number(ps.limit || 100)))));
+    if (ps.aleatorio) params.set("aleatorio", "1");
+    const payload = await api(`/api/word/problems?${params.toString()}`);
+    ps.result = payload;
+    ps.error = "";
+    pruneWordProblemSelection();
+    if (!silent) setStatus(`Problemas Word: ${Number(payload.count || 0)} cargado(s) de ${Number(payload.total || 0)}.`);
+  } catch (err) {
+    ps.error = err.message || "No se pudo cargar problemas para Word.";
+    if (!silent) setStatus(`Error cargando problemas Word: ${ps.error}`);
+  } finally {
+    ps.loading = false;
+    if (state.view === "library" && state.library.screen === "word") renderLibraryContent();
+  }
+}
+
+async function convertWordProblems() {
+  const ps = wordProblemSelectionState();
+  const ids = [...wordProblemSelectionIds()];
+  if (!ids.length) return setStatus("Selecciona problemas para convertir a Word.");
+  if (ps.converting) return setStatus("Ya hay una conversion de problemas en ejecucion.");
+  ps.converting = true;
+  ps.error = "";
+  ps.lastResult = null;
+  renderLibraryContent();
+  try {
+    const settings = wordConversionSettings();
+    const result = await api("/api/word/convert-problems", {
+      method: "POST",
+      body: {
+        db_name: state.library.selectedDb || "",
+        problem_ids: ids,
+        title: ps.title || "",
+        structure: ps.structure || "",
+        output_docx: ps.outputDocx || "",
+        repo: settings.repo || "",
+        python: settings.python || "",
+        template: settings.template || "",
+        style: settings.style || "Estilo_plantilla",
+      },
+    });
+    ps.lastResult = result;
+    ps.outputDocx = result.word_path || result.output_docx || ps.outputDocx || "";
+    setStatus(`Word generado desde BD: ${result.word_path || result.output_docx || ""}`);
+  } catch (err) {
+    ps.error = err.message || "No se pudo convertir la seleccion.";
+    setStatus(`Error convirtiendo problemas Word: ${ps.error}`);
+  } finally {
+    ps.converting = false;
+    if (state.view === "library" && state.library.screen === "word") renderLibraryContent();
+  }
+}
+
+function openWordProblemResult() {
+  const ps = wordProblemSelectionState();
+  const result = ps.lastResult || {};
+  if (!result.word_url) {
+    return setStatus("No hay Word generado disponible para abrir.");
+  }
+  window.open(result.word_url, "_blank", "noopener");
+  setStatus(`Abriendo Word generado: ${result.word_path || result.output_docx || ""}`);
+}
+
 function wordAllInstances() {
   const catalog = state.library.word?.catalog || {};
   const rows = [];
@@ -9948,6 +10646,45 @@ function filteredWordInstances(book, forcedQuery = null) {
   });
 }
 
+function wordConversionSettings() {
+  if (!state.library.word.settings || typeof state.library.word.settings !== "object") {
+    state.library.word.settings = {};
+  }
+  const catalog = state.library.word.catalog || {};
+  const settings = state.library.word.settings;
+  return {
+    repo: String(settings.repo || catalog.repo || ""),
+    python: String(settings.python || ""),
+    template: String(settings.template || catalog.template || ""),
+    style: String(settings.style || "Estilo_plantilla").trim() || "Estilo_plantilla",
+  };
+}
+
+function manualWordSessionState() {
+  if (!state.library.word.manualSession || typeof state.library.word.manualSession !== "object") {
+    state.library.word.manualSession = createEmptyManualWordSession();
+  }
+  const manual = state.library.word.manualSession;
+  if (manual.sessionPath === undefined || manual.sessionPath === null) manual.sessionPath = "";
+  if (manual.outputDocx === undefined || manual.outputDocx === null) manual.outputDocx = "";
+  if (manual.error === undefined || manual.error === null) manual.error = "";
+  if (manual.converting === undefined || manual.converting === null) manual.converting = false;
+  if (manual.lastResult === undefined) manual.lastResult = null;
+  return manual;
+}
+
+function syncWordSettingsFromCatalog({ force = false } = {}) {
+  if (!state.library.word.settings || typeof state.library.word.settings !== "object") {
+    state.library.word.settings = {};
+  }
+  const catalog = state.library.word.catalog || {};
+  const settings = state.library.word.settings;
+  if (force || !String(settings.repo || "").trim()) settings.repo = String(catalog.repo || "");
+  if (force || !String(settings.template || "").trim()) settings.template = String(catalog.template || "");
+  if (force || !String(settings.style || "").trim()) settings.style = "Estilo_plantilla";
+  if (force) settings.python = "";
+}
+
 async function loadWordSessions({ silent = false } = {}) {
   state.library.word.loading = true;
   state.library.word.error = "";
@@ -9955,9 +10692,12 @@ async function loadWordSessions({ silent = false } = {}) {
   try {
     const params = new URLSearchParams();
     if (state.library.selectedDb) params.set("db_name", state.library.selectedDb);
+    if (String(state.library.word.root || "").trim()) params.set("root", String(state.library.word.root || "").trim());
     const payload = await api(`/api/word/sessions?${params.toString()}`);
     state.library.word.catalog = payload;
     state.library.word.error = "";
+    syncWordSettingsFromCatalog();
+    pruneWordSelection();
     if (!silent) setStatus(`Sesiones Word: ${Number(payload.summary?.word_ready || 0)} exportada(s).`);
   } catch (err) {
     state.library.word.error = err.message || "No se pudo cargar sesiones Word.";
@@ -9988,16 +10728,64 @@ async function convertWordSession(instanceKey) {
   }
 }
 
+async function convertManualWordSession() {
+  const manual = manualWordSessionState();
+  const sessionPath = String(manual.sessionPath || "").trim();
+  if (!sessionPath) return setStatus("Pega la ruta del archivo .json de sesion.");
+  if (manual.converting) return setStatus("Ya hay una conversion manual en ejecucion.");
+  manual.converting = true;
+  manual.error = "";
+  manual.lastResult = null;
+  renderLibraryContent();
+  try {
+    const settings = wordConversionSettings();
+    const result = await api("/api/word/convert", {
+      method: "POST",
+      body: {
+        session_path: sessionPath,
+        output_docx: manual.outputDocx || "",
+        repo: settings.repo || "",
+        python: settings.python || "",
+        template: settings.template || "",
+        style: settings.style || "Estilo_plantilla",
+      },
+    });
+    manual.lastResult = result;
+    manual.outputDocx = result.word_path || result.output_docx || manual.outputDocx || "";
+    setStatus(`Word generado desde sesion manual: ${manual.outputDocx}`);
+    if (state.library.word.catalog?.schema_version) {
+      await loadWordSessions({ silent: true });
+    }
+  } catch (err) {
+    manual.error = err.message || "No se pudo convertir la sesion manual.";
+    setStatus(`Error Word manual: ${manual.error}`);
+  } finally {
+    manual.converting = false;
+    if (state.view === "library" && state.library.screen === "word") renderLibraryContent();
+  }
+}
+
+function openManualWordSession() {
+  const manual = manualWordSessionState();
+  const result = manual.lastResult || {};
+  if (!result.word_url) {
+    return setStatus("No hay Word manual generado disponible para abrir.");
+  }
+  window.open(result.word_url, "_blank", "noopener");
+  setStatus(`Abriendo Word manual: ${result.word_path || result.output_docx || ""}`);
+}
+
 async function convertWordInstanceRow(row) {
-  const catalog = state.library.word.catalog || {};
+  const settings = wordConversionSettings();
   const result = await api("/api/word/convert", {
     method: "POST",
     body: {
       session_path: row.session_path,
       output_docx: row.word_path || "",
-      repo: catalog.repo || "",
-      template: catalog.template || "",
-      style: "Estilo_plantilla",
+      repo: settings.repo || "",
+      python: settings.python || "",
+      template: settings.template || "",
+      style: settings.style || "Estilo_plantilla",
     },
   });
   row.word_exists = Boolean(result.word_exists);
@@ -10030,6 +10818,7 @@ async function convertWordBatch(rows, label = "seleccionadas") {
       renderLibraryContent();
       try {
         await convertWordInstanceRow(row);
+        wordSelectionKeys().delete(String(row.instance_key || ""));
         ok += 1;
       } catch (err) {
         failed += 1;
@@ -10042,9 +10831,6 @@ async function convertWordBatch(rows, label = "seleccionadas") {
       };
     }
     await loadWordSessions({ silent: true });
-    if (!failed) {
-      queue.forEach((row) => wordSelectionKeys().delete(String(row.instance_key || "")));
-    }
     setStatus(`Cola Word terminada: ${ok} convertido(s), ${failed} error(es).`);
   } finally {
     state.library.word.batchRunning = false;

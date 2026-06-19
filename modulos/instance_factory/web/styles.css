@@ -258,14 +258,14 @@ img, canvas { max-width: 100%; }
 
 .word-toolbar {
   display: grid;
-  grid-template-columns: minmax(240px, 1fr) minmax(160px, 220px) minmax(320px, .9fr);
+  grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr) minmax(150px, 190px) minmax(360px, 1.05fr);
   gap: 12px;
   align-items: end;
 }
 
 .word-summary-strip {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -288,6 +288,385 @@ img, canvas { max-width: 100%; }
   display: block;
   margin-top: 2px;
   font-size: 20px;
+}
+
+.word-config-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.word-config-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.word-config-heading p {
+  margin: 4px 0 0;
+}
+
+.word-config-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.25fr) minmax(160px, .75fr) minmax(220px, 1fr) minmax(140px, .55fr);
+  gap: 10px;
+}
+
+.word-config-grid label {
+  min-width: 0;
+}
+
+.word-queue-bar {
+  display: grid;
+  grid-template-columns: minmax(190px, .8fr) minmax(320px, 1.4fr);
+  gap: 12px;
+  align-items: center;
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+}
+
+.word-queue-bar p {
+  margin: 4px 0 0;
+}
+
+.word-queue-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.word-batch-progress {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent-soft) 62%, var(--surface));
+}
+
+.word-batch-progress span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.word-batch-progress strong {
+  white-space: nowrap;
+}
+
+.word-manual-panel {
+  display: grid;
+  gap: 12px;
+  border-color: color-mix(in srgb, var(--accent) 22%, var(--border));
+}
+
+.word-manual-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.word-manual-heading p {
+  margin: 4px 0 0;
+}
+
+.word-manual-badge {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent-soft) 55%, transparent);
+  color: var(--text);
+  font-weight: 850;
+  font-size: 12px;
+}
+
+.word-manual-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 1.2fr) minmax(220px, .8fr);
+  gap: 10px;
+}
+
+.word-manual-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.word-manual-result span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.word-problem-panel {
+  display: grid;
+  gap: 12px;
+  border-color: color-mix(in srgb, var(--green) 26%, var(--border));
+}
+
+.word-problem-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.word-problem-heading p {
+  margin: 4px 0 0;
+}
+
+.word-problem-stats {
+  display: grid;
+  gap: 4px;
+  justify-items: end;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.word-problem-stats strong {
+  color: var(--accent);
+}
+
+.word-problem-controls,
+.word-problem-output {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  align-items: end;
+}
+
+.word-problem-output {
+  grid-template-columns: minmax(180px, .8fr) minmax(260px, 1.2fr);
+}
+
+.word-problem-check {
+  min-height: 46px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-soft);
+  white-space: nowrap;
+}
+
+.word-problem-structure {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-soft);
+  padding: 10px;
+}
+
+.word-problem-structure summary {
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.word-problem-structure textarea {
+  min-height: 94px;
+  margin-top: 10px;
+  resize: vertical;
+}
+
+.word-problem-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.word-problem-list {
+  display: grid;
+  gap: 8px;
+  max-height: 480px;
+  overflow: auto;
+  padding-right: 3px;
+}
+
+.word-problem-workspace {
+  display: grid;
+  grid-template-columns: minmax(320px, .95fr) minmax(360px, 1.05fr);
+  gap: 12px;
+  align-items: stretch;
+}
+
+.word-problem-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-soft);
+  cursor: pointer;
+}
+
+.word-problem-row.selected {
+  border-color: var(--active-border);
+  background: color-mix(in srgb, var(--accent-soft) 58%, var(--surface));
+}
+
+.word-problem-row.active {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.word-problem-main {
+  min-width: 0;
+}
+
+.word-problem-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-width: 0;
+}
+
+.word-problem-title strong,
+.word-problem-title span,
+.word-problem-title small {
+  overflow-wrap: anywhere;
+}
+
+.word-problem-title small {
+  color: var(--muted);
+}
+
+.word-problem-row p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.word-problem-empty {
+  min-height: 76px;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+}
+
+.word-problem-success {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.word-problem-success span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.word-problem-success button {
+  flex: 0 0 auto;
+}
+
+.word-problem-preview {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  min-width: 0;
+  min-height: 320px;
+  max-height: 480px;
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--surface-soft) 90%, var(--accent-soft)), var(--surface-soft));
+}
+
+.word-preview-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: start;
+}
+
+.word-preview-head > div:first-child {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.word-preview-head strong {
+  font-size: 26px;
+  line-height: 1;
+}
+
+.word-preview-pill {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 44%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent-soft) 58%, transparent);
+  color: var(--text);
+  font-weight: 800;
+}
+
+.word-preview-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.word-preview-meta span {
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--surface);
+  font-size: 12px;
+}
+
+.word-preview-render {
+  min-height: 170px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 17px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.word-preview-source {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 10px;
+}
+
+.word-preview-source summary {
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.word-preview-source pre {
+  margin: 10px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.word-preview-empty {
+  min-height: 260px;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
 }
 
 .word-books-grid {
@@ -366,13 +745,17 @@ img, canvas { max-width: 100%; }
 
 .word-instance-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
   padding: 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface-soft);
+}
+
+.word-instance-row.queued {
+  box-shadow: inset 3px 0 0 var(--accent);
 }
 
 .word-instance-row.ready {
@@ -387,6 +770,23 @@ img, canvas { max-width: 100%; }
 .word-instance-row.selected {
   outline: 2px solid var(--active-border);
   outline-offset: 1px;
+}
+
+.word-row-check {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.word-row-check input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
 }
 
 .word-instance-row strong,
@@ -422,12 +822,80 @@ img, canvas { max-width: 100%; }
   .word-toolbar {
     grid-template-columns: 1fr;
   }
+  .word-config-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+  .word-queue-bar {
+    grid-template-columns: 1fr;
+  }
+  .word-queue-actions {
+    justify-content: flex-start;
+  }
+  .word-manual-grid {
+    grid-template-columns: 1fr;
+  }
+  .word-problem-controls,
+  .word-problem-output {
+    grid-template-columns: 1fr 1fr;
+  }
+  .word-problem-workspace {
+    grid-template-columns: 1fr;
+  }
+  .word-problem-list,
+  .word-problem-preview {
+    max-height: none;
+  }
+  .word-problem-check {
+    min-height: 42px;
+  }
   .word-books-grid {
     grid-template-columns: 1fr;
   }
 }
 
 @media (max-width: 760px) {
+  .word-config-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .word-config-grid {
+    grid-template-columns: 1fr;
+  }
+  .word-problem-heading {
+    flex-direction: column;
+  }
+  .word-manual-heading {
+    flex-direction: column;
+  }
+  .word-manual-actions {
+    justify-content: stretch;
+  }
+  .word-manual-actions button {
+    flex: 1 1 150px;
+  }
+  .word-problem-stats {
+    justify-items: start;
+  }
+  .word-problem-controls,
+  .word-problem-output {
+    grid-template-columns: 1fr;
+  }
+  .word-problem-actions {
+    justify-content: stretch;
+  }
+  .word-problem-actions button {
+    flex: 1 1 140px;
+  }
+  .word-problem-success {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .word-preview-head {
+    flex-direction: column;
+  }
+  .word-preview-pill {
+    align-self: flex-start;
+  }
   .word-book-card,
   .word-instance-row {
     grid-template-columns: 1fr;
