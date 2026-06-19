@@ -24,6 +24,11 @@ def default_corrections_root(context: InstancePipelineContext) -> Path:
     configured = str(os.getenv("PDF_PROBLEM_DETECTOR_CORRECTIONS_ROOT") or "").strip()
     if configured:
         return Path(configured).expanduser().resolve() / safe_name(context.instance_name, "instancia", max_len=72)
+    if str(context.workspace_dir or "").strip():
+        from utils.project_layout import project_dirs
+
+        layout = project_dirs(Path(context.workspace_dir), context.normalized_instance_type)
+        return layout["datasets_dir"] / "problem_detector_corrections"
     return context.staging_root().parent / "problem_detector_corrections"
 
 

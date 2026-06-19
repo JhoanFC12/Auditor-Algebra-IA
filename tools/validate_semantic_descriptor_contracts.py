@@ -92,7 +92,7 @@ def validate_payload(path: Path, payload: dict[str, Any], schemas: dict[str, dic
     elif schema_version not in schemas:
         errors.append(f"unknown:schema_version:{schema_version}")
     elif jsonschema is None:
-        errors.append("jsonschema_unavailable")
+        errors.extend(_fallback_schema_errors(payload, schemas[schema_version]))
     else:
         try:
             jsonschema.validate(payload, schemas[schema_version])
@@ -104,6 +104,84 @@ def validate_payload(path: Path, payload: dict[str, Any], schemas: dict[str, dic
         schema_version=schema_version,
         errors=errors,
     )
+
+
+def _fallback_schema_errors(payload: dict[str, Any], schema: dict[str, Any]) -> list[str]:
+    errors = _validate_schema_node(payload, schema, path="$")
+    return [f"schema_validation:{error}" for error in errors]
+
+
+def _validate_schema_node(value: Any, schema: dict[str, Any], *, path: str) -> list[str]:
+    if not isinstance(schema, dict):
+        return []
+    errors: list[str] = []
+    if "const" in schema and value != schema.get("const"):
+        errors.append(f"{path}:const:{schema.get('const')!r}")
+    if "enum" in schema and value not in list(schema.get("enum") or []):
+        errors.append(f"{path}:enum:{value!r}")
+    raw_type = schema.get("type")
+    allowed_types = [raw_type] if isinstance(raw_type, str) else list(raw_type or [])
+    if allowed_types and not any(_matches_json_type(value, item) for item in allowed_types):
+        errors.append(f"{path}:type:{'/'.join(allowed_types)}")
+        return errors
+    if isinstance(value, str):
+        min_length = schema.get("minLength")
+        if min_length is not None and len(value) < int(min_length):
+            errors.append(f"{path}:minLength:{int(min_length)}")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        minimum = schema.get("minimum")
+        maximum = schema.get("maximum")
+        if minimum is not None and float(value) < float(minimum):
+            errors.append(f"{path}:minimum:{minimum}")
+        if maximum is not None and float(value) > float(maximum):
+            errors.append(f"{path}:maximum:{maximum}")
+    if isinstance(value, dict):
+        required = [str(item) for item in list(schema.get("required") or [])]
+        for key in required:
+            if key not in value:
+                errors.append(f"{path}:required:{key}")
+        properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        additional = schema.get("additionalProperties", True)
+        for key, child in value.items():
+            child_path = f"{path}.{key}"
+            if key in properties:
+                errors.extend(_validate_schema_node(child, properties[key], path=child_path))
+            elif additional is False:
+                errors.append(f"{child_path}:additionalProperties")
+            elif isinstance(additional, dict):
+                errors.extend(_validate_schema_node(child, additional, path=child_path))
+    if isinstance(value, list):
+        item_schema = schema.get("items") if isinstance(schema.get("items"), dict) else None
+        if item_schema is not None:
+            for index, item in enumerate(value):
+                errors.extend(_validate_schema_node(item, item_schema, path=f"{path}[{index}]"))
+        if bool(schema.get("uniqueItems")):
+            seen: set[str] = set()
+            for item in value:
+                marker = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+                if marker in seen:
+                    errors.append(f"{path}:uniqueItems")
+                    break
+                seen.add(marker)
+    return errors
+
+
+def _matches_json_type(value: Any, json_type: str) -> bool:
+    if json_type == "object":
+        return isinstance(value, dict)
+    if json_type == "array":
+        return isinstance(value, list)
+    if json_type == "string":
+        return isinstance(value, str)
+    if json_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if json_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if json_type == "boolean":
+        return isinstance(value, bool)
+    if json_type == "null":
+        return value is None
+    return True
 
 
 def validate_paths(paths: Iterable[Path], *, root: Path = ROOT) -> ValidationReport:

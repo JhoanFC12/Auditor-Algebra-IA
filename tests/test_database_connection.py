@@ -67,13 +67,15 @@ class DatabaseManagerTests(unittest.TestCase):
     def test_listar_bases_datos_returns_empty_when_connection_fails(self) -> None:
         with (
             patch.dict(os.environ, self._env(), clear=False),
-            patch("database.connection.psycopg2.connect", side_effect=RuntimeError("boom")),
+            patch("database.connection.psycopg2.connect", side_effect=RuntimeError("boom")) as mocked_connect,
             patch("builtins.print"),
         ):
             db = DatabaseManager()
             dbs = db.listar_bases_datos()
 
         self.assertEqual(dbs, [])
+        self.assertEqual(mocked_connect.call_count, 1)
+        self.assertEqual(db.last_connection_error, "boom")
 
 
 if __name__ == "__main__":

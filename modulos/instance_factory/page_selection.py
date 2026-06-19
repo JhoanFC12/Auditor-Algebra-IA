@@ -3,7 +3,17 @@ from __future__ import annotations
 
 def parse_page_selection(raw: str, total_pages: int) -> list[int]:
     pages: set[int] = set()
-    for token in str(raw or "").split(","):
+    normalized = (
+        str(raw or "")
+        .replace("\u2010", "-")
+        .replace("\u2011", "-")
+        .replace("\u2012", "-")
+        .replace("\u2013", "-")
+        .replace("\u2014", "-")
+        .replace("\u2015", "-")
+        .replace("\u2212", "-")
+    )
+    for token in normalized.split(","):
         token = token.strip()
         if not token:
             continue

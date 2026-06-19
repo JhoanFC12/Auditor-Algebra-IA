@@ -4,8 +4,20 @@ import os
 import time
 from pathlib import Path
 
-import psycopg2
 from utils.runtime_log import get_logger
+
+try:
+    import psycopg2
+except Exception:  # pragma: no cover - depends on local runtime.
+    class _MissingPsycopg2:
+        @staticmethod
+        def connect(*_args, **_kwargs):
+            raise RuntimeError(
+                "psycopg2 no esta instalado en este entorno. "
+                "Instala psycopg2/psycopg2-binary o usa el entorno de la app con el driver PostgreSQL."
+            )
+
+    psycopg2 = _MissingPsycopg2()  # type: ignore[assignment]
 
 try:
     from dotenv import load_dotenv
@@ -201,6 +213,7 @@ class DatabaseManager:
             else max(int(keepalives_count), 0)
         )
         self.connection = None
+        self.last_connection_error = ""
 
     @classmethod
     def from_profile(cls, profile_name: str, *, db_name: str | None = None):
@@ -255,12 +268,17 @@ class DatabaseManager:
         """
         Valida la conexion contra la base configurada y expone solo esa base.
         """
+        self.last_connection_error = ""
         try:
-            conn = self.get_connection(self.db_name)
+            # La pantalla inicial de Biblioteca solo necesita validar si la BD
+            # configurada esta disponible; evitar reintentos aqui mantiene el
+            # arranque responsivo cuando PostgreSQL local esta apagado.
+            conn = self._connect(self.db_name)
             conn.close()
             LOGGER.info("db_listar_bases_ok db=%s", self.db_name)
             return [self.db_name]
         except Exception as e:
+            self.last_connection_error = str(e)
             LOGGER.exception("db_listar_bases_error db=%s err=%s", self.db_name, e)
             print(f"Error listando BDs: {repr(e)}")
             return []

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from difflib import SequenceMatcher
+import hashlib
 import json
 import io
 import os
@@ -2825,6 +2826,46 @@ class LatexWordBridgeWindow(tk.Toplevel):
             ordered.append(clean)
         return ordered
 
+    @staticmethod
+    def _safe_db_preview_marker(value: object) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return "img"
+        candidate = re.sub(r"[^A-Za-z0-9._-]+", "_", raw).strip("._-")
+        return candidate[:120] or "img"
+
+    def _db_preview_problem_marker_prefix(self, problem: dict[str, object]) -> str:
+        for field in ("id", "problema_id"):
+            try:
+                value = int(problem.get(field) or 0)
+            except Exception:
+                value = 0
+            if value > 0:
+                return f"p{value}"
+        try:
+            number = int(problem.get("numero_original") or 0)
+        except Exception:
+            number = 0
+        if number > 0:
+            return f"n{number}"
+        seed = json.dumps(problem, ensure_ascii=False, sort_keys=True, default=str)
+        return f"p{hashlib.sha1(seed.encode('utf-8', errors='ignore')).hexdigest()[:10]}"
+
+    def _db_preview_structured_marker_name(
+        self,
+        problem: dict[str, object],
+        raw_path: str,
+        marker_counts: dict[str, int],
+    ) -> str:
+        raw_marker = Path(str(raw_path or "")).stem.strip() or "img"
+        prefix = self._db_preview_problem_marker_prefix(problem)
+        base = self._safe_db_preview_marker(f"{prefix}_{raw_marker}" if prefix else raw_marker)
+        key = base.lower()
+        marker_counts[key] = marker_counts.get(key, 0) + 1
+        if marker_counts[key] > 1:
+            return self._safe_db_preview_marker(f"{base}_{marker_counts[key]}")
+        return base
+
     def _resolve_db_preview_structured_images(self, problem: dict[str, object]) -> list[tuple[str, Path]]:
         entries: list[tuple[str, Path]] = []
         marker_counts: dict[str, int] = {}
@@ -2863,14 +2904,9 @@ class LatexWordBridgeWindow(tk.Toplevel):
                     except Exception:
                         continue
 
-            raw_marker_name = Path(raw_path).stem.strip()
-            marker_name = raw_marker_name
-            if resolved is None or not marker_name:
+            if resolved is None:
                 continue
-            marker_key = raw_marker_name.lower()
-            marker_counts[marker_key] = marker_counts.get(marker_key, 0) + 1
-            if marker_counts[marker_key] > 1:
-                marker_name = f"{raw_marker_name}_{marker_counts[marker_key]}"
+            marker_name = self._db_preview_structured_marker_name(problem, raw_path, marker_counts)
             entries.append((marker_name, resolved))
         return entries
 
@@ -5024,12 +5060,19 @@ class LatexWordBridgeWindow(tk.Toplevel):
         def worker() -> None:
             ok = False
             produced: list[Path] = []
+            source_label = ""
+            clear_db_selection_after_success = False
             try:
                 output_docx = self._normalize_output_docx_path(output_docx_raw)
                 self.after(0, lambda path=str(output_docx): self.output_docx_var.set(path))
                 if not output_docx.parent.exists():
                     output_docx.parent.mkdir(parents=True, exist_ok=True)
-                input_tex, images_dir, _source_label = self._prepare_source_tex_for_conversion(output_docx=output_docx)
+                input_tex, images_dir, source_label = self._prepare_source_tex_for_conversion(output_docx=output_docx)
+                clear_db_selection_after_success = (
+                    source_label == "db"
+                    and bool(self._db_selected_problem_ids)
+                    and not self._db_selection_json_loaded_explicitly
+                )
                 ok, produced = self._run_tex_to_word_conversion(
                     repo=repo,
                     py=py,
@@ -5062,6 +5105,9 @@ class LatexWordBridgeWindow(tk.Toplevel):
                     self.status_var.set("Conversion completada")
                     if self.source_mode_var.get() == "session":
                         self._refresh_session_tree_word_states()
+                    elif clear_db_selection_after_success:
+                        self._clear_db_selection()
+                        self._log("Seleccion BD limpiada despues de generar la practica.")
                     if produced:
                         messagebox.showinfo("Modulo 7", f"Word generado:\n{produced[0]}")
                     else:

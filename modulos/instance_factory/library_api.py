@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import copy
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
@@ -10,7 +12,7 @@ import os
 import time
 import urllib.parse
 
-from .library_covers import copy_cover_to_library_store
+from .library_covers import copy_cover_to_library_store, save_cover_bytes
 from .models import InstancePipelineContext
 
 if TYPE_CHECKING:
@@ -132,6 +134,8 @@ class LibraryWebApi:
             return {"GET"}
         if parts == ["api", "library", "concepts"]:
             return {"GET"}
+        if parts == ["api", "library", "cover", "paste"]:
+            return {"POST"}
         if len(parts) == 5 and parts[:3] == ["api", "library", "concepts"] and parts[4] == "problems":
             return {"GET"}
         if len(parts) == 7 and parts[:3] == ["api", "library", "concepts"] and parts[4] == "problems" and parts[6] == "review":
@@ -204,6 +208,8 @@ class LibraryWebApi:
             return self._books(query)
         if parts == ["api", "library", "books"] and method == "POST":
             return self._create_book(payload)
+        if parts == ["api", "library", "cover", "paste"]:
+            return self._save_pasted_cover(payload)
         if parts == ["api", "library", "practice-drafts"]:
             return self._practice_draft_catalog(query)
         if parts == ["api", "library", "concepts"]:
@@ -295,13 +301,22 @@ class LibraryWebApi:
 
     def _databases(self) -> dict[str, Any]:
         dbs = [str(name) for name in self.controller.listar_bases_datos()]
-        configured = str(os.getenv("DB_NAME", "") or "").strip()
+        configured = str(getattr(getattr(self.controller, "db", None), "db_name", "") or os.getenv("DB_NAME", "") or "").strip()
         selected = configured if configured in dbs else (dbs[0] if dbs else "")
+        db_error = str(getattr(getattr(self.controller, "db", None), "last_connection_error", "") or "").strip()
+        status = "ready" if dbs else ("error" if db_error else "empty")
         return {
             "schema_version": "library_databases_v1",
             "databases": dbs,
             "selected_db": selected,
             "count": len(dbs),
+            "status": status,
+            "error": db_error,
+            "message": (
+                f"No se pudo conectar a la base local configurada ({configured or 'sin DB_NAME'}): {db_error}"
+                if db_error
+                else ("" if dbs else "No hay bases de datos disponibles.")
+            ),
         }
 
     def _books(self, query: dict[str, list[str]]) -> dict[str, Any]:
@@ -388,6 +403,57 @@ class LibraryWebApi:
             "book": self._book_summary(db_name, dict(updated)),
             "policy": _policy(),
         }
+
+    def _save_pasted_cover(self, payload: dict[str, Any]) -> dict[str, Any]:
+        db_name = _required_db(payload=payload)
+        book = self._cover_book_payload(payload, db_name=db_name)
+        upload_payload = {**book, **dict(payload or {})} if book else dict(payload or {})
+        raw, suffix = _decode_cover_payload(payload)
+        file_path = save_cover_bytes(raw, suffix, upload_payload, db_name=db_name)
+        cover_path = str(file_path)
+        attached = False
+        if _truthy(payload.get("attach")):
+            self._attach_cover_to_book(payload, cover_path, db_name=db_name, book=book)
+            attached = True
+        return {
+            "schema_version": "library_cover_pasted_v1",
+            "db_name": db_name,
+            "cover_path": cover_path,
+            "cover_url": self.file_url_resolver(cover_path) if self.file_url_resolver else "",
+            "bytes": len(raw),
+            "attached": attached,
+        }
+
+    def _cover_book_payload(self, payload: dict[str, Any], *, db_name: str) -> dict[str, Any]:
+        try:
+            book_id = int(payload.get("book_id") or 0)
+        except Exception:
+            book_id = 0
+        if not book_id:
+            return {}
+        book = self.controller.obtener_libro(db_name, book_id)
+        return dict(book or {})
+
+    def _attach_cover_to_book(
+        self,
+        payload: dict[str, Any],
+        cover_path: str,
+        *,
+        db_name: str,
+        book: dict[str, Any] | None = None,
+    ) -> None:
+        try:
+            book_id = int(payload.get("book_id") or 0)
+        except Exception:
+            book_id = 0
+        if not book_id:
+            raise ValueError("book_id es requerido para asociar portada.")
+        current = dict(book or self.controller.obtener_libro(db_name, book_id) or {})
+        if not current:
+            raise FileNotFoundError("Libro no encontrado.")
+        merged = {**current, "cover_path": cover_path, "id": book_id}
+        data = _book_input(merged)
+        self.controller.actualizar_libro(db_name, book_id, _book_update_input(asdict(data)))
 
     def _create_instance(self, query: dict[str, list[str]], payload: dict[str, Any], book_id: int) -> dict[str, Any]:
         db_name = _required_db(query=query, payload=payload)
@@ -935,6 +1001,53 @@ def _query_bool(query: dict[str, list[str]], key: str, *, default: bool = False)
     return default
 
 
+def _truthy(value: Any, *, default: bool = False) -> bool:
+    if value is None or value == "":
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    raw = str(value).strip().lower()
+    if raw in {"1", "true", "si", "sí", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
+
+
+def _decode_cover_payload(payload: dict[str, Any]) -> tuple[bytes, str]:
+    data_url = str(payload.get("data_url") or payload.get("dataUrl") or "").strip()
+    mime = str(payload.get("mime") or "").strip().lower()
+    raw_b64 = str(payload.get("base64") or "").strip()
+    if data_url:
+        if not data_url.startswith("data:") or "," not in data_url:
+            raise ValueError("La imagen de portada no tiene formato data URL valido.")
+        header, raw_b64 = data_url.split(",", 1)
+        if ";base64" not in header.lower():
+            raise ValueError("La imagen de portada debe venir codificada en base64.")
+        mime = header[5:].split(";", 1)[0].strip().lower()
+    allowed = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/jpg": ".jpg",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+        "image/bmp": ".bmp",
+    }
+    suffix = allowed.get(mime)
+    if not suffix:
+        raise ValueError("Solo se aceptan portadas PNG, JPG, WEBP, GIF o BMP.")
+    try:
+        raw = base64.b64decode(raw_b64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("No se pudo leer la imagen de portada.") from exc
+    max_bytes = 12 * 1024 * 1024
+    if not raw:
+        raise ValueError("La imagen de portada esta vacia.")
+    if len(raw) > max_bytes:
+        raise ValueError("La portada supera 12 MB.")
+    return raw, suffix
+
+
 def _query_int(
     query: dict[str, list[str]],
     key: str,
@@ -1072,6 +1185,8 @@ def _empty_timeline_counts(indicators: dict[str, Any] | None = None) -> dict[str
         "pages_reviewed": int(raw.get("pages_reviewed") or 0),
         "boxes_total": int(raw.get("boxes_total") or raw.get("boxes") or 0),
         "records_total": int(raw.get("records_total") or raw.get("records") or raw.get("escaneados_sesion") or 0),
+        "problems_total": int(raw.get("problems_total") or raw.get("primary_records_total") or raw.get("records_total") or raw.get("records") or 0),
+        "primary_records_total": int(raw.get("primary_records_total") or raw.get("problems_total") or raw.get("records_total") or raw.get("records") or 0),
         "crops_found": int(raw.get("crops_found") or raw.get("crops_total") or raw.get("crops") or 0),
         "ocr_done": int(raw.get("ocr_done") or raw.get("ocr") or 0),
         "segments_done": int(raw.get("segments_done") or raw.get("segments") or 0),
@@ -1087,6 +1202,7 @@ def _timeline_stage_from_counts(counts: dict[str, Any]) -> dict[str, Any]:
     rows = {str(row["id"]): dict(row) for row in TIMELINE_STAGE_ROWS}
     subidos_bd = int(counts.get("subidos_bd") or 0)
     records_total = int(counts.get("records_total") or 0)
+    problems_total = int(counts.get("problems_total") or counts.get("primary_records_total") or records_total or 0)
     crops_found = int(counts.get("crops_found") or 0)
     ocr_done = int(counts.get("ocr_done") or 0)
     segments_done = int(counts.get("segments_done") or 0)
@@ -1103,7 +1219,7 @@ def _timeline_stage_from_counts(counts: dict[str, Any]) -> dict[str, Any]:
         status = "listo"
     elif normalized_done > 0 or ready > 0:
         stage_id = "review"
-        detail = f"{normalized_done}/{records_total} borrador(es); {ready} listo(s)."
+        detail = f"{normalized_done}/{problems_total} borrador(es); {ready} listo(s)."
         status = "requiere_revision" if errors else "procesando"
     elif ocr_done > 0 or segments_done > 0:
         stage_id = "ocr"

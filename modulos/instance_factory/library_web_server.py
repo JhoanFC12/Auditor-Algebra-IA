@@ -11,6 +11,7 @@ import tempfile
 import threading
 import traceback
 import urllib.parse
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -61,6 +62,7 @@ except ModuleNotFoundError as exc:
 
     BookProgressController = None  # type: ignore[assignment]
 from utils.project_layout import remap_legacy_drive_path
+from modulos.modulo7_latex_word.service import LatexWordService
 
 from .hf_endpoint_manager import HfEndpointManager
 from .library_covers import library_cover_dir, save_cover_bytes
@@ -106,6 +108,11 @@ class LibraryWebRuntime:
         self._factory_runtimes: list[FactoryWebRuntime] = []
         self._factory_runtime_by_instance_id: dict[int, Any] = {}
         self.endpoint_manager = HfEndpointManager()
+        self.word_service = LatexWordService(
+            controller=controller,
+            file_url_resolver=self._register_library_file,
+            log=lambda text: print(f"[LatexWordService] {text}"),
+        )
         self._lock = threading.RLock()
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -224,6 +231,11 @@ class LibraryWebRuntime:
                 result = self._dispatch_api(method, path, query, {})
                 self._send_json(handler, result)
                 return
+            if path.startswith("/api/word/"):
+                payload = self._read_json(handler) if method == "POST" else {}
+                result = self._dispatch_api(method, path, query, payload)
+                self._send_json(handler, result)
+                return
             if path.startswith("/api/library/"):
                 payload = self._read_json(handler) if method == "POST" else {}
                 result = self._dispatch_api(method, path, query, payload)
@@ -252,7 +264,10 @@ class LibraryWebRuntime:
         except (ValueError, json.JSONDecodeError) as exc:
             self._send_error(handler, exc, status=400, code="bad_request")
         except Exception as exc:
-            self._send_error(handler, exc, status=500, code="internal_error")
+            request_id = uuid.uuid4().hex[:12]
+            print(f"[LibraryWebRuntime] internal_error request_id={request_id} {method} {path}")
+            traceback.print_exc()
+            self._send_error(handler, exc, status=500, code="internal_error", request_id=request_id)
 
     def _dispatch_api(
         self,
@@ -270,6 +285,21 @@ class LibraryWebRuntime:
                 return self.library_api.dispatch(method, path, query, payload)
             if method == "GET" and path == "/api/training/status":
                 return load_training_cycle_status()
+            if method == "GET" and path == "/api/word/sessions":
+                db_name = self._first(query, "db_name", self.default_db_name)
+                root = self._first(query, "root", "")
+                self.word_service.controller = self._word_controller()
+                return self.word_service.list_sessions(db_name=db_name, root=root)
+            if method == "POST" and path == "/api/word/convert":
+                self.word_service.controller = self._word_controller()
+                return self.word_service.convert_session(
+                    session_path=self._required_str(payload, "session_path"),
+                    output_docx=str(payload.get("output_docx") or ""),
+                    repo=str(payload.get("repo") or ""),
+                    python=str(payload.get("python") or ""),
+                    template=str(payload.get("template") or ""),
+                    style=str(payload.get("style") or "Estilo_plantilla"),
+                )
             if method == "GET" and path == "/api/library/book":
                 db_name = self._required_query(query, "db_name")
                 book_id = self._bounded_int(self._required_query(query, "book_id"), "book_id", minimum=1, maximum=10**9)
@@ -302,6 +332,14 @@ class LibraryWebRuntime:
                 instance_type = self._required_str(payload, "instance_type")
                 return self._open_factory_for_instance(db_name, book_id, instance_type)
             raise FileNotFoundError(f"Ruta API no encontrada: {method} {path}")
+
+    def _word_controller(self) -> Any | None:
+        if self.controller is not None:
+            return self.controller
+        try:
+            return self.library_api.controller
+        except Exception:
+            return None
 
     def _dispatch_factory_api(
         self,
@@ -836,7 +874,7 @@ class LibraryWebRuntime:
             return ""
         if not file_path.exists() or not file_path.is_file():
             return ""
-        if file_path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}:
+        if file_path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".docx", ".tex", ".json"}:
             return ""
         try:
             stat = file_path.stat()
@@ -940,16 +978,21 @@ class LibraryWebRuntime:
         status: int,
         code: str,
         include_traceback: bool = False,
+        request_id: str = "",
     ) -> None:
         message = str(exc).strip("'") or code
         if code == "internal_error" and not include_traceback:
             message = "Error interno de la Biblioteca. Revisa el log local para mas detalle."
+            if request_id:
+                message = f"{message} request_id={request_id}"
         payload: dict[str, Any] = {
             "schema_version": "library_web_error_v1",
             "error": message,
             "code": code,
             "status": int(status),
         }
+        if request_id:
+            payload["request_id"] = request_id
         if include_traceback:
             payload["traceback"] = traceback.format_exc(limit=8)
         LibraryWebRuntime._send_json(handler, payload, status=status)
@@ -1016,6 +1059,8 @@ class LibraryWebRuntime:
             "/api/library/instance/create": {"POST"},
             "/api/library/instance/factory": {"POST"},
             "/api/training/status": {"GET"},
+            "/api/word/sessions": {"GET"},
+            "/api/word/convert": {"POST"},
         }
         if path in exact:
             return exact[path]

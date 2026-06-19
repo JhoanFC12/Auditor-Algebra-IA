@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
+from .continuations import continuation_flags_enabled, has_continuation_marker
 from .models import InstancePipelineContext, StagingProblemRecord
 
 
@@ -63,12 +64,7 @@ def _sample_id(context: InstancePipelineContext, record: StagingProblemRecord) -
 def _is_continuation(record: StagingProblemRecord) -> bool:
     normalized = dict(record.normalized or {})
     continuation = normalized.get("continuacion") if isinstance(normalized.get("continuacion"), dict) else {}
-    raw = str(record.raw_ocr or "").strip()
-    return bool(
-        continuation.get("es_continuacion")
-        or continuation.get("fusionar_con_anterior")
-        or raw.lower().startswith("[cont.")
-    )
+    return bool(continuation_flags_enabled(continuation) or has_continuation_marker(record.raw_ocr))
 
 
 def _final_latex(record: StagingProblemRecord) -> str:
@@ -89,18 +85,18 @@ def _copy_image(src: str, target: Path) -> str:
 def _continuation_records(parent: StagingProblemRecord, all_records: Iterable[StagingProblemRecord]) -> list[StagingProblemRecord]:
     normalized = dict(parent.normalized or {})
     fused = normalized.get("continuaciones_fusionadas") if isinstance(normalized.get("continuaciones_fusionadas"), list) else []
-    wanted_ids = {
+    wanted_ids = [
         str(item.get("record_id") or "").strip()
         for item in fused
         if isinstance(item, dict) and str(item.get("record_id") or "").strip()
-    }
+    ]
     rows = list(all_records or [])
     by_id = {str(row.record_id or ""): row for row in rows}
     out: list[StagingProblemRecord] = []
     seen: set[str] = set()
 
-    def add(row: StagingProblemRecord | None) -> None:
-        if row is None or not _is_continuation(row):
+    def add(row: StagingProblemRecord | None, *, allow_unmarked: bool = False) -> None:
+        if row is None or (not allow_unmarked and not _is_continuation(row)):
             return
         key = str(row.record_id or "")
         if not key or key in seen:
@@ -108,13 +104,19 @@ def _continuation_records(parent: StagingProblemRecord, all_records: Iterable[St
         out.append(row)
         seen.add(key)
 
-    for record_id in sorted(wanted_ids):
-        add(by_id.get(record_id))
+    for record_id in wanted_ids:
+        add(by_id.get(record_id), allow_unmarked=True)
 
     parent_id = str(parent.record_id or "")
     for row in rows:
         continuation = row.normalized.get("continuacion") if isinstance(row.normalized.get("continuacion"), dict) else {}
         if str(continuation.get("parent_record_id") or "").strip() == parent_id:
+            add(row, allow_unmarked=True)
+    parent_index = next((index for index, row in enumerate(rows) if str(row.record_id or "") == parent_id), -1)
+    if parent_index >= 0:
+        for row in rows[parent_index + 1 :]:
+            if not _is_continuation(row):
+                break
             add(row)
     return out
 

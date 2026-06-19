@@ -89,6 +89,192 @@ class InstanceFactoryDbPromotionTests(unittest.TestCase):
             self.assertEqual(stored.read_bytes(), b"image-15")
             self.assertEqual(Path(payload["ruta_carpeta"]).name, "db_images")
 
+    def test_build_problem_payload_does_not_overwrite_distinct_image_with_same_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            context = InstancePipelineContext(
+                book_code="aseuni-geometria",
+                instance_type="semana_2",
+                project_name="ASEUNI",
+                pdf_path="E:/Banco/ASEUNI.pdf",
+                workspace_dir=str(root),
+            )
+            first_segment = root / "segments" / "first" / "seg_01.png"
+            second_segment = root / "segments" / "second" / "seg_01.png"
+            first_segment.parent.mkdir(parents=True)
+            second_segment.parent.mkdir(parents=True)
+            first_segment.write_bytes(b"first-image")
+            second_segment.write_bytes(b"second-image")
+
+            def _record(record_id: str, image_path: Path) -> StagingProblemRecord:
+                return StagingProblemRecord(
+                    record_id=record_id,
+                    crop_id=record_id,
+                    crop_path=str(image_path),
+                    status=StageStatus.READY,
+                    normalized={"latex_rendered_item": FINAL_ITEM_WITH_IMAGE},
+                    figure_segmentation={
+                        "segments_total": 1,
+                        "segments": [{"image_path": str(image_path)}],
+                    },
+                )
+
+            first_payload = build_problem_payload(_record("first", first_segment), context)
+            second_payload = build_problem_payload(_record("second", second_segment), context)
+
+            first_stored = Path(first_payload["imagenes"][0])
+            second_stored = Path(second_payload["imagenes"][0])
+            self.assertEqual(first_stored.name, "img-15.png")
+            self.assertTrue(second_stored.name.startswith("img-15_"))
+            self.assertNotEqual(first_stored.name, second_stored.name)
+            self.assertEqual(first_stored.read_bytes(), b"first-image")
+            self.assertEqual(second_stored.read_bytes(), b"second-image")
+
+    def test_build_problem_payload_uses_parent_linked_continuation_segments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            main_crop = root / "crops" / "main.png"
+            cont_crop = root / "crops" / "cont.png"
+            segment = root / "segments" / "cont_seg.png"
+            main_crop.parent.mkdir(parents=True)
+            segment.parent.mkdir(parents=True)
+            main_crop.write_bytes(b"main-crop")
+            cont_crop.write_bytes(b"cont-crop")
+            segment.write_bytes(b"continuation-segment")
+            context = InstancePipelineContext(
+                book_code="aseuni-geometria",
+                instance_type="semana_2",
+                project_name="ASEUNI",
+                pdf_path="E:/Banco/ASEUNI.pdf",
+                workspace_dir=str(root),
+            )
+            parent = StagingProblemRecord(
+                record_id="record_15",
+                crop_id="crop_15",
+                crop_path=str(main_crop),
+                status=StageStatus.READY,
+                normalized={
+                    "latex_rendered_item": FINAL_ITEM_WITH_IMAGE,
+                    "continuaciones_fusionadas": [{"record_id": "record_15_cont"}],
+                },
+            )
+            continuation = StagingProblemRecord(
+                record_id="record_15_cont",
+                crop_id="crop_15_cont",
+                crop_path=str(cont_crop),
+                status=StageStatus.READY,
+                raw_ocr="A) 10 B) 20 C) 45 D) 30 E) 60",
+                figure_segmentation={
+                    "segments_total": 1,
+                    "segments": [{"image_path": str(segment)}],
+                },
+            )
+
+            payload = build_problem_payload(parent, context, all_records=[parent, continuation])
+
+            self.assertEqual(len(payload["imagenes"]), 1)
+            stored = Path(payload["imagenes"][0])
+            self.assertEqual(stored.name, "img-15.png")
+            self.assertEqual(stored.read_bytes(), b"continuation-segment")
+
+    def test_dry_run_skips_continuation_as_independent_problem(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent_crop = root / "parent.png"
+            cont_crop = root / "cont.png"
+            parent_crop.write_bytes(b"parent")
+            cont_crop.write_bytes(b"cont")
+            context = InstancePipelineContext(
+                book_code="aseuni-geometria",
+                instance_type="semana_1",
+                pdf_path="E:/Banco/ASEUNI.pdf",
+                db_name="mathcontentstudio_local_mirror",
+            )
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="ready",
+                        crop_id="ready",
+                        crop_path=str(parent_crop),
+                        status=StageStatus.READY,
+                        normalized={
+                            "latex_rendered_item": FINAL_ITEM,
+                            "continuaciones_fusionadas": [{"record_id": "ready_cont"}],
+                        },
+                        models={"ocr": "test-ocr", "figure_segmentation": "test-figure"},
+                        source={"page_number": 1, "bbox_px": [5, 6, 7, 8]},
+                    ),
+                    StagingProblemRecord(
+                        record_id="ready_cont",
+                        crop_id="ready_cont",
+                        crop_path=str(cont_crop),
+                        status=StageStatus.READY,
+                        raw_ocr="[CONT.] A) 1 B) 2 C) 3 D) 4 E) 5",
+                        normalized={
+                            "continuacion": {
+                                "es_continuacion": True,
+                                "fusionar_con_anterior": True,
+                                "parent_record_id": "ready",
+                            }
+                        },
+                        models={"ocr": "test-ocr", "figure_segmentation": "test-figure"},
+                        source={"page_number": 1, "bbox_px": [9, 10, 11, 12]},
+                    ),
+                ]
+            )
+
+            report = promote_staging_records_to_db(store, context, dry_run=True)
+
+            statuses = {row["record_id"]: row["status"] for row in report["rows"]}
+            self.assertEqual(statuses["ready"], "ready")
+            self.assertEqual(statuses["ready_cont"], "skipped")
+            self.assertEqual(sum(1 for status in statuses.values() if status == "ready"), 1)
+            self.assertEqual(report["skipped"], 1)
+
+    def test_dry_run_skips_angle_bracket_continuation_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            parent_crop = Path(tmp) / "parent.png"
+            cont_crop = Path(tmp) / "cont.png"
+            parent_crop.write_bytes(b"parent")
+            cont_crop.write_bytes(b"cont")
+            context = InstancePipelineContext(
+                book_code="aseuni-geometria",
+                instance_type="semana_1",
+                pdf_path="E:/Banco/ASEUNI.pdf",
+                db_name="mathcontentstudio_local_mirror",
+            )
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="ready",
+                        crop_id="ready",
+                        crop_path=str(parent_crop),
+                        status=StageStatus.READY,
+                        normalized={"latex_rendered_item": FINAL_ITEM},
+                        models={"ocr": "test-ocr", "figure_segmentation": "test-figure"},
+                        source={"page_number": 1, "bbox_px": [5, 6, 7, 8]},
+                    ),
+                    StagingProblemRecord(
+                        record_id="ready_cont",
+                        crop_id="ready_cont",
+                        crop_path=str(cont_crop),
+                        status=StageStatus.READY,
+                        raw_ocr="<CONT.> A) 1 B) 2 C) 3 D) 4 E) 5",
+                        models={"ocr": "test-ocr", "figure_segmentation": "test-figure"},
+                        source={"page_number": 1, "bbox_px": [9, 10, 11, 12]},
+                    ),
+                ]
+            )
+
+            report = promote_staging_records_to_db(store, context, dry_run=True)
+
+            statuses = {row["record_id"]: row["status"] for row in report["rows"]}
+            self.assertEqual(statuses["ready"], "ready")
+            self.assertEqual(statuses["ready_cont"], "skipped")
+            self.assertEqual(report["skipped"], 1)
+
     def test_dry_run_reports_ready_and_skips_incomplete_records(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ready_crop = Path(tmp) / "ready.png"
@@ -241,14 +427,15 @@ class InstanceFactoryDbPromotionTests(unittest.TestCase):
             )
             conn = FakeConnection()
 
-            with patch("modulos.instance_factory.db_promotion._database_manager_from_profile", return_value=FakeDb(conn)), patch(
-                "modulos.instance_factory.db_promotion._transcriptor_controller_factory",
-                return_value=FakeController(),
-            ):
+            with patch.object(store, "repair_detected_continuation_links", wraps=store.repair_detected_continuation_links) as repair_mock, patch(
+                "modulos.instance_factory.db_promotion._database_manager_from_profile",
+                return_value=FakeDb(conn),
+            ), patch("modulos.instance_factory.db_promotion._transcriptor_controller_factory", return_value=FakeController()):
                 report = promote_staging_records_to_db(store, context, dry_run=False)
 
         self.assertEqual(report["inserted"], 1)
         self.assertEqual(report["errors"], 0)
+        self.assertEqual(repair_mock.call_count, 1)
         sql_events = [event[0] for event in conn.events]
         first_problem_insert = next(i for i, sql in enumerate(sql_events) if "INSERT INTO problemas" in sql)
         self.assertGreaterEqual(sql_events[:first_problem_insert].count("COMMIT"), 2)

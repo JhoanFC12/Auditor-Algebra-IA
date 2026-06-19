@@ -4,12 +4,14 @@ import base64
 import gzip
 import json
 import os
+import sys
 import tempfile
 import unittest
 import urllib.error
 import urllib.request
 from dataclasses import asdict
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import PropertyMock, patch
 
 from modulos.instance_factory.library_api import LibraryApiError, LibraryWebApi, _timeline_stage_from_counts
@@ -187,6 +189,23 @@ class _FakeController:
 
 
 class LibraryWebApiTests(unittest.TestCase):
+    def test_library_databases_reports_connection_error(self) -> None:
+        class _FailingController:
+            def __init__(self) -> None:
+                self.db = SimpleNamespace(last_connection_error="connection refused")
+
+            def listar_bases_datos(self):
+                return []
+
+        api = LibraryWebApi(controller=_FailingController())
+
+        payload = api.dispatch("GET", "/api/library/databases", {}, {})
+
+        self.assertEqual(payload["schema_version"], "library_databases_v1")
+        self.assertEqual(payload["databases"], [])
+        self.assertEqual(payload["status"], "error")
+        self.assertIn("connection refused", payload["message"])
+
     def test_library_api_lists_detail_mutates_and_prepares_factory(self) -> None:
         with tempfile.TemporaryDirectory() as covers_tmp:
             previous_cover_root = os.environ.get("PDF_LIBRARY_COVER_ROOT")
@@ -815,6 +834,10 @@ class LibraryWebApiTests(unittest.TestCase):
         self.assertEqual(ocr["id"], "ocr")
         self.assertEqual(ocr["index"], 4)
 
+        review = _timeline_stage_from_counts({"records_total": 2, "problems_total": 1, "normalized_done": 1})
+        self.assertEqual(review["id"], "review")
+        self.assertIn("1/1 borrador", review["detail"])
+
     def test_library_api_resolves_book_cover_url(self) -> None:
         controller = _FakeController()
         controller.books[1]["cover_path"] = "E:/tmp/ALG01/cover.png"
@@ -825,6 +848,47 @@ class LibraryWebApiTests(unittest.TestCase):
 
         self.assertEqual(books["books"][0]["cover_url"], "/covers/cover.png")
         self.assertEqual(detail["book"]["cover_url"], "/covers/cover.png")
+
+    def test_library_api_pastes_cover_into_central_store_and_attaches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cover_root = Path(tmp) / "central_covers"
+            previous_cover_root = os.environ.get("PDF_LIBRARY_COVER_ROOT")
+            os.environ["PDF_LIBRARY_COVER_ROOT"] = str(cover_root)
+            try:
+                controller = _FakeController()
+                controller.books[1]["workspace_dir"] = str(Path(tmp) / "ALG01")
+                controller.books[1]["pdf_path"] = str(Path(tmp) / "ALG01" / "book.pdf")
+                api = LibraryWebApi(controller=controller, file_url_resolver=lambda path: f"/covers/{Path(path).name}")
+                raw = b"\x89PNG\r\n\x1a\ncover"
+
+                self.assertEqual(api.allowed_methods("/api/library/cover/paste"), {"POST"})
+                payload = api.dispatch(
+                    "POST",
+                    "/api/library/cover/paste",
+                    {},
+                    {
+                        "db_name": "demo_db",
+                        "book_id": 1,
+                        "attach": True,
+                        "data_url": "data:image/png;base64," + base64.b64encode(raw).decode("ascii"),
+                    },
+                )
+
+                cover_path = Path(payload["cover_path"])
+                self.assertEqual(payload["schema_version"], "library_cover_pasted_v1")
+                self.assertEqual(payload["db_name"], "demo_db")
+                self.assertEqual(payload["bytes"], len(raw))
+                self.assertTrue(payload["attached"])
+                self.assertEqual(payload["cover_url"], "/covers/cover.png")
+                self.assertTrue(cover_path.is_relative_to(cover_root))
+                self.assertEqual(cover_path.read_bytes(), raw)
+                self.assertEqual(controller.books[1]["cover_path"], str(cover_path))
+                self.assertEqual(controller.updated_books[-1][1].cover_path, str(cover_path))
+            finally:
+                if previous_cover_root is None:
+                    os.environ.pop("PDF_LIBRARY_COVER_ROOT", None)
+                else:
+                    os.environ["PDF_LIBRARY_COVER_ROOT"] = previous_cover_root
 
     def test_library_runtime_serves_registered_book_cover(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1538,6 +1602,100 @@ class LibraryWebApiTests(unittest.TestCase):
                 self.assertEqual(payload["code"], "library_dependency_missing")
             finally:
                 runtime.stop()
+
+    def test_library_runtime_exposes_latex_word_session_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session = root / "sessions" / "s01.json"
+            session.parent.mkdir(parents=True)
+            session.write_text(
+                json.dumps({"output_text": r"\item[\textbf{1.}] Calcule $x$."}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            session.with_suffix(".docx").write_bytes(b"docx")
+            controller = _FakeController()
+            controller.books[1]["workspace_dir"] = str(root)
+            controller.instances[1][0]["session_path"] = str(session)
+            runtime = LibraryWebRuntime(controller=controller)
+            try:
+                base = runtime.start()
+                payload = _get_json(base, "api/word/sessions?db_name=demo_db")
+
+                self.assertEqual(payload["schema_version"], "latex_word_sessions_v1")
+                self.assertEqual(payload["summary"]["instances_total"], 1)
+                self.assertEqual(payload["summary"]["word_ready"], 1)
+                row = payload["books"][0]["instances"][0]
+                self.assertTrue(row["word_exists"])
+                self.assertIn("/api/library/file/", row["word_url"])
+            finally:
+                runtime.stop()
+
+    def test_library_runtime_converts_latex_word_session_via_api(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "Editor_de_practicas"
+            repo.mkdir()
+            (repo / "latex_to_word.py").write_text(
+                "\n".join(
+                    [
+                        "from pathlib import Path",
+                        "import sys",
+                        "out = Path(sys.argv[2])",
+                        "out.write_bytes(b'docx')",
+                        "print(f'Word generado en: {out}')",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            session = root / "sessions" / "s01.json"
+            session.parent.mkdir(parents=True)
+            session.write_text(
+                json.dumps({"output_text": r"\item[\textbf{1.}] Calcule $x$."}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            output = root / "s01.docx"
+            runtime = LibraryWebRuntime(controller=_FakeController())
+            try:
+                base = runtime.start()
+                payload = _post_json(
+                    base,
+                    "api/word/convert",
+                    {
+                        "session_path": str(session),
+                        "output_docx": str(output),
+                        "repo": str(repo),
+                        "python": sys.executable,
+                    },
+                )
+
+                self.assertEqual(payload["schema_version"], "latex_word_conversion_v1")
+                self.assertTrue(payload["word_exists"])
+                self.assertTrue(output.exists())
+                self.assertIn("/api/library/file/", payload["word_url"])
+            finally:
+                runtime.stop()
+
+    def test_library_runtime_hides_internal_tracebacks_from_client_with_request_id(self) -> None:
+        class _BrokenController(_FakeController):
+            def listar_libros(self, *_args, **_kwargs):
+                raise RuntimeError("secret internal path E:/private/token")
+
+        runtime = LibraryWebRuntime(controller=_BrokenController())
+        try:
+            base = runtime.start()
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                urllib.request.urlopen(base + "api/library/bootstrap", timeout=5)
+
+            self.assertEqual(raised.exception.code, 500)
+            payload = json.loads(raised.exception.read().decode("utf-8"))
+            self.assertEqual(payload["schema_version"], "library_web_error_v1")
+            self.assertEqual(payload["code"], "internal_error")
+            self.assertRegex(payload.get("request_id", ""), r"^[a-f0-9]{12}$")
+            self.assertIn(payload["request_id"], payload["error"])
+            self.assertNotIn("traceback", payload)
+            self.assertNotIn("secret internal path", payload["error"])
+        finally:
+            runtime.stop()
 
 
 if __name__ == "__main__":

@@ -63,6 +63,57 @@ class InstanceFactoryRuntimeEnvTests(unittest.TestCase):
             )
             self.assertEqual(os.environ["HF_ENDPOINT_START_TIMEOUT"], "300")
 
+    def test_env_local_model_paths_are_not_overwritten_by_empty_env_values(self) -> None:
+        watched = {
+            "PDF_PROBLEM_MODEL",
+            "YOLO_FIGURE_MODEL",
+            "FIGURE_DETECTOR_MODEL",
+            "YOLO_SEGMENT_MODEL",
+            "HF_MODEL",
+        }
+        previous = {key: os.environ.get(key) for key in watched}
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / ".env").write_text(
+                    "\n".join(
+                        [
+                            "PDF_PROBLEM_MODEL=",
+                            "YOLO_FIGURE_MODEL=",
+                            "FIGURE_DETECTOR_MODEL=",
+                            "YOLO_SEGMENT_MODEL=",
+                            "HF_MODEL=",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                (root / ".env.local").write_text(
+                    "\n".join(
+                        [
+                            "PDF_PROBLEM_MODEL=E:/models/pdf/best.pt",
+                            "YOLO_FIGURE_MODEL=E:/models/graph/best.pt",
+                            "FIGURE_DETECTOR_MODEL=E:/models/graph/best.pt",
+                            "YOLO_SEGMENT_MODEL=E:/models/graph/best.pt",
+                            "HF_MODEL=Jhoan12/math-ocr-test",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+
+                load_factory_runtime_env(root)
+
+                self.assertEqual(os.environ["PDF_PROBLEM_MODEL"], "E:/models/pdf/best.pt")
+                self.assertEqual(os.environ["YOLO_FIGURE_MODEL"], "E:/models/graph/best.pt")
+                self.assertEqual(os.environ["FIGURE_DETECTOR_MODEL"], "E:/models/graph/best.pt")
+                self.assertEqual(os.environ["YOLO_SEGMENT_MODEL"], "E:/models/graph/best.pt")
+                self.assertEqual(os.environ["HF_MODEL"], "Jhoan12/math-ocr-test")
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
 
 if __name__ == "__main__":
     unittest.main()

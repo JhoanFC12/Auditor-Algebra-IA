@@ -18,6 +18,7 @@ from .models import (
     build_pipeline_contract,
     utc_now_text,
 )
+from .continuations import continuation_flags_enabled, has_continuation_marker, strip_continuation_marker
 from .normalizer_training_bank import remove_sample as remove_normalizer_training_sample
 from .normalizer_training_bank import upsert_sample as upsert_normalizer_training_sample
 
@@ -72,6 +73,72 @@ def _cached_static_manifest_payload(cache_key: str, builder: Any) -> dict[str, A
             return copy.deepcopy(payload)
     payload = builder()
     _STATIC_MANIFEST_PAYLOAD_CACHE[cache_key] = (signature, time.monotonic(), copy.deepcopy(payload))
+    return payload
+
+
+def _problem_number_from_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    patterns = (
+        r"\\item\s*\[\s*\\textbf\{\s*(\d{1,4})\s*\.?\s*\}\s*\]",
+        r"<\s*(\d{1,4})\s*[\.)]?\s*>",
+        r"^\s*(\d{1,4})\s*[\.)]\s+",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return str(match.group(1)).strip()
+    return ""
+
+
+def _first_problem_number(*values: Any) -> str:
+    for value in values:
+        direct = str(value or "").strip()
+        if re.fullmatch(r"\d{1,4}", direct):
+            return direct
+        inferred = _problem_number_from_text(direct)
+        if inferred:
+            return inferred
+    return ""
+
+
+def _repair_normalized_final_latex_number(
+    normalized: dict[str, Any],
+    record: StagingProblemRecord,
+) -> dict[str, Any]:
+    payload = dict(normalized or {})
+    source = record.source if isinstance(record.source, dict) else {}
+    number = _first_problem_number(
+        payload.get("numero"),
+        payload.get("latex_rendered_item"),
+        record.raw_ocr,
+        payload.get("enunciado_latex"),
+        source.get("problem_number"),
+        source.get("n"),
+    )
+    if number and not str(payload.get("numero") or "").strip():
+        payload["numero"] = number
+    final_latex = str(payload.get("latex_rendered_item") or "").strip()
+    if not final_latex or not number:
+        return payload
+    repaired = re.sub(
+        r"\\item\s*\[\s*\\textbf\{\s*(?:\.|\s*)\s*\}\s*\]",
+        lambda _match: f"\\item[\\textbf{{{number}.}}]",
+        final_latex,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    marker = rf"<\s*{re.escape(number)}\s*[\.)]?\s*>\s*"
+    repaired = re.sub(rf"(\]\]\s*){marker}", r"\1", repaired, count=1, flags=re.IGNORECASE)
+    repaired = re.sub(
+        rf"(\\item\s*\[\s*\\textbf\{{\s*{re.escape(number)}\s*\.?\s*\}}\s*\]\s*){marker}",
+        r"\1",
+        repaired,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    payload["latex_rendered_item"] = repaired
     return payload
 
 
@@ -170,8 +237,11 @@ class InstanceStagingStore:
         raw_summary = payload.get("summary")
         if not isinstance(raw_summary, dict):
             return None
+        records_total = raw_summary.get("records_total", payload.get("records_total", 0))
         defaults = {
-            "records_total": payload.get("records_total", 0),
+            "records_total": records_total,
+            "problems_total": records_total,
+            "primary_records_total": records_total,
             "crops_found": 0,
             "ocr_done": 0,
             "segments_done": 0,
@@ -180,6 +250,7 @@ class InstanceStagingStore:
             "human_reviewed": 0,
             "ready": 0,
             "errors": 0,
+            "subidos_bd": 0,
         }
         summary: dict[str, int] = {}
         for key, fallback in defaults.items():
@@ -630,8 +701,11 @@ class InstanceStagingStore:
         crop_exists_resolver: Any | None = None,
     ) -> dict[str, int]:
         rows = records if records is not None else self.load_records()
+        continuation_ids = self._summary_continuation_record_ids(rows)
         summary = {
             "records_total": len(rows),
+            "problems_total": 0,
+            "primary_records_total": 0,
             "crops_found": 0,
             "ocr_done": 0,
             "segments_done": 0,
@@ -640,8 +714,13 @@ class InstanceStagingStore:
             "human_reviewed": 0,
             "ready": 0,
             "errors": 0,
+            "subidos_bd": 0,
         }
         for row in rows:
+            is_continuation = self._is_summary_continuation_record(row, continuation_ids)
+            if not is_continuation:
+                summary["problems_total"] += 1
+                summary["primary_records_total"] += 1
             crop_exists = False
             if row.crop_path:
                 if crop_exists_resolver is not None:
@@ -657,11 +736,13 @@ class InstanceStagingStore:
                 summary["ocr_done"] += 1
             if row.figure_segmentation:
                 summary["segments_done"] += 1
-            if row.normalized:
+            if row.normalized and not is_continuation:
                 summary["normalized_done"] += 1
             status = StageStatus.normalize(row.status)
             review_status = StageStatus.normalize(str(dict(row.review or {}).get("review_status") or ""))
-            if status == StageStatus.READY or review_status == StageStatus.READY:
+            if is_continuation:
+                pass
+            elif status == StageStatus.READY or review_status == StageStatus.READY:
                 summary["ready"] += 1
             elif status == StageStatus.HUMAN_REVIEWED or review_status == StageStatus.HUMAN_REVIEWED:
                 summary["human_reviewed"] += 1
@@ -669,7 +750,171 @@ class InstanceStagingStore:
                 summary["needs_review"] += 1
             if status == StageStatus.ERROR or row.errors:
                 summary["errors"] += 1
+            db_promotion = dict(dict(row.audit or {}).get("db_promotion") or {})
+            if not is_continuation and (db_promotion.get("problem_id") or dict(row.artifacts or {}).get("db_problem_id")):
+                summary["subidos_bd"] += 1
         return summary
+
+    def _summary_continuation_record_ids(self, rows: list[StagingProblemRecord]) -> set[str]:
+        ids: set[str] = set()
+        for row in rows:
+            normalized = row.normalized if isinstance(row.normalized, dict) else {}
+            continuations = normalized.get("continuaciones_fusionadas")
+            if not isinstance(continuations, list):
+                continue
+            for item in continuations:
+                if not isinstance(item, dict):
+                    continue
+                for key in ("record_id", "crop_id"):
+                    value = str(item.get(key) or "").strip()
+                    if value:
+                        ids.add(value)
+        return ids
+
+    def _is_summary_continuation_record(
+        self,
+        row: StagingProblemRecord,
+        continuation_ids: set[str] | None = None,
+    ) -> bool:
+        ids = continuation_ids or set()
+        if str(row.record_id or "").strip() in ids or str(row.crop_id or "").strip() in ids:
+            return True
+        normalized = row.normalized if isinstance(row.normalized, dict) else {}
+        continuation = normalized.get("continuacion") if isinstance(normalized.get("continuacion"), dict) else {}
+        if continuation_flags_enabled(continuation):
+            return True
+        for value in (
+            row.raw_ocr,
+            normalized.get("latex_rendered_item"),
+            normalized.get("enunciado_latex"),
+        ):
+            if has_continuation_marker(value):
+                return True
+        return False
+
+    def _continuation_text_for_record(self, record: StagingProblemRecord) -> str:
+        normalized = record.normalized if isinstance(record.normalized, dict) else {}
+        for value in (
+            record.raw_ocr,
+            normalized.get("enunciado_latex"),
+            normalized.get("latex_rendered_item"),
+        ):
+            text = str(value or "").strip()
+            if text:
+                return strip_continuation_marker(text)
+        return ""
+
+    def _continuation_rows_for_parent(
+        self,
+        parent: StagingProblemRecord,
+        rows: list[StagingProblemRecord] | None = None,
+    ) -> list[StagingProblemRecord]:
+        parent_id = str(parent.record_id or "").strip()
+        if not parent_id:
+            return []
+        all_rows = rows if rows is not None else self.load_records()
+        by_id = {str(row.record_id or ""): row for row in all_rows if str(row.record_id or "")}
+        out: list[StagingProblemRecord] = []
+        seen: set[str] = set()
+
+        def add(row: StagingProblemRecord | None, *, allow_unmarked: bool = False) -> None:
+            if row is None:
+                return
+            row_id = str(row.record_id or "").strip()
+            if not row_id or row_id == parent_id or row_id in seen:
+                return
+            if not allow_unmarked and not self._is_summary_continuation_record(row):
+                return
+            out.append(row)
+            seen.add(row_id)
+
+        normalized = parent.normalized if isinstance(parent.normalized, dict) else {}
+        fused = normalized.get("continuaciones_fusionadas") if isinstance(normalized.get("continuaciones_fusionadas"), list) else []
+        for item in fused:
+            if isinstance(item, dict):
+                add(by_id.get(str(item.get("record_id") or "").strip()), allow_unmarked=True)
+
+        for row in all_rows:
+            row_normalized = row.normalized if isinstance(row.normalized, dict) else {}
+            continuation = row_normalized.get("continuacion") if isinstance(row_normalized.get("continuacion"), dict) else {}
+            if str(continuation.get("parent_record_id") or "").strip() == parent_id:
+                add(row, allow_unmarked=True)
+
+        try:
+            parent_index = next(index for index, row in enumerate(all_rows) if str(row.record_id or "") == parent_id)
+        except StopIteration:
+            parent_index = -1
+        if parent_index >= 0:
+            for row in all_rows[parent_index + 1 :]:
+                if not self._is_summary_continuation_record(row):
+                    break
+                add(row)
+        return out
+
+    def _attach_detected_continuations(
+        self,
+        record: StagingProblemRecord,
+        rows: list[StagingProblemRecord] | None = None,
+    ) -> None:
+        if self._is_summary_continuation_record(record):
+            return
+        rows = rows if rows is not None else self.load_records()
+        rows = [row for row in rows if str(row.record_id or "") != str(record.record_id or "")] + [record]
+        rows = sorted(rows, key=self._record_sort_key)
+        continuation_rows = self._continuation_rows_for_parent(record, rows)
+        if not continuation_rows:
+            return
+        normalized = record.normalized if isinstance(record.normalized, dict) else {}
+        existing = normalized.get("continuaciones_fusionadas") if isinstance(normalized.get("continuaciones_fusionadas"), list) else []
+        by_id: dict[str, dict[str, Any]] = {}
+        for item in existing:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("record_id") or item.get("crop_id") or "").strip()
+            if key:
+                by_id[key] = dict(item)
+        for row in continuation_rows:
+            key = str(row.record_id or row.crop_id or "").strip()
+            if not key:
+                continue
+            source = dict(row.source or {})
+            by_id[key] = {
+                "record_id": str(row.record_id or ""),
+                "crop_id": str(row.crop_id or ""),
+                "crop_name": Path(str(row.crop_path or "")).name,
+                "page_number": source.get("page_number", source.get("source_page_number")),
+                "bbox_px": source.get("bbox_px") if isinstance(source.get("bbox_px"), list) else None,
+                "texto_fusionado": self._continuation_text_for_record(row),
+            }
+        record.normalized = {
+            **dict(normalized),
+            "continuaciones_fusionadas": list(by_id.values()),
+        }
+
+    def repair_detected_continuation_links(self) -> list[StagingProblemRecord]:
+        rows = self.load_records()
+        continuation_ids = self._summary_continuation_record_ids(rows)
+        changed: list[StagingProblemRecord] = []
+        for record in rows:
+            if self._is_summary_continuation_record(record, continuation_ids):
+                continue
+            before = json.dumps(
+                (record.normalized or {}).get("continuaciones_fusionadas") or [],
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            self._attach_detected_continuations(record, rows)
+            after = json.dumps(
+                (record.normalized or {}).get("continuaciones_fusionadas") or [],
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            if before != after:
+                record.touch()
+                changed.append(record)
+        if changed:
+            self.upsert_many(changed)
+        return changed
 
     def get_record(self, record_id: str) -> StagingProblemRecord | None:
         try:
@@ -849,6 +1094,10 @@ class InstanceStagingStore:
         record = self.get_record(record_id)
         if record is None:
             raise KeyError(record_id)
+        downstream_state = dict(dict(record.audit or {}).get("downstream_state") or {})
+        if downstream_state.get("status") == "invalidated":
+            reason = str(downstream_state.get("reason") or "source_changed").strip() or "source_changed"
+            raise ValueError(f"Regenera staging antes de guardar revision: {reason}.")
         previous_review = dict(record.review or {})
         history = list(previous_review.get("history") or [])
         machine_normalized_before = dict(record.normalized or {})
@@ -860,7 +1109,15 @@ class InstanceStagingStore:
                     "notes": str(previous_review.get("notes") or ""),
                 }
             )
-        record.normalized = dict(normalized or {})
+        record.normalized = _repair_normalized_final_latex_number(dict(normalized or {}), record)
+        if (
+            "continuaciones_fusionadas" not in record.normalized
+            and isinstance(machine_normalized_before.get("continuaciones_fusionadas"), list)
+        ):
+            record.normalized["continuaciones_fusionadas"] = [
+                dict(item) for item in machine_normalized_before.get("continuaciones_fusionadas") or [] if isinstance(item, dict)
+            ]
+        self._attach_detected_continuations(record)
         review_status = StageStatus.READY if mark_ready else StageStatus.NEEDS_REVIEW
         correction_time = utc_now_text()
         record.training_examples = [
@@ -954,6 +1211,7 @@ class InstanceStagingStore:
         blocking_issues = list(metadata_issues)
         normalized = dict(record.normalized or {})
         continuation = normalized.get("continuacion") if isinstance(normalized.get("continuacion"), dict) else {}
+        continuation_ids = self._summary_continuation_record_ids(self.load_records())
         if not normalized:
             blocking_issues.append("missing:normalized")
         final_latex = str(normalized.get("latex_rendered_item") or "").strip()
@@ -961,8 +1219,12 @@ class InstanceStagingStore:
             blocking_issues.append("missing:final_latex")
         if final_latex and not re.match(r"^\s*\\item\s*\[\s*\\textbf\s*\{\s*\d+\s*\.?\s*\}\s*\]", final_latex):
             blocking_issues.append("invalid:final_latex_item")
-        if bool(continuation.get("es_continuacion") or continuation.get("fusionar_con_anterior")):
+        if continuation_flags_enabled(continuation) or self._is_summary_continuation_record(record, continuation_ids):
             blocking_issues.append("continuacion:fusionada_con_anterior")
+        downstream_state = dict(dict(record.audit or {}).get("downstream_state") or {})
+        if downstream_state.get("status") == "invalidated":
+            reason = str(downstream_state.get("reason") or "source_changed").strip() or "source_changed"
+            blocking_issues.append(f"source_stale:{reason}")
         if StageStatus.normalize(record.status) != StageStatus.READY:
             blocking_issues.append("not_ready:human_review")
         return {

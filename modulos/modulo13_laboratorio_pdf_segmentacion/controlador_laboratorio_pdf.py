@@ -10,8 +10,6 @@ from datetime import datetime
 from pathlib import Path
 
 from PIL import Image
-from huggingface_hub import hf_hub_download
-from ultralytics import YOLO
 
 from utils.project_layout import infer_workspace_from_session_path, normalize_instance_name, project_dirs
 
@@ -21,6 +19,18 @@ DEFAULT_MODEL_REPO_ID = "Jhoan12/pdf-problem-detector-yolov8n-v4"
 DEFAULT_PREDICT_ROOT = Path(".cache/transcriptor_runs/pdf_problem_detector_runtime").resolve()
 DEFAULT_PROBLEM_CROPS_LIVE_ROOT = Path(".cache/transcriptor_runs/datasets/problem_crops_live").resolve()
 DEFAULT_LOCAL_MODEL_PATH = Path("models/pdf_problem_detector_yolov8n_v4/weights/best.pt").resolve()
+
+
+def _hf_hub_download(*args, **kwargs) -> str:
+    from huggingface_hub import hf_hub_download
+
+    return hf_hub_download(*args, **kwargs)
+
+
+def _load_yolo_model(weights: str):
+    from ultralytics import YOLO
+
+    return YOLO(weights)
 
 
 def safe_name(value: str, fallback: str = "instancia", max_len: int = 72) -> str:
@@ -172,10 +182,10 @@ class PdfProblemGoldenController:
                 pass
             if "/" in raw and "\\" not in raw and raw.count("/") == 1:
                 try:
-                    return hf_hub_download(raw, "weights/best.pt", repo_type="model", token=token)
+                    return _hf_hub_download(raw, "weights/best.pt", repo_type="model", token=token)
                 except Exception:
                     try:
-                        return hf_hub_download(raw, "best.pt", repo_type="model", token=token)
+                        return _hf_hub_download(raw, "best.pt", repo_type="model", token=token)
                     except Exception:
                         continue
         raise FileNotFoundError("No se encontro modelo entrenado para detector de problemas PDF.")
@@ -191,7 +201,7 @@ class PdfProblemGoldenController:
     ) -> list[tuple[int, int, int, int]]:
         weights = self._resolve_detector_weights(model)
         if self._model is None or self._model_path != weights:
-            self._model = YOLO(weights)
+            self._model = _load_yolo_model(weights)
             self._model_path = weights
         result = self._model.predict(
             source=str(image_path),

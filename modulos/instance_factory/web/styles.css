@@ -254,6 +254,196 @@ img, canvas { max-width: 100%; }
   overflow: hidden;
 }
 
+.word-hero h2 { margin-bottom: 4px; }
+
+.word-toolbar {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(160px, 220px) minmax(320px, .9fr);
+  gap: 12px;
+  align-items: end;
+}
+
+.word-summary-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.word-summary-strip > div {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-soft);
+  padding: 9px 10px;
+}
+
+.word-summary-strip span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.word-summary-strip strong {
+  display: block;
+  margin-top: 2px;
+  font-size: 20px;
+}
+
+.word-books-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: 12px;
+}
+
+.word-book-card {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.word-book-cover {
+  width: 88px;
+  min-height: 124px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-soft);
+  color: var(--accent-dark);
+  font-weight: 900;
+}
+
+.word-book-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.word-book-main { min-width: 0; }
+
+.word-book-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.word-book-heading h3 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.18;
+  overflow-wrap: anywhere;
+}
+
+.word-book-counts {
+  display: grid;
+  gap: 4px;
+  justify-items: end;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.word-book-counts strong {
+  color: var(--green);
+  font-size: 14px;
+}
+
+.word-instance-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.word-instance-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-soft);
+}
+
+.word-instance-row.ready {
+  border-color: color-mix(in srgb, var(--green) 42%, var(--border));
+  background: color-mix(in srgb, var(--green-soft) 65%, var(--surface));
+}
+
+.word-instance-row.missing {
+  opacity: .72;
+}
+
+.word-instance-row.selected {
+  outline: 2px solid var(--active-border);
+  outline-offset: 1px;
+}
+
+.word-instance-row strong,
+.word-instance-row span,
+.word-instance-row small {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.word-instance-row small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.word-instance-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  justify-content: flex-end;
+}
+
+.word-empty {
+  min-height: 180px;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  gap: 8px;
+}
+
+@media (max-width: 1100px) {
+  .word-toolbar {
+    grid-template-columns: 1fr;
+  }
+  .word-books-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .word-book-card,
+  .word-instance-row {
+    grid-template-columns: 1fr;
+  }
+  .word-book-cover {
+    width: 100%;
+    min-height: 120px;
+  }
+  .word-instance-actions {
+    justify-content: stretch;
+  }
+  .word-instance-actions button {
+    flex: 1 1 130px;
+  }
+}
+
 .workspace.ocr-focus-mode {
   grid-template-columns: 210px minmax(0, 1fr);
 }
@@ -2160,6 +2350,13 @@ details.raw-block summary {
   color: var(--notice-text);
   font-size: 13px;
   line-height: 1.35;
+}
+
+.warning-notice {
+  border-color: color-mix(in srgb, var(--amber) 60%, var(--warning-border));
+  background: color-mix(in srgb, var(--amber-soft) 85%, transparent);
+  color: var(--notice-text);
+  font-weight: 700;
 }
 
 .library-header {

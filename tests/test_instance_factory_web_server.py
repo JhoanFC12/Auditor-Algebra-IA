@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import re
 import tempfile
 import time
 import unittest
@@ -248,6 +249,68 @@ def _read_http_error(exc: urllib.error.HTTPError) -> dict:
 
 
 class InstanceFactoryWebServerTests(unittest.TestCase):
+    def test_web_app_api_routes_are_declared_by_backend_contract(self) -> None:
+        app_js = Path("modulos/instance_factory/web/app.js").read_text(encoding="utf-8")
+        raw_routes = set(re.findall(r"['\"`](/api/[^'\"` ]+)", app_js))
+        route_examples: dict[str, list[str]] = {
+            "/api/library/books/": ["/api/library/books/1", "/api/library/books/1/instances"],
+            "/api/library/instances/": ["/api/library/instances/1/factory", "/api/library/instances/1/state"],
+            "/api/library/concepts/": [
+                "/api/library/concepts/1/problems",
+                "/api/library/concepts/1/problems/2/review",
+            ],
+            "/api/library/problems/": [
+                "/api/library/problems/1/concepts",
+                "/api/library/problems/1/similar",
+                "/api/library/problems/1/practice-draft",
+                "/api/library/problems/1/practice-drafts",
+                "/api/library/problems/1/similar/2/review",
+            ],
+        }
+        internal_prefixes = {"/api/library/"}
+        library_runtime_direct_routes = {"/api/library/cover/paste"}
+        missing: list[str] = []
+
+        def _route_candidates(route: str) -> list[str]:
+            if route in route_examples:
+                return route_examples[route]
+            route = route.split("?", 1)[0]
+            for query_placeholder in ("${query}", "${savedQuery}", "${separator}"):
+                route = route.split(query_placeholder, 1)[0]
+            route = re.sub(r"\$\{[^}]+\}", "1", route)
+            return [route]
+
+        for route in sorted(raw_routes):
+            if route in internal_prefixes or route in library_runtime_direct_routes:
+                continue
+            for candidate in _route_candidates(route):
+                if not FactoryWebRuntime._allowed_api_methods(candidate):
+                    missing.append(candidate)
+        self.assertEqual(missing, [])
+
+    def test_web_app_recovery_does_not_redirect_without_verified_stable_server(self) -> None:
+        app_js = Path("modulos/instance_factory/web/app.js").read_text(encoding="utf-8")
+        self.assertIn("Reconectando con la Biblioteca activa", app_js)
+        self.assertNotIn("Intentando volver a la Biblioteca activa", app_js)
+        self.assertNotRegex(app_js, r"catch \([^)]*\) \{[^{}]*window\.location\.replace\(STABLE_LIBRARY_URL\)")
+
+    def test_web_app_uses_strict_continuation_flags(self) -> None:
+        app_js = Path("modulos/instance_factory/web/app.js").read_text(encoding="utf-8")
+        self.assertIn("function continuationRecordIdsFromParents", app_js)
+        self.assertIn("normalized.continuaciones_fusionadas", app_js)
+        self.assertIn("truthyText(continuation.es_continuacion)", app_js)
+        self.assertIn("truthyText(continuation.fusionar_con_anterior)", app_js)
+        self.assertNotIn("Boolean(continuation.es_continuacion", app_js)
+        self.assertNotIn("Boolean(continuation.fusionar_con_anterior", app_js)
+        self.assertNotIn("continuation.es_continuacion ||", app_js)
+        self.assertNotIn("continuation.fusionar_con_anterior ||", app_js)
+
+    def test_web_app_final_latex_batch_persists_parent_continuations(self) -> None:
+        app_js = Path("modulos/instance_factory/web/app.js").read_text(encoding="utf-8")
+        self.assertIn("continuationRecordsForParent(record, state.snapshot?.records || [])", app_js)
+        self.assertIn("mergeFinalLatexContinuation(finalLatex, continuationText)", app_js)
+        self.assertIn("normalized.continuaciones_fusionadas = Array.from(byId.values())", app_js)
+
     def test_web_runtime_gzips_large_json_when_requested(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -506,6 +569,8 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                 self.assertEqual(failure.exception.code, 500)
                 self.assertEqual(payload["schema_version"], "pdf_factory_web_error_v1")
                 self.assertEqual(payload["code"], "internal_error")
+                self.assertRegex(payload.get("request_id", ""), r"^[a-f0-9]{12}$")
+                self.assertIn(payload["request_id"], payload["error"])
                 self.assertNotIn("traceback", payload)
                 self.assertNotIn("secret internal path", payload["error"])
             finally:
@@ -665,6 +730,9 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                 self.assertIn("getCachedPdfImage(pdfPageImageUrl(page, dpi))", app_js)
                 self.assertIn("prefetchPdfPages(state.pdfPage, pageCount, 150)", app_js)
                 self.assertIn("drawLoadedImageOnCanvas", app_js)
+                self.assertIn("const src = boxPageImageSrc(page)", app_js)
+                self.assertIn("canvas.dataset.recordId = recordId", app_js)
+                self.assertIn('String(state.selectedPageRecordId || "") !== recordId', app_js)
             finally:
                 runtime.stop()
 
@@ -1148,6 +1216,75 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
             finally:
                 runtime.stop()
 
+    def test_web_runtime_counts_segmentation_error_even_when_ocr_succeeds(self) -> None:
+        class _SegmentationFailsService(_FakeService):
+            def run_ocr_and_segmentation(
+                self,
+                *,
+                provider="hf",
+                curso="SIN_CURSO",
+                tema="SIN_TEMA",
+                start_n=1,
+                limit=None,
+                ocr_model="",
+                figure_model="",
+                force_figure_model=True,
+                record_id="",
+                record_ids=None,
+                progress_callback=None,
+                run_segmentation=True,
+                run_ocr=True,
+            ):
+                self.phase_calls.append((record_id, list(record_ids or []), bool(run_segmentation), bool(run_ocr)))
+                if run_segmentation:
+                    raise RuntimeError("segmentador local no disponible")
+                record = self.staging.get_record(record_id)
+                if record is not None and run_ocr:
+                    record.raw_ocr = "<01.> Halle x."
+                    record.set_step(PipelineStep.OCR, StageStatus.READY, "OCR crudo listo")
+                    record.sync_status_from_steps()
+                    self.staging.upsert_record(record)
+                return [record] if record is not None else []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            crop = root / "crop.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(crop),
+                    status=StageStatus.NEEDS_REVIEW,
+                )
+            )
+            service = _SegmentationFailsService(context, store)
+            runtime = FactoryWebRuntime(context, service=service, endpoint_manager=_FakeEndpointManager())
+            try:
+                base = runtime.start()
+                started = _post_json(base, "api/ocr/jobs/start", {"provider": "local", "record_ids": ["crop_001"]})
+                job_id = started["job_id"]
+
+                status = {}
+                for _ in range(60):
+                    status = _get_json(base, f"api/ocr/jobs/status?job_id={job_id}")
+                    if not status["running"]:
+                        break
+                    time.sleep(0.05)
+
+                self.assertEqual(status["status"], "error")
+                self.assertEqual(status["ok"], 1)
+                self.assertEqual(status["failed"], 1)
+                self.assertEqual(status["phase_errors"], 1)
+                self.assertEqual(status["ocr_errors"], 0)
+                self.assertEqual(status["errors"][0]["phase"], "segmentation")
+                self.assertIn("segmentador local no disponible", status["errors"][0]["message"])
+                self.assertEqual(store.get_record("crop_001").raw_ocr, "<01.> Halle x.")
+            finally:
+                runtime.stop()
+
     def test_web_runtime_keeps_ocr_endpoint_on_until_parallel_jobs_finish(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1354,6 +1491,133 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                 self.assertFalse(candidate["promotion_enabled"])
                 self.assertIsNone(candidate["sql"])
                 self.assertEqual(candidate["write_operations"], [])
+            finally:
+                runtime.stop()
+
+    def test_review_save_rejects_invalidated_downstream_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            crop = root / "crop.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(crop),
+                    raw_ocr="<01.> Halle x.",
+                    audit={"downstream_state": {"status": "invalidated", "reason": "page_boxes_changed"}},
+                )
+            )
+            runtime = FactoryWebRuntime(context, service=_FakeService(context, store))
+            try:
+                base = runtime.start()
+                body = json.dumps(
+                    {
+                        "record_id": "crop_001",
+                        "normalized": {
+                            "latex_rendered_item": r"\item[\textbf{1.}] [[curso=GEO]] [[tema=TEST]] Halle $x$.",
+                            "status": StageStatus.READY,
+                        },
+                        "mark_ready": True,
+                    }
+                ).encode("utf-8")
+                request = urllib.request.Request(
+                    base + "api/review/save",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    urllib.request.urlopen(request, timeout=5)
+
+                self.assertEqual(raised.exception.code, 400)
+                payload = json.loads(raised.exception.read().decode("utf-8"))
+                self.assertEqual(payload["code"], "bad_request")
+                self.assertIn("Regenera staging", payload["error"])
+                self.assertFalse(store.get_record("crop_001").normalized)
+            finally:
+                runtime.stop()
+
+    def test_normalize_rejects_invalidated_downstream_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            crop = root / "crop.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(crop),
+                    raw_ocr="<01.> Halle x.",
+                    audit={"downstream_state": {"status": "invalidated", "reason": "page_boxes_changed"}},
+                )
+            )
+            runtime = FactoryWebRuntime(context, service=InstancePdfPipelineService(context, staging_store=store))
+            try:
+                base = runtime.start()
+                request = urllib.request.Request(
+                    base + "api/normalize",
+                    data=json.dumps({"record_id": "crop_001", "compact": True}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    urllib.request.urlopen(request, timeout=5)
+
+                self.assertEqual(raised.exception.code, 400)
+                payload = json.loads(raised.exception.read().decode("utf-8"))
+                self.assertEqual(payload["code"], "bad_request")
+                self.assertIn("Regenera staging", payload["error"])
+            finally:
+                runtime.stop()
+
+    def test_ocr_edit_endpoints_reject_invalidated_downstream_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            crop = root / "crop.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(crop),
+                    raw_ocr="<01.> Halle x.",
+                    audit={"downstream_state": {"status": "invalidated", "reason": "page_boxes_changed"}},
+                )
+            )
+            runtime = FactoryWebRuntime(context, service=InstancePdfPipelineService(context, staging_store=store))
+            try:
+                base = runtime.start()
+                requests = [
+                    urllib.request.Request(
+                        base + "api/ocr/raw",
+                        data=json.dumps({"record_id": "crop_001", "raw_ocr": "corregido"}).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    ),
+                    urllib.request.Request(
+                        base + "api/ocr/segments/boxes",
+                        data=json.dumps({"record_id": "crop_001", "boxes": [[1, 2, 30, 40]]}).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    ),
+                ]
+
+                for request in requests:
+                    with self.assertRaises(urllib.error.HTTPError) as raised:
+                        urllib.request.urlopen(request, timeout=5)
+                    self.assertEqual(raised.exception.code, 400)
+                    payload = json.loads(raised.exception.read().decode("utf-8"))
+                    self.assertEqual(payload["code"], "bad_request")
+                    self.assertIn("Regenera staging", payload["error"])
             finally:
                 runtime.stop()
 

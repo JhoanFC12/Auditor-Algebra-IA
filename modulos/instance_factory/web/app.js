@@ -75,6 +75,18 @@ const state = {
       problemError: "",
       problemResult: null,
     },
+    word: {
+      loading: false,
+      error: "",
+      catalog: null,
+      query: "",
+      wordFilter: "all",
+      selectedKey: "",
+      convertingKey: "",
+      selectedKeys: new Set(),
+      batchRunning: false,
+      batchProgress: null,
+    },
   },
   stage: "pages",
   pdfPage: 1,
@@ -100,6 +112,7 @@ const state = {
   figureDrag: null,
   reviewDraft: null,
   batchMode: "",
+  batchReviewScope: "auto",
   batchText: "",
   batchResults: [],
   errorReportOpen: false,
@@ -245,17 +258,7 @@ async function recoverStableLibraryServer({ forceRedirect = false } = {}) {
     }, 150);
     return true;
   } catch (_) {
-    if (forceRedirect) {
-      try {
-        const current = new URL(window.location.href);
-        const stable = new URL(STABLE_LIBRARY_URL);
-        if (current.origin !== stable.origin) {
-          setStatus("Intentando volver a la Biblioteca activa...");
-          window.setTimeout(() => window.location.replace(STABLE_LIBRARY_URL), 150);
-          return true;
-        }
-      } catch (_) {}
-    }
+    void forceRedirect;
     return false;
   }
 }
@@ -456,7 +459,7 @@ function syncAppReloadButton() {
   btn.textContent = restartRequired ? "Reiniciar servidor" : "Actualizar app";
   btn.title = restartRequired
     ? "El codigo Python cambio. Cierra y vuelve a abrir Biblioteca/Fabrica."
-    : "Recarga la interfaz y avisa a las otras pestaÃ±as abiertas.";
+    : "Recarga la interfaz y avisa a las otras pestanas abiertas.";
 }
 
 async function requestAppReloadAcrossTabs() {
@@ -467,13 +470,13 @@ async function requestAppReloadAcrossTabs() {
   }
   state.appReloading = true;
   syncAppReloadButton();
-  setBusy("Actualizando app en todas las pestaÃ±as...");
+  setBusy("Actualizando app en todas las pestanas...");
   try {
     await api("/api/app/reload-signal", { method: "POST", body: {} });
   } catch (err) {
     state.appReloading = false;
     syncAppReloadButton();
-    setStatus(`No pude avisar a las otras pestaÃ±as: ${err.message}. Recargando esta pestaÃ±a.`);
+    setStatus(`No pude avisar a las otras pestanas: ${err.message}. Recargando esta pestana.`);
   }
   window.setTimeout(() => window.location.reload(), 300);
 }
@@ -965,8 +968,9 @@ function shouldPreferOcrOverReview(stage) {
   const summary = state.snapshot?.summary || {};
   const records = state.snapshot?.records || [];
   const recordsTotal = Number(summary.records_total || records.length || 0);
+  const problemsTotal = Number(summary.problems_total || summary.primary_records_total || recordsTotal || 0);
   const normalizedDone = Number(summary.normalized_done || 0);
-  if (!recordsTotal || normalizedDone >= recordsTotal) return false;
+  if (!problemsTotal || normalizedDone >= problemsTotal) return false;
   const ocrDone = Number(summary.ocr_done || 0);
   const ready = Number(summary.ready || 0);
   const errors = Number(summary.errors || 0);
@@ -1354,8 +1358,11 @@ async function loadLibrary(message = "", { bypassCache = false } = {}) {
       const dbPayload = await api("/api/library/databases");
       state.library.databases = dbPayload.databases || [];
       state.library.selectedDb = dbPayload.selected_db || state.library.databases[0] || "";
+      if (!state.library.selectedDb && dbPayload.message) {
+        state.library.error = dbPayload.message;
+      }
     }
-    if (!state.library.selectedDb) throw new Error("No hay base de datos disponible.");
+    if (!state.library.selectedDb) throw new Error(state.library.error || "No hay base de datos disponible.");
     const params = new URLSearchParams({ db_name: state.library.selectedDb });
     if (bypassCache) {
       params.set("no_cache", "1");
@@ -1529,6 +1536,9 @@ function renderLibraryFilters() {
         <button class="filter-chip ${state.library.screen === "roadmap" ? "active" : ""}" data-library-screen="roadmap" type="button">
           <span>Ruta</span><strong>MAP</strong>
         </button>
+        <button class="filter-chip ${state.library.screen === "word" ? "active" : ""}" data-library-screen="word" type="button">
+          <span>Word</span><strong>DOC</strong>
+        </button>
       </div>
       <div class="filter-stack" aria-label="Filtros por estado">
         ${[
@@ -1553,6 +1563,7 @@ function renderLibraryStage() {
   if (state.library.screen === "similarity") return renderLibrarySimilarityStage();
   if (state.library.screen === "concepts") return renderLibraryConceptsStage();
   if (state.library.screen === "roadmap") return renderLibraryRoadmapStage();
+  if (state.library.screen === "word") return renderLibraryWordStage();
   if (state.library.screen === "book") return renderLibraryBookStage();
   return renderLibraryBooksStage();
 }
@@ -1681,6 +1692,147 @@ function renderLibraryRoadmapStage() {
       </div>
       <code>${escapeHtml(PROJECT_ROADMAP_PATH)}</code>
     </section>
+  `;
+}
+
+function renderLibraryWordStage() {
+  const word = state.library.word || {};
+  const catalog = word.catalog || {};
+  const summary = catalog.summary || {};
+  const books = filteredWordBooks();
+  pruneWordSelection();
+  const visibleRows = visibleWordInstances();
+  const selectedRows = selectedWordInstances();
+  const pendingVisible = visibleRows.filter(({ instance }) => instance.session_exists && !instance.word_exists);
+  const queueDisabled = word.loading || word.batchRunning || !catalog.schema_version;
+  return `
+    <div class="stage-header library-header word-hero">
+      <div>
+        <span class="section-label">Modulo 7 web</span>
+        <h2>Sesiones LaTeX a Word</h2>
+        <p class="muted">Revisa sesiones exportables, confirma que instancias ya tienen Word y abre el documento desde la misma Biblioteca.</p>
+      </div>
+      <div class="stage-actions">
+        <button id="refreshWordSessionsBtn" class="secondary" type="button" ${word.loading ? "disabled" : ""}>Actualizar sesiones</button>
+      </div>
+    </div>
+    <section class="panel word-toolbar">
+      <label>
+        <span class="muted">Buscar libro o instancia</span>
+        <input id="wordSearchInput" value="${escapeAttr(word.query || "")}" placeholder="Semana, libro, curso" />
+      </label>
+      <label>
+        <span class="muted">Estado Word</span>
+        <select id="wordStatusFilter">
+          ${[
+            ["all", "Todos"],
+            ["ready", "Exportadas"],
+            ["pending", "Pendientes"],
+            ["missing", "Sin sesion"],
+          ].map(([value, label]) => `<option value="${value}" ${word.wordFilter === value ? "selected" : ""}>${label}</option>`).join("")}
+        </select>
+      </label>
+      <div class="word-summary-strip">
+        <div><span>Libros</span><strong>${Number(summary.books_total || 0)}</strong></div>
+        <div><span>Instancias</span><strong>${Number(summary.instances_total || 0)}</strong></div>
+        <div><span>Sesiones</span><strong>${Number(summary.sessions_found || 0)}</strong></div>
+        <div><span>Word listo</span><strong>${Number(summary.word_ready || 0)}</strong></div>
+      </div>
+    </section>
+    <section class="panel word-queue-bar">
+      <div>
+        <strong>Cola Word</strong>
+        <p class="muted">${selectedRows.length} seleccionada(s), ${pendingVisible.length} pendiente(s) visibles.</p>
+      </div>
+      <div class="word-queue-actions">
+        <button id="selectVisibleWordBtn" type="button" ${queueDisabled || !visibleRows.length ? "disabled" : ""}>Seleccionar visibles</button>
+        <button id="clearWordSelectionBtn" type="button" ${queueDisabled || !selectedRows.length ? "disabled" : ""}>Limpiar</button>
+        <button id="convertSelectedWordBtn" class="primary" type="button" ${queueDisabled || !selectedRows.length ? "disabled" : ""}>Convertir seleccionadas</button>
+        <button id="convertPendingWordBtn" type="button" ${queueDisabled || !pendingVisible.length ? "disabled" : ""}>Convertir pendientes</button>
+      </div>
+      ${word.batchProgress ? `
+        <div class="word-batch-progress" role="status">
+          <span>${escapeHtml(word.batchProgress.label || "Convirtiendo")}</span>
+          <strong>${Number(word.batchProgress.current || 0)} / ${Number(word.batchProgress.total || 0)}</strong>
+        </div>
+      ` : ""}
+    </section>
+    ${word.error ? `<div class="library-notice error-notice">${escapeHtml(word.error)}</div>` : ""}
+    ${word.loading ? `<section class="panel muted">Cargando biblioteca de sesiones...</section>` : ""}
+    ${!catalog.schema_version && !word.loading ? `
+      <section class="panel word-empty">
+        <h3>Catalogo Word no cargado</h3>
+        <p class="muted">Usa Actualizar sesiones para leer Biblioteca y detectar documentos .docx ya exportados.</p>
+        <button id="loadWordSessionsBtn" class="primary" type="button">Cargar sesiones</button>
+      </section>
+    ` : ""}
+    ${catalog.schema_version && !books.length ? `
+      <section class="panel word-empty">
+        <h3>No hay sesiones que coincidan</h3>
+        <p class="muted">Ajusta la busqueda o el filtro de estado Word.</p>
+      </section>
+    ` : ""}
+    ${books.length ? `
+      <section class="word-books-grid" aria-label="Sesiones exportables a Word">
+        ${books.map(renderWordBookCard).join("")}
+      </section>
+    ` : ""}
+  `;
+}
+
+function renderWordBookCard(book) {
+  const instances = filteredWordInstances(book);
+  const counts = book.counts || {};
+  return `
+    <article class="word-book-card">
+      <div class="word-book-cover ${book.cover_url ? "has-cover" : ""}">
+        ${book.cover_url ? `<img src="${escapeAttr(book.cover_url)}" alt="" loading="lazy" decoding="async" />` : `<span>${escapeHtml(bookCoverLabel(book))}</span>`}
+      </div>
+      <div class="word-book-main">
+        <div class="word-book-heading">
+          <div>
+            <span class="section-label">${escapeHtml(book.code || "Libro")}</span>
+            <h3>${escapeHtml(book.title || "Sin titulo")}</h3>
+            <p class="muted">${escapeHtml([book.author, book.editorial, book.course].filter(Boolean).join(" | "))}</p>
+          </div>
+          <div class="word-book-counts">
+            <span>${Number(counts.instances || instances.length)} inst.</span>
+            <strong>${Number(counts.word_ready || 0)} Word</strong>
+          </div>
+        </div>
+        <div class="word-instance-list">
+          ${instances.map((row) => renderWordInstanceRow(book, row)).join("")}
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function renderWordInstanceRow(book, row) {
+  const key = String(row.instance_key || "");
+  const ready = Boolean(row.word_exists);
+  const missing = !row.session_exists;
+  const converting = state.library.word?.convertingKey === key;
+  const selected = state.library.word?.selectedKey === key;
+  const queued = wordSelectionKeys().has(key);
+  const status = missing ? "Sin sesion" : (ready ? "Word exportado" : "Pendiente");
+  return `
+    <div class="word-instance-row ${ready ? "ready" : ""} ${missing ? "missing" : ""} ${selected ? "selected" : ""} ${queued ? "queued" : ""}" data-word-row="${escapeAttr(key)}" title="Doble click abre el Word si ya existe">
+      <label class="word-row-check" title="Agregar a cola">
+        <input type="checkbox" data-word-select="${escapeAttr(key)}" ${queued ? "checked" : ""} ${missing || state.library.word?.batchRunning ? "disabled" : ""} />
+      </label>
+      <div>
+        <strong>${escapeHtml(row.title || "Instancia")}</strong>
+        <span class="muted">${escapeHtml(status)}</span>
+        <small>${escapeHtml(compactText(row.session_path || "", 100))}</small>
+      </div>
+      <div class="word-instance-actions">
+        <button type="button" data-convert-word="${escapeAttr(key)}" ${missing || converting ? "disabled" : ""}>
+          ${converting ? "Convirtiendo..." : (ready ? "Reconvertir" : "Convertir")}
+        </button>
+        <button type="button" data-open-word="${escapeAttr(key)}" ${ready ? "" : "disabled"}>Abrir Word</button>
+      </div>
+    </div>
   `;
 }
 
@@ -2564,6 +2716,9 @@ function renderLibraryInspector() {
   const similarityResult = similarity.result && typeof similarity.result === "object" ? similarity.result : null;
   const conceptState = state.library.concepts || {};
   const conceptResult = conceptState.result && typeof conceptState.result === "object" ? conceptState.result : null;
+  const wordState = state.library.word || {};
+  const wordSummary = wordState.catalog?.summary || {};
+  const selectedWord = findWordInstance(wordState.selectedKey);
   return `
     <div class="panel">
       <h2>Estados</h2>
@@ -2593,6 +2748,18 @@ function renderLibraryInspector() {
           <div class="inspector-line"><strong>Busqueda</strong><span>${escapeHtml(conceptState.query || "Sin filtro")}</span></div>
           <div class="inspector-line"><strong>Curso</strong><span>${escapeHtml(conceptState.course || "Todos")}</span></div>
           <div class="inspector-line"><strong>Estado</strong><span>${escapeHtml(conceptState.status || "Todos")}</span></div>
+        </div>
+      </div>
+    ` : state.library.screen === "word" ? `
+      <div class="panel">
+        <h2>Word</h2>
+        <div id="inspector" class="inspector-body">
+          <div class="inspector-line"><strong>Base</strong><span>${escapeHtml(state.library.selectedDb || "-")}</span></div>
+          <div class="inspector-line"><strong>Instancias</strong><span>${Number(wordSummary.instances_total || 0)}</span></div>
+          <div class="inspector-line"><strong>Exportadas</strong><span>${Number(wordSummary.word_ready || 0)}</span></div>
+          <div class="inspector-line"><strong>Pendientes</strong><span>${Number(wordSummary.word_pending || 0)}</span></div>
+          <div class="inspector-line"><strong>Seleccion</strong><span>${escapeHtml(selectedWord?.instance?.title || "Sin seleccion")}</span></div>
+          <div class="inspector-line"><strong>Documento</strong><span>${escapeHtml(selectedWord?.instance?.word_path || "-")}</span></div>
         </div>
       </div>
     ` : state.library.screen === "roadmap" ? `
@@ -2647,6 +2814,7 @@ function bindLibrarySidebarEvents() {
       state.library.screen = "books";
       state.library.semanticStatus = { loading: false, error: "", result: null };
       state.library.concepts = { ...state.library.concepts, loading: false, error: "", result: null };
+      state.library.word = { ...state.library.word, catalog: null, error: "", selectedKey: "", convertingKey: "" };
       loadLibrary("Base de datos cambiada.").catch((err) => setStatus(`Error de biblioteca: ${err.message}`));
     };
   }
@@ -2660,7 +2828,7 @@ function bindLibrarySidebarEvents() {
     btn.onclick = () => {
       cancelLibrarySearchRender();
       const screen = String(btn.dataset.libraryScreen || "books");
-      state.library.screen = ["similarity", "concepts", "roadmap"].includes(screen) ? screen : "books";
+      state.library.screen = ["similarity", "concepts", "roadmap", "word"].includes(screen) ? screen : "books";
       state.library.showBookForm = false;
       state.library.showInstanceForm = false;
       state.library.editingBookId = "";
@@ -2676,6 +2844,9 @@ function bindLibrarySidebarEvents() {
         if (!state.library.concepts.result) {
           loadConceptCatalog({ silent: true }).catch((err) => setStatus(`Error de conceptos: ${err.message}`));
         }
+      }
+      if (state.library.screen === "word" && !state.library.word.catalog) {
+        loadWordSessions({ silent: true }).catch((err) => setStatus(`Error Word: ${err.message}`));
       }
     };
   });
@@ -2721,6 +2892,7 @@ function bindLibraryContentEvents() {
   bindSimilarityEvents();
   bindConceptEvents();
   bindRoadmapEvents();
+  bindWordEvents();
   if ($("loadMoreBooks")) $("loadMoreBooks").onclick = () => {
     state.library.visibleBooksLimit = Math.max(state.library.visibleBooksLimit || 0, LIBRARY_BOOKS_INITIAL_LIMIT) + LIBRARY_BOOKS_LIMIT_STEP;
     renderLibraryContent();
@@ -2816,6 +2988,84 @@ function bindLibraryContentEvents() {
     state.library.editingInstanceId = "";
     renderLibraryContent();
   };
+}
+
+function bindWordEvents() {
+  const wordSearch = $("wordSearchInput");
+  if (wordSearch) {
+    wordSearch.oninput = (event) => {
+      state.library.word.query = event.target.value;
+      renderLibraryContent();
+      const next = $("wordSearchInput");
+      if (next) {
+        next.focus();
+        try { next.setSelectionRange(next.value.length, next.value.length); } catch (_) {}
+      }
+    };
+  }
+  const statusFilter = $("wordStatusFilter");
+  if (statusFilter) {
+    statusFilter.onchange = (event) => {
+      state.library.word.wordFilter = event.target.value || "all";
+      renderLibraryContent();
+    };
+  }
+  const refreshBtn = $("refreshWordSessionsBtn") || $("loadWordSessionsBtn");
+  if (refreshBtn) {
+    refreshBtn.onclick = () => loadWordSessions().catch((err) => setStatus(`Error Word: ${err.message}`));
+  }
+  const selectVisibleBtn = $("selectVisibleWordBtn");
+  if (selectVisibleBtn) {
+    selectVisibleBtn.onclick = () => {
+      const selected = wordSelectionKeys();
+      visibleWordInstances().forEach(({ instance }) => {
+        if (instance.session_exists) selected.add(String(instance.instance_key || ""));
+      });
+      renderLibraryContent();
+    };
+  }
+  const clearSelectionBtn = $("clearWordSelectionBtn");
+  if (clearSelectionBtn) {
+    clearSelectionBtn.onclick = () => {
+      wordSelectionKeys().clear();
+      renderLibraryContent();
+    };
+  }
+  const convertSelectedBtn = $("convertSelectedWordBtn");
+  if (convertSelectedBtn) {
+    convertSelectedBtn.onclick = () => convertWordBatch(selectedWordInstances(), "seleccionadas").catch((err) => setStatus(`Error Word: ${err.message}`));
+  }
+  const convertPendingBtn = $("convertPendingWordBtn");
+  if (convertPendingBtn) {
+    convertPendingBtn.onclick = () => {
+      const pending = visibleWordInstances().filter(({ instance }) => instance.session_exists && !instance.word_exists);
+      return convertWordBatch(pending, "pendientes").catch((err) => setStatus(`Error Word: ${err.message}`));
+    };
+  }
+  document.querySelectorAll("[data-word-select]").forEach((input) => {
+    input.onclick = (event) => event.stopPropagation();
+    input.onchange = () => {
+      const key = String(input.dataset.wordSelect || "");
+      if (!key) return;
+      const selected = wordSelectionKeys();
+      if (input.checked) selected.add(key);
+      else selected.delete(key);
+      renderLibraryContent();
+    };
+  });
+  document.querySelectorAll("[data-convert-word]").forEach((btn) => {
+    btn.onclick = () => convertWordSession(btn.dataset.convertWord).catch((err) => setStatus(`Error Word: ${err.message}`));
+  });
+  document.querySelectorAll("[data-open-word]").forEach((btn) => {
+    btn.onclick = () => openWordSession(btn.dataset.openWord);
+  });
+  document.querySelectorAll("[data-word-row]").forEach((row) => {
+    row.onclick = () => {
+      state.library.word.selectedKey = String(row.dataset.wordRow || "");
+      renderLibraryContent();
+    };
+    row.ondblclick = () => openWordSession(row.dataset.wordRow);
+  });
 }
 
 function bindSimilarityEvents() {
@@ -3526,6 +3776,12 @@ function syncLibraryBottomAction() {
     };
     return;
   }
+  if (state.library.screen === "word") {
+    $("actionHint").textContent = "Revisa sesiones exportables y documentos Word ya generados.";
+    $("primaryAction").textContent = "Actualizar sesiones";
+    $("primaryAction").onclick = () => loadWordSessions().catch((err) => setStatus(`Error Word: ${err.message}`));
+    return;
+  }
   $("actionHint").textContent = state.library.screen === "book"
     ? "Selecciona una instancia para abrir su flujo PDF revisable."
     : "Selecciona un libro para ver sus instancias.";
@@ -3980,7 +4236,7 @@ function renderMetrics() {
   const fields = [
     ["pages_total", "Paginas"],
     ["boxes_total", "Boxes"],
-    ["records_total", "Problemas"],
+    ["problems_total", "Problemas"],
     ["ocr_done", "OCR"],
     ["segments_done", "Segmentos"],
     ["normalized_done", "Borradores"],
@@ -3988,7 +4244,9 @@ function renderMetrics() {
     ["errors", "Errores"],
   ];
   $("metrics").innerHTML = fields.map(([key, label]) => {
-    const value = Number(s[key] || 0);
+    const value = key === "problems_total"
+      ? Number(s.problems_total || s.primary_records_total || s.records_total || 0)
+      : Number(s[key] || 0);
     const classes = `metric ${key === "errors" && value ? "metric-warning" : ""} ${key === "errors" ? "metric-button" : ""}`;
     if (key === "errors") {
       return `
@@ -4831,17 +5089,40 @@ function syncSelectedRecord() {
   }
 }
 
-function isReviewContinuationRecord(record) {
+function continuationRecordIdsFromParents(allRecords = state.snapshot?.records || []) {
+  const ids = new Set();
+  (allRecords || []).forEach((row) => {
+    const normalized = row?.normalized && typeof row.normalized === "object" ? row.normalized : {};
+    const fused = Array.isArray(normalized.continuaciones_fusionadas) ? normalized.continuaciones_fusionadas : [];
+    fused.forEach((item) => {
+      if (!item || typeof item !== "object") return;
+      ["record_id", "crop_id"].forEach((key) => {
+        const value = String(item[key] || "").trim();
+        if (value) ids.add(value);
+      });
+    });
+  });
+  return ids;
+}
+
+function isReviewContinuationRecord(record, allRecords = state.snapshot?.records || [], continuationIds = null) {
   if (!record) return false;
+  const ids = continuationIds || continuationRecordIdsFromParents(allRecords);
+  if (ids.has(String(record.record_id || "").trim()) || ids.has(String(record.crop_id || "").trim())) return true;
   const normalized = record.normalized && typeof record.normalized === "object" ? record.normalized : {};
   const continuation = normalized.continuacion && typeof normalized.continuacion === "object"
     ? normalized.continuacion
     : {};
-  return Boolean(continuation.es_continuacion || continuation.fusionar_con_anterior || isFinalLatexContinuation(record.raw_ocr));
+  return Boolean(
+    truthyText(continuation.es_continuacion)
+    || truthyText(continuation.fusionar_con_anterior)
+    || isFinalLatexContinuation(record.raw_ocr)
+  );
 }
 
 function reviewRecords(allRecords = state.snapshot?.records || []) {
-  return (allRecords || []).filter((record) => !isReviewContinuationRecord(record));
+  const continuationIds = continuationRecordIdsFromParents(allRecords);
+  return (allRecords || []).filter((record) => !isReviewContinuationRecord(record, allRecords, continuationIds));
 }
 
 function reviewBatchSelectionIds() {
@@ -4879,12 +5160,19 @@ function batchRecordsForMode(mode = state.batchMode) {
   const allRecords = state.snapshot?.records || [];
   if (!batchModeUsesReviewSelection(mode)) return allRecords;
   const visibleRecords = reviewRecords(allRecords);
+  if (state.batchReviewScope === "all") return visibleRecords;
   const selected = selectedReviewBatchRecords(visibleRecords);
+  if (state.batchReviewScope === "selection") return selected.length ? selected : visibleRecords;
   return selected.length ? selected : visibleRecords;
 }
 
 function batchRecordsSelectionLabel(mode = state.batchMode) {
   if (!batchModeUsesReviewSelection(mode)) return "todos los crops de staging";
+  if (state.batchReviewScope === "all") return "todos los problemas principales";
+  if (state.batchReviewScope === "selection") {
+    const selectedCount = selectedReviewBatchRecords().length;
+    return selectedCount ? `${selectedCount} problema(s) seleccionado(s)` : "todos los problemas principales";
+  }
   const selectedCount = selectedReviewBatchRecords().length;
   return selectedCount ? `${selectedCount} problema(s) seleccionado(s)` : "todos los problemas principales";
 }
@@ -6661,8 +6949,9 @@ function batchModeConfig(mode = state.batchMode) {
   };
 }
 
-function openBatchMode(mode) {
+function openBatchMode(mode, options = {}) {
   state.batchMode = mode;
+  state.batchReviewScope = String(options.reviewScope || "auto");
   state.batchText = buildBatchText(mode);
   state.batchResults = [];
   state.taskProgress = null;
@@ -6672,6 +6961,7 @@ function openBatchMode(mode) {
 
 function closeBatchMode({ rerender = true } = {}) {
   state.batchMode = "";
+  state.batchReviewScope = "auto";
   state.batchText = "";
   state.batchResults = [];
   state.taskProgress = null;
@@ -6695,6 +6985,7 @@ function renderBatchEditor() {
       </div>
     </div>
     ${renderTaskProgress("batch")}
+    ${renderBatchScopeNotice(config.mode, records)}
     <section class="panel batch-editor-panel">
       <div class="panel-heading-row">
         <div>
@@ -6720,6 +7011,24 @@ function renderBatchEditor() {
   });
   syncWorkspaceMode();
   syncPrimaryAction();
+}
+
+function renderBatchScopeNotice(mode, records) {
+  if (!batchModeUsesReviewSelection(mode)) return "";
+  const total = reviewRecords(state.snapshot?.records || []).length;
+  const count = records.length;
+  if (state.batchReviewScope === "selection" && count < total) {
+    return `
+      <div class="library-notice warning-notice">
+        Lote parcial: estas trabajando ${count} de ${total} problema(s). Usa el boton superior de Revision si necesitas exportar todos.
+      </div>
+    `;
+  }
+  return `
+    <div class="library-notice">
+      Lote completo: ${count} de ${total} problema(s) principales.
+    </div>
+  `;
 }
 
 function bindBatchEditorActions(mode) {
@@ -6773,6 +7082,7 @@ function normalizerInputJsonFromRecord(record, index = 0) {
 function normalizerInputFromRecord(record, index = 0) {
   const source = record?.source && typeof record.source === "object" ? record.source : {};
   const normalized = record?.normalized && typeof record.normalized === "object" ? record.normalized : {};
+  const inferredNumber = inferredProblemNumberForFinalLatex(record, normalized, record?.raw_ocr || "");
   const figure = normalizerFigureSegmentationFromRecord(record, normalized);
   const continuations = normalizerContinuationInputsFromRecord(record);
   const hasFigure = Boolean(figure.has_figure || continuations.some((item) => item.figure_segmentation?.has_figure));
@@ -6791,14 +7101,14 @@ function normalizerInputFromRecord(record, index = 0) {
       book_code: String(source.book_code || state.snapshot?.context?.book_code || ""),
       instance_type: String(source.instance_type || state.snapshot?.context?.instance_type || ""),
       page_number: source.page_number ?? source.source_page_number ?? null,
-      problem_number: source.problem_number ?? source.n ?? normalized.numero ?? "",
+      problem_number: inferredNumber,
       box_index: source.box_index ?? source.page_problem_index ?? source.problem_index ?? null,
       bbox_px: Array.isArray(source.bbox_px) ? source.bbox_px : [],
     },
     hints: {
       output_schema: "formato_final_latex",
       output_is_json: false,
-      suggested_number: String(normalized.numero || source.problem_number || source.n || ""),
+      suggested_number: String(inferredNumber || ""),
       suggested_course: String(normalized.curso || "SIN_CURSO"),
       suggested_topic: String(normalized.tema || "SIN_TEMA"),
       continuation: Boolean(isReviewContinuationRecord(record) || isFinalLatexContinuation(record?.raw_ocr)),
@@ -6896,6 +7206,7 @@ function normalizerFigureSegmentationFromRecord(record, normalized = {}) {
 function normalizerTrainingInputFromRecord(record, index = 0) {
   const source = record?.source && typeof record.source === "object" ? record.source : {};
   const normalized = record?.normalized && typeof record.normalized === "object" ? record.normalized : {};
+  const inferredNumber = inferredProblemNumberForFinalLatex(record, normalized, record?.raw_ocr || "");
   const figure = normalizerFigureSegmentationFromRecord(record, normalized);
   const continuations = normalizerContinuationInputsFromRecord(record);
   const hasFigure = Boolean(figure.has_figure || continuations.some((item) => item.figure_segmentation?.has_figure));
@@ -6909,7 +7220,7 @@ function normalizerTrainingInputFromRecord(record, index = 0) {
       book_code: String(source.book_code || state.snapshot?.context?.book_code || ""),
       instance_type: String(source.instance_type || state.snapshot?.context?.instance_type || ""),
       page_number: source.page_number ?? source.source_page_number ?? null,
-      problem_number: source.problem_number ?? source.n ?? normalized.numero ?? "",
+      problem_number: inferredNumber,
       box_index: source.box_index ?? source.page_problem_index ?? source.problem_index ?? null,
       crop_name: cropName,
     },
@@ -6940,14 +7251,14 @@ function normalizerTrainingInputFromRecord(record, index = 0) {
 
 function finalLatexFromRecord(record) {
   const normalized = normalizedForBatchRecord(record);
-  const rendered = String(normalized.latex_rendered_item || "").trim();
-  if (rendered) return rendered;
-  const number = String(normalized.numero || "").trim();
+  const rendered = repairFinalLatexForRecord(normalized.latex_rendered_item || "", record, normalized);
+  if (rendered) return appendMissingContinuationText(rendered, record);
+  const number = inferredProblemNumberForFinalLatex(record, normalized, normalized.enunciado_latex || record?.raw_ocr || "");
   const curso = String(normalized.curso || "SIN_CURSO").trim() || "SIN_CURSO";
   const tema = String(normalized.tema || "SIN_TEMA").trim() || "SIN_TEMA";
   const estado = String(normalized.estado || "sin_revisar").trim() || "sin_revisar";
   const clave = String(normalized.respuesta_correcta || "").trim();
-  const statement = String(normalized.enunciado_latex || "").trim();
+  const statement = appendMissingContinuationText(String(normalized.enunciado_latex || "").trim(), record);
   const image = normalized.tiene_grafico
     ? ` [[Imagen=${String(normalized.figure_tag || `img-${number || record.record_id}`).trim()}]]`
     : "";
@@ -6958,11 +7269,40 @@ function finalLatexFromRecord(record) {
 
 function finalReviewTextFromRecord(record) {
   const normalized = normalizedForBatchRecord(record);
-  const rendered = String(normalized.latex_rendered_item || "").trim();
-  if (rendered) return rendered;
+  const rendered = repairFinalLatexForRecord(normalized.latex_rendered_item || "", record, normalized);
+  if (rendered) return appendMissingContinuationText(rendered, record);
   const continuation = continuationTextFromRecord(record);
   if (continuation) return continuation;
   return finalLatexFromRecord(record);
+}
+
+function appendMissingContinuationText(value, record) {
+  let text = String(value || "").trim();
+  if (!record || isReviewContinuationRecord(record)) return text;
+  const continuations = continuationRecordsForParent(record, state.snapshot?.records || []);
+  for (const row of continuations) {
+    const body = stripFinalContinuationMarker(recordTextForNormalizer(row));
+    if (!body || finalTextContainsContinuation(text, body)) continue;
+    text = mergeFinalLatexContinuation(text, body);
+  }
+  return text;
+}
+
+function finalTextContainsContinuation(text, continuation) {
+  const normalize = (value) => String(value || "")
+    .toLowerCase()
+    .replace(/\\+/g, "\\")
+    .replace(/\s+/g, " ")
+    .trim();
+  const base = normalize(text);
+  const body = normalize(stripFinalContinuationMarker(continuation));
+  if (!body) return true;
+  if (base.includes(body)) return true;
+  const compactBase = base.replace(/[^\p{L}\p{N}]+/gu, "");
+  const compactBody = body.replace(/[^\p{L}\p{N}]+/gu, "");
+  if (compactBody && compactBase.includes(compactBody)) return true;
+  const bodyHead = compactBody.slice(0, 24);
+  return Boolean(bodyHead.length >= 12 && compactBase.includes(bodyHead));
 }
 
 function normalizedForBatchRecord(record) {
@@ -6970,7 +7310,7 @@ function normalizedForBatchRecord(record) {
   const firstItem = selectedOcrPayload(record, 0);
   if (hasObjectData(firstItem)) return normalizedFromOcr(record, firstItem);
   const source = record?.source || {};
-  const number = String(source.problem_number || source.n || "").trim();
+  const number = firstNumericProblemNumber([record?.raw_ocr, source.problem_number, source.n]);
   return {
     numero: number,
     curso: "",
@@ -7073,10 +7413,39 @@ function normalizeBatchTitle(value) {
     .toLowerCase();
 }
 
+function batchTitleMatchKeys(value) {
+  const normalized = normalizeBatchTitle(value);
+  const keys = new Set();
+  if (!normalized) return keys;
+  keys.add(normalized);
+  const basename = normalized.split(/[\\/]/).filter(Boolean).pop() || normalized;
+  if (basename) keys.add(basename);
+  const stem = basename.replace(/\.(png|jpg|jpeg|webp|json|txt)$/i, "");
+  if (stem) keys.add(stem);
+  const hexMatches = stem.match(/[a-f0-9]{8,24}/gi) || [];
+  const finalHex = hexMatches[hexMatches.length - 1];
+  if (finalHex) keys.add(finalHex.toLowerCase());
+  const doubleUnderscoreTail = stem.match(/__+([a-z0-9_-]+)$/i);
+  if (doubleUnderscoreTail?.[1]) {
+    keys.add(doubleUnderscoreTail[1].toLowerCase());
+  }
+  return keys;
+}
+
+function batchTitlesMatch(left, right) {
+  const leftKeys = batchTitleMatchKeys(left);
+  const rightKeys = batchTitleMatchKeys(right);
+  if (!leftKeys.size || !rightKeys.size) return false;
+  for (const key of leftKeys) {
+    if (rightKeys.has(key)) return true;
+  }
+  return false;
+}
+
 function takeBatchBlockForRecord(blocks, usedBlocks, record, recordIndex, allowSequentialFallback = true) {
-  const titleKey = normalizeBatchTitle(batchRecordTitle(record, recordIndex));
+  const expectedTitle = batchRecordTitle(record, recordIndex);
   const directIndex = (blocks || []).findIndex((block, blockIndex) => (
-    !usedBlocks.has(blockIndex) && normalizeBatchTitle(block.title) === titleKey
+    !usedBlocks.has(blockIndex) && batchTitlesMatch(block.title, expectedTitle)
   ));
   if (directIndex >= 0) {
     usedBlocks.add(directIndex);
@@ -7225,16 +7594,23 @@ function recomputeFactorySummaryLocally() {
   const recordSummary = records.reduce((acc, record) => {
     const status = normalizeStatus(record.status_label || record.status || "");
     const reviewStatus = normalizeStatus(record.review?.review_status || "");
+    const isContinuation = isReviewContinuationRecord(record);
+    if (!isContinuation) {
+      acc.problems_total += 1;
+      acc.primary_records_total += 1;
+    }
     if (record.crop_url || (record.crop_path && !recordSourceStale(record))) acc.crops_found += 1;
     if (hasText(record.raw_ocr)) acc.ocr_done += 1;
     if (hasObjectData(record.figure_segmentation)) acc.segments_done += 1;
-    if (hasObjectData(record.normalized)) acc.normalized_done += 1;
-    if (status === "listo" || reviewStatus === "listo") acc.ready += 1;
-    else if (status === "requiere_revision" || reviewStatus === "requiere_revision") acc.needs_review += 1;
+    if (!isContinuation && hasObjectData(record.normalized)) acc.normalized_done += 1;
+    if (!isContinuation && (status === "listo" || reviewStatus === "listo")) acc.ready += 1;
+    else if (!isContinuation && (status === "requiere_revision" || reviewStatus === "requiere_revision")) acc.needs_review += 1;
     if (status === "error" || (record.errors || []).some((item) => String(item || "").trim())) acc.errors += 1;
     return acc;
   }, {
     records_total: records.length,
+    problems_total: 0,
+    primary_records_total: 0,
     crops_found: 0,
     ocr_done: 0,
     segments_done: 0,
@@ -7263,6 +7639,7 @@ function buildLocalTimeline(summary = state.snapshot?.summary || {}) {
   const reviewedPages = Number(summary.pages_reviewed || 0);
   const boxes = Number(summary.boxes_total || 0);
   const records = Number(summary.records_total || 0);
+  const problems = Number(summary.problems_total || summary.primary_records_total || records || 0);
   const crops = Number(summary.crops_found || 0);
   const ocr = Number(summary.ocr_done || 0);
   const segments = Number(summary.segments_done || 0);
@@ -7297,13 +7674,13 @@ function buildLocalTimeline(summary = state.snapshot?.summary || {}) {
     },
     {
       stage: "review",
-      status: errors ? "error" : statusFromCounts(normalized, records),
-      detail: `${normalized}/${records} borrador(es) de revision`,
+      status: errors ? "error" : statusFromCounts(normalized, problems),
+      detail: `${normalized}/${problems} borrador(es) de revision`,
     },
     {
       stage: "candidate",
       status: ready ? "procesando" : "pendiente",
-      detail: `${ready}/${records} listo(s) para BD final`,
+      detail: `${ready}/${problems} listo(s) para BD final`,
     },
   ];
 }
@@ -7598,33 +7975,52 @@ async function saveBatchNormalizationRecord(record, text) {
 }
 
 async function saveBatchFinalLatexRecord(record, text, options = {}) {
-  const finalLatex = String(text || "").trim();
-  if (!finalLatex) throw new Error("Formato final vacio.");
-  const parsed = parseFinalLatexItem(finalLatex, normalizedForBatchRecord(record), record);
+  const inputFinalLatex = String(text || "").trim();
+  if (!inputFinalLatex) throw new Error("Formato final vacio.");
+  const parsed = parseFinalLatexItem(inputFinalLatex, normalizedForBatchRecord(record), record);
+  const continuationRecords = options.continuationRecord
+    ? [options.continuationRecord]
+    : continuationRecordsForParent(record, state.snapshot?.records || []);
+  let finalLatex = parsed.finalLatex || parsed.normalized.latex_rendered_item || inputFinalLatex;
+  if (!options.continuationRecord) {
+    continuationRecords.forEach((continuationRecord) => {
+      const continuationText = stripFinalContinuationMarker(recordTextForNormalizer(continuationRecord));
+      if (continuationText && !finalTextContainsContinuation(finalLatex, continuationText)) {
+        finalLatex = mergeFinalLatexContinuation(finalLatex, continuationText);
+      }
+    });
+  }
   const normalized = {
     ...parsed.normalized,
     latex_rendered_item: finalLatex,
     status: "listo",
   };
-  if (options.continuationRecord) {
-    const continuationRecord = options.continuationRecord;
-    const source = continuationRecord?.source && typeof continuationRecord.source === "object"
-      ? continuationRecord.source
-      : {};
-    const previous = Array.isArray(normalized.continuaciones_fusionadas)
-      ? normalized.continuaciones_fusionadas.filter((item) => String(item?.record_id || "") !== String(continuationRecord?.record_id || ""))
-      : [];
-    normalized.continuaciones_fusionadas = [
-      ...previous,
-      {
+  if (continuationRecords.length) {
+    const previous = Array.isArray(normalized.continuaciones_fusionadas) ? normalized.continuaciones_fusionadas : [];
+    const byId = new Map();
+    previous.forEach((item) => {
+      const key = String(item?.record_id || item?.crop_id || "").trim();
+      if (key) byId.set(key, { ...item });
+    });
+    continuationRecords.forEach((continuationRecord, index) => {
+      const rowSource = continuationRecord?.source && typeof continuationRecord.source === "object"
+        ? continuationRecord.source
+        : {};
+      const continuationText = options.continuationRecord && index === 0
+        ? String(options.continuationText || "").trim()
+        : stripFinalContinuationMarker(recordTextForNormalizer(continuationRecord));
+      const key = String(continuationRecord?.record_id || continuationRecord?.crop_id || "").trim();
+      if (!key) return;
+      byId.set(key, {
         record_id: String(continuationRecord?.record_id || ""),
         crop_id: String(continuationRecord?.crop_id || ""),
-        crop_name: batchRecordTitle(continuationRecord, previous.length),
-        page_number: source.page_number ?? null,
-        bbox_px: Array.isArray(source.bbox_px) ? source.bbox_px : null,
-        texto_fusionado: String(options.continuationText || "").trim(),
-      },
-    ];
+        crop_name: batchRecordTitle(continuationRecord, index),
+        page_number: rowSource.page_number ?? null,
+        bbox_px: Array.isArray(rowSource.bbox_px) ? rowSource.bbox_px : null,
+        texto_fusionado: continuationText,
+      });
+    });
+    normalized.continuaciones_fusionadas = Array.from(byId.values());
   }
   const payload = await api("/api/review/save", {
     method: "POST",
@@ -7684,7 +8080,7 @@ function continuationTextFromRecord(record) {
   ].map((value) => String(value || "").trim()).filter(Boolean);
   const explicit = candidates.find((value) => isFinalLatexContinuation(value));
   if (explicit) return explicit;
-  if (continuation.es_continuacion || continuation.fusionar_con_anterior) {
+  if (truthyText(continuation.es_continuacion) || truthyText(continuation.fusionar_con_anterior)) {
     return `[CONT.] ${candidates[0] || "[sin texto OCR visible]"}`.trim();
   }
   return "";
@@ -7704,9 +8100,12 @@ function mergeFinalLatexContinuation(primaryText, continuationText) {
 
 function parseFinalLatexItem(text, base, record) {
   const normalized = normalizedJsonForReview(base, record);
-  const finalLatex = String(text || "").trim();
+  const finalLatex = repairFinalLatexForRecord(text, record, normalized);
   const numberMatch = finalLatex.match(/\\item\s*\[\s*\\textbf\{\s*([^}.]+)\.?\s*\}\s*\]/i);
   if (numberMatch) normalized.numero = numberMatch[1].trim();
+  if (!String(normalized.numero || "").trim()) {
+    normalized.numero = inferredProblemNumberForFinalLatex(record, normalized, finalLatex);
+  }
   const tags = [...finalLatex.matchAll(/\[\[\s*([^=\]]+?)\s*=\s*([^\]]*?)\s*\]\]/g)];
   tags.forEach((match) => {
     const key = normalizePlainLabel(match[1]);
@@ -7729,6 +8128,7 @@ function parseFinalLatexItem(text, base, record) {
     normalized,
     notes: "Formato final pegado en bloque.",
     markReady: true,
+    finalLatex,
   };
 }
 
@@ -7784,20 +8184,20 @@ function continuationRecordsForParent(parent, allRecords = state.snapshot?.recor
   const wantedIds = new Set(fused.map((item) => String(item?.record_id || "").trim()).filter(Boolean));
   const rows = [];
   const seen = new Set();
-  const addRecord = (record) => {
-    if (!record || !isReviewContinuationRecord(record)) return;
+  const addRecord = (record, { allowUnmarked = false } = {}) => {
+    if (!record || (!allowUnmarked && !isReviewContinuationRecord(record))) return;
     const id = String(record.record_id || "");
     if (!id || seen.has(id)) return;
     rows.push(record);
     seen.add(id);
   };
-  wantedIds.forEach((id) => addRecord(findRecordById(id, allRecords)));
+  wantedIds.forEach((id) => addRecord(findRecordById(id, allRecords), { allowUnmarked: true }));
   allRecords.forEach((record) => {
     const continuation = record?.normalized?.continuacion;
     const continuationParentId = continuation && typeof continuation === "object"
       ? String(continuation.parent_record_id || "").trim()
       : "";
-    if (continuationParentId === parentId) addRecord(record);
+    if (continuationParentId === parentId) addRecord(record, { allowUnmarked: true });
   });
   const parentIndex = allRecords.findIndex((record) => String(record.record_id || "") === parentId);
   if (parentIndex >= 0) {
@@ -7899,7 +8299,7 @@ function bindReviewBatchSelection(records, currentRecord) {
         state.selectedReviewBatchIds = new Set((records || []).map((record) => String(record.record_id || "")).filter(Boolean));
         persistFactoryUiState();
       }
-      openBatchMode("normalizer_input");
+      openBatchMode("normalizer_input", { reviewScope: "selection" });
     };
   }
   const runAi = $("runSelectedNormalizerAiBatch");
@@ -7919,7 +8319,7 @@ function bindReviewBatchSelection(records, currentRecord) {
         state.selectedReviewBatchIds = new Set((records || []).map((record) => String(record.record_id || "")).filter(Boolean));
         persistFactoryUiState();
       }
-      openBatchMode("final_latex");
+      openBatchMode("final_latex", { reviewScope: "selection" });
     };
   }
 }
@@ -8001,11 +8401,11 @@ function renderReviewStage() {
   `;
   if (record) {
     const normalizerInputBtn = $("openNormalizerInputBatch");
-    if (normalizerInputBtn) normalizerInputBtn.onclick = () => openBatchMode("normalizer_input");
+    if (normalizerInputBtn) normalizerInputBtn.onclick = () => openBatchMode("normalizer_input", { reviewScope: "all" });
     const normalizeWithAiBtn = $("normalizeWithAiBtn");
     if (normalizeWithAiBtn) normalizeWithAiBtn.onclick = () => runNormalizerAiQueue(record?.record_id ? [record.record_id] : []);
     const finalLatexBatchBtn = $("openFinalLatexBatch");
-    if (finalLatexBatchBtn) finalLatexBatchBtn.onclick = () => openBatchMode("final_latex");
+    if (finalLatexBatchBtn) finalLatexBatchBtn.onclick = () => openBatchMode("final_latex", { reviewScope: "all" });
     bindReviewBatchSelection(records, record);
     bindRecordNavigation(records);
     $("reviewForm").onsubmit = saveReviewForm;
@@ -8126,6 +8526,67 @@ function normalizeFinalLatexForStorage(value) {
     .trim();
 }
 
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function problemNumberFromText(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const itemMatch = text.match(/\\item\s*\[\s*\\textbf\{\s*(\d{1,4})\s*\.?\s*\}\s*\]/i);
+  if (itemMatch) return itemMatch[1].trim();
+  const markerMatch = text.match(/<\s*(\d{1,4})\s*[\.)]?\s*>/);
+  if (markerMatch) return markerMatch[1].trim();
+  const leadingMatch = text.match(/^\s*(\d{1,4})\s*[\.)]\s+/);
+  return leadingMatch ? leadingMatch[1].trim() : "";
+}
+
+function firstNumericProblemNumber(values) {
+  for (const value of values) {
+    const direct = String(value || "").trim();
+    if (/^\d{1,4}$/.test(direct)) return direct;
+    const inferred = problemNumberFromText(direct);
+    if (inferred) return inferred;
+  }
+  return "";
+}
+
+function inferredProblemNumberForFinalLatex(record, normalized = {}, text = "") {
+  const source = record?.source && typeof record.source === "object" ? record.source : {};
+  return firstNumericProblemNumber([
+    normalized?.numero,
+    normalized?.latex_rendered_item,
+    text,
+    record?.raw_ocr,
+    normalized?.enunciado_latex,
+    source.problem_number,
+    source.n,
+  ]);
+}
+
+function stripLeadingOcrNumberMarkerFromFinalLatex(value, number) {
+  const text = String(value || "");
+  const n = String(number || "").trim();
+  if (!n) return text;
+  const marker = `<\\s*${escapeRegExp(n)}\\s*[\\.)]?\\s*>\\s*`;
+  return text
+    .replace(new RegExp(`(\\]\\]\\s*)${marker}`, "i"), "$1")
+    .replace(new RegExp(`(\\item\\s*\\[\\s*\\textbf\\{\\s*${escapeRegExp(n)}\\s*\\.?\\s*\\}\\s*\\]\\s*)${marker}`, "i"), "$1");
+}
+
+function repairFinalLatexForRecord(value, record, normalized = {}) {
+  const text = normalizeFinalLatexForStorage(value);
+  if (!text) return "";
+  const number = inferredProblemNumberForFinalLatex(record, normalized, text);
+  if (!number) return text;
+  let repaired = text.replace(
+    /\\item\s*\[\s*\\textbf\{\s*(?:\.|\s*)\s*\}\s*\]/i,
+    `\\item[\\textbf{${number}.}]`,
+  );
+  repaired = stripLeadingOcrNumberMarkerFromFinalLatex(repaired, number);
+  return repaired;
+}
+
 let finalLatexPreviewTimer = null;
 function updateFinalLatexPreview({ schedule = false } = {}) {
   const preview = $("finalLatexPreview") || document.querySelector(".final-latex-preview");
@@ -8160,7 +8621,7 @@ function renderFinalLatexPreviewHtml(value) {
     `;
   }
   const numberMatch = raw.match(/\\item\s*\[\s*\\textbf\{\s*([^}.]+)\.?\s*\}\s*\]/i);
-  const number = numberMatch ? numberMatch[1].trim() : "";
+  const number = numberMatch ? numberMatch[1].trim() : problemNumberFromText(raw);
   const tags = {};
   raw.replace(/\[\[\s*([^=\]]+?)\s*=\s*([^\]]*?)\s*\]\]/g, (_match, key, tagValue) => {
     tags[normalizePlainLabel(key)] = String(tagValue || "").trim();
@@ -8205,13 +8666,13 @@ function formatLatexPreviewText(value) {
   const raw = normalizeLatexPreviewValueSafe(String(value || "").trim());
   if (!raw) return "-";
   if (raw.includes("$")) return formatPreviewText(raw);
-  const mathOnly = /^[0-9A-Za-z\s\\^_{}()[\].,+\-*/=<>:;|Â°Âº]+$/.test(raw) && /[\\^_{}=<>Â°Âº]/.test(raw);
+  const mathOnly = /^[0-9A-Za-z\s\\^_{}()[\].,+\-*/=<>:;|\u00b0\u00ba]+$/.test(raw) && /[\\^_{}=<>\u00b0\u00ba]/.test(raw);
   return mathOnly ? `$${escapeHtml(raw)}$` : formatPreviewText(raw);
 }
 
 function normalizeLatexPreviewValue(value) {
   return decodeLatexTextAccents(value)
-    .replace(/(\d+(?:[.,]\d+)?)\s*(?:\^o|Âº|Â°)(?=\s|$|[.,;:)])/gi, "$1^\\circ")
+    .replace(/(\d+(?:[.,]\d+)?)\s*(?:\^o|\u00ba|\u00b0)(?=\s|$|[.,;:)])/gi, "$1^\\circ")
     .replace(/(\d+(?:[.,]\d+)?)\s*\\degree\b/gi, "$1^\\circ");
 }
 
@@ -8310,7 +8771,7 @@ function collectReviewPayload() {
   return {
     normalized: {
       ...parsed.normalized,
-      latex_rendered_item: finalLatex,
+      latex_rendered_item: parsed.finalLatex || parsed.normalized.latex_rendered_item || finalLatex,
       status: "listo",
     },
     notes: parsed.notes,
@@ -8501,7 +8962,7 @@ function parsePlainReviewText(text, base, record) {
       currentOption = "";
       return;
     }
-    const labelMatch = line.match(/^(numero|n[uÃº]mero|curso|tema|enunciado|respuesta|clave|grafico|gr[aÃ¡]fico|tiene grafico|tiene gr[aÃ¡]fico|etiqueta grafico|etiqueta gr[aÃ¡]fico|listo|revision lista|revisi[oÃ³]n lista)\s*:\s*(.*)$/i);
+    const labelMatch = line.match(/^(numero|n[u\u00fa]mero|curso|tema|enunciado|respuesta|clave|grafico|gr[a\u00e1]fico|tiene grafico|tiene gr[a\u00e1]fico|etiqueta grafico|etiqueta gr[a\u00e1]fico|listo|revision lista|revisi[o\u00f3]n lista)\s*:\s*(.*)$/i);
     if (labelMatch) {
       const plainLabel = normalizePlainLabel(labelMatch[1]);
       explicitStatementLabel = explicitStatementLabel || plainLabel === "enunciado";
@@ -8566,7 +9027,7 @@ function normalizeAnswerValue(value) {
 
 function truthyText(value) {
   const raw = String(value || "").trim().toLowerCase();
-  return ["1", "si", "sÃ­", "s", "true", "yes", "y", "listo", "ok"].includes(raw);
+  return ["1", "si", "s\u00ed", "s", "true", "yes", "y", "listo", "ok"].includes(raw);
 }
 
 function renderCandidateStage() {
@@ -9406,6 +9867,207 @@ function filteredInstances(instances) {
   return rows.filter((item) => instanceWorkflowStatus(item) === state.library.status);
 }
 
+function wordAllInstances() {
+  const catalog = state.library.word?.catalog || {};
+  const rows = [];
+  for (const book of catalog.books || []) {
+    for (const instance of book.instances || []) {
+      rows.push({ book, instance });
+    }
+  }
+  return rows;
+}
+
+function wordSelectionKeys() {
+  if (!(state.library.word.selectedKeys instanceof Set)) {
+    state.library.word.selectedKeys = new Set(Array.from(state.library.word.selectedKeys || []).map((key) => String(key || "")).filter(Boolean));
+  }
+  return state.library.word.selectedKeys;
+}
+
+function pruneWordSelection() {
+  const valid = new Set(wordAllInstances().map(({ instance }) => String(instance.instance_key || "")).filter(Boolean));
+  const selected = wordSelectionKeys();
+  let changed = false;
+  [...selected].forEach((key) => {
+    if (!valid.has(key)) {
+      selected.delete(key);
+      changed = true;
+    }
+  });
+  return changed;
+}
+
+function visibleWordInstances() {
+  const rows = [];
+  for (const book of filteredWordBooks()) {
+    for (const instance of filteredWordInstances(book)) {
+      rows.push({ book, instance });
+    }
+  }
+  return rows;
+}
+
+function selectedWordInstances() {
+  pruneWordSelection();
+  const selected = wordSelectionKeys();
+  return wordAllInstances().filter(({ instance }) => selected.has(String(instance.instance_key || "")));
+}
+
+function findWordInstance(instanceKey) {
+  const key = String(instanceKey || "");
+  return wordAllInstances().find(({ instance }) => String(instance.instance_key || "") === key) || null;
+}
+
+function filteredWordBooks() {
+  const word = state.library.word || {};
+  const query = normalizeLibrarySearchText(word.query || "");
+  return (word.catalog?.books || []).filter((book) => filteredWordInstances(book, query).length > 0);
+}
+
+function filteredWordInstances(book, forcedQuery = null) {
+  const word = state.library.word || {};
+  const query = forcedQuery === null ? normalizeLibrarySearchText(word.query || "") : forcedQuery;
+  const filter = String(word.wordFilter || "all");
+  return (book.instances || []).filter((row) => {
+    if (filter === "ready" && !row.word_exists) return false;
+    if (filter === "pending" && (!row.session_exists || row.word_exists)) return false;
+    if (filter === "missing" && row.session_exists) return false;
+    if (!query) return true;
+    const haystack = normalizeLibrarySearchText([
+      book.title,
+      book.code,
+      book.author,
+      book.editorial,
+      book.course,
+      row.title,
+      row.session_path,
+      row.word_path,
+    ].filter(Boolean).join(" "));
+    return haystack.includes(query);
+  });
+}
+
+async function loadWordSessions({ silent = false } = {}) {
+  state.library.word.loading = true;
+  state.library.word.error = "";
+  if (!silent && state.view === "library" && state.library.screen === "word") renderLibraryContent();
+  try {
+    const params = new URLSearchParams();
+    if (state.library.selectedDb) params.set("db_name", state.library.selectedDb);
+    const payload = await api(`/api/word/sessions?${params.toString()}`);
+    state.library.word.catalog = payload;
+    state.library.word.error = "";
+    if (!silent) setStatus(`Sesiones Word: ${Number(payload.summary?.word_ready || 0)} exportada(s).`);
+  } catch (err) {
+    state.library.word.error = err.message || "No se pudo cargar sesiones Word.";
+    if (!silent) setStatus(`Error cargando sesiones Word: ${state.library.word.error}`);
+  } finally {
+    state.library.word.loading = false;
+    if (state.view === "library" && state.library.screen === "word") renderLibraryContent();
+  }
+}
+
+async function convertWordSession(instanceKey) {
+  const found = findWordInstance(instanceKey);
+  if (!found) return setStatus("No encontre la sesion seleccionada.");
+  const row = found.instance || {};
+  if (!row.session_exists) return setStatus("Esta instancia no tiene archivo de sesion resoluble.");
+  state.library.word.selectedKey = String(row.instance_key || "");
+  state.library.word.convertingKey = String(row.instance_key || "");
+  renderLibraryContent();
+  try {
+    await convertWordInstanceRow(row);
+    setStatus(`Word generado: ${row.word_path || row.title}`);
+    await loadWordSessions({ silent: true });
+  } catch (err) {
+    setStatus(`Error generando Word: ${err.message}`);
+  } finally {
+    state.library.word.convertingKey = "";
+    if (state.view === "library" && state.library.screen === "word") renderLibraryContent();
+  }
+}
+
+async function convertWordInstanceRow(row) {
+  const catalog = state.library.word.catalog || {};
+  const result = await api("/api/word/convert", {
+    method: "POST",
+    body: {
+      session_path: row.session_path,
+      output_docx: row.word_path || "",
+      repo: catalog.repo || "",
+      template: catalog.template || "",
+      style: "Estilo_plantilla",
+    },
+  });
+  row.word_exists = Boolean(result.word_exists);
+  row.word_path = result.word_path || result.output_docx || row.word_path || "";
+  row.word_url = result.word_url || row.word_url || "";
+  return result;
+}
+
+async function convertWordBatch(rows, label = "seleccionadas") {
+  const queue = (rows || [])
+    .map((item) => item?.instance || item)
+    .filter((row) => row?.session_exists);
+  if (!queue.length) return setStatus("No hay sesiones validas para convertir.");
+  if (state.library.word.batchRunning) return setStatus("Ya hay una cola Word en ejecucion.");
+  state.library.word.batchRunning = true;
+  state.library.word.batchProgress = { label: `Cola ${label}`, current: 0, total: queue.length };
+  renderLibraryContent();
+  let ok = 0;
+  let failed = 0;
+  try {
+    for (let index = 0; index < queue.length; index += 1) {
+      const row = queue[index];
+      state.library.word.selectedKey = String(row.instance_key || "");
+      state.library.word.convertingKey = String(row.instance_key || "");
+      state.library.word.batchProgress = {
+        label: row.title || `Sesion ${index + 1}`,
+        current: index,
+        total: queue.length,
+      };
+      renderLibraryContent();
+      try {
+        await convertWordInstanceRow(row);
+        ok += 1;
+      } catch (err) {
+        failed += 1;
+        setStatus(`Error Word en ${row.title || row.session_path}: ${err.message || String(err)}`);
+      }
+      state.library.word.batchProgress = {
+        label: row.title || `Sesion ${index + 1}`,
+        current: index + 1,
+        total: queue.length,
+      };
+    }
+    await loadWordSessions({ silent: true });
+    if (!failed) {
+      queue.forEach((row) => wordSelectionKeys().delete(String(row.instance_key || "")));
+    }
+    setStatus(`Cola Word terminada: ${ok} convertido(s), ${failed} error(es).`);
+  } finally {
+    state.library.word.batchRunning = false;
+    state.library.word.convertingKey = "";
+    state.library.word.batchProgress = null;
+    if (state.view === "library" && state.library.screen === "word") renderLibraryContent();
+  }
+}
+
+function openWordSession(instanceKey) {
+  const found = findWordInstance(instanceKey);
+  if (!found) return setStatus("No encontre el Word seleccionado.");
+  const row = found.instance || {};
+  state.library.word.selectedKey = String(row.instance_key || "");
+  if (!row.word_exists || !row.word_url) {
+    renderLibraryContent();
+    return setStatus("Todavia no hay Word exportado para esta instancia.");
+  }
+  window.open(row.word_url, "_blank", "noopener");
+  renderLibraryContent();
+  setStatus(`Abriendo Word: ${row.title || row.word_path}`);
+}
+
 function naturalSortInstances(instances) {
   const sorted = [...(instances || [])].sort((a, b) => {
     const keyA = cachedInstanceNaturalSortKey(a);
@@ -9437,7 +10099,7 @@ function cachedInstanceNaturalSortKey(instance) {
 function instanceNaturalSortKey(instance) {
   const label = String(instance?.title || instance?.tipo || instance?.instance_type || instance?.code || instance?.id || "").toLowerCase();
   const tokens = [];
-  const pattern = /(\d+)|([a-zÃ¡Ã©Ã­Ã³ÃºÃ±]+)|([^a-zÃ¡Ã©Ã­Ã³ÃºÃ±\d]+)/gi;
+  const pattern = /(\d+)|([a-z\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]+)|([^a-z\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1\d]+)/gi;
   let match;
   while ((match = pattern.exec(label)) !== null) {
     if (match[1]) tokens.push(Number(match[1]));
@@ -9588,6 +10250,7 @@ function deriveInstanceTimelineInfo(instance) {
     Number(indicators.consistentes || 0) + Number(indicators.inconsistentes || 0) + Number(indicators.sin_revisar || 0),
   );
   const records = Number(indicators.records_total || indicators.records || indicators.escaneados_sesion || 0);
+  const problems = Number(indicators.problems_total || indicators.primary_records_total || records || 0);
   const crops = Number(indicators.crops_found || indicators.crops_total || indicators.crops || 0);
   const ocr = Number(indicators.ocr_done || indicators.ocr || 0);
   const segments = Number(indicators.segments_done || indicators.segments || 0);
@@ -9596,7 +10259,7 @@ function deriveInstanceTimelineInfo(instance) {
   const boxes = Number(indicators.boxes_total || indicators.boxes || 0);
   const pages = Number(indicators.pages_total || indicators.pages || 0);
   if (dbCount > 0) return { id: "candidate", index: 6, status: "listo", detail: `${dbCount} problema(s) enviados a BD.` };
-  if (normalized > 0 || ready > 0) return { id: "review", index: 5, status: "procesando", detail: `${normalized || ready} borrador(es) de revision.` };
+  if (normalized > 0 || ready > 0) return { id: "review", index: 5, status: "procesando", detail: `${normalized || ready}/${problems} borrador(es) de revision.` };
   if (ocr > 0 || segments > 0) return { id: "ocr", index: 4, status: "procesando", detail: `${ocr} con OCR; ${segments} con graficos.` };
   if (records > 0 || crops > 0) return { id: "crops", index: 3, status: "procesando", detail: `${crops || records} crop(s) en staging.` };
   if (boxes > 0) return { id: "boxes", index: 2, status: "procesando", detail: `${boxes} box(es) detectados.` };
@@ -9851,7 +10514,11 @@ function displayStatus(status) {
 }
 
 function friendlyLibraryError(err) {
-  return `No encontre el contrato de biblioteca todavia (${err.message}). Puedes abrir la Fabrica directa o conectar GET /api/library/books, POST /api/library/books y POST /api/library/books/{book_id}/instances.`;
+  const message = String(err?.message || err || "").trim();
+  if (/ruta api no encontrada|failed to fetch|contract|contrato/i.test(message)) {
+    return `No encontre el contrato de biblioteca todavia (${message}). Puedes abrir la Fabrica directa o conectar GET /api/library/books, POST /api/library/books y POST /api/library/books/{book_id}/instances.`;
+  }
+  return message || "No se pudo cargar la biblioteca.";
 }
 
 function stageHint(id) {
@@ -9919,11 +10586,12 @@ function drawCanvasImageError(canvas, expectedSrc = "") {
 function parseRange(raw, total) {
   const set = new Set();
   const maxPage = Math.max(0, Number(total || 0));
-  String(raw || "").split(",").forEach((token) => {
+  const normalized = String(raw || "").replace(/[\u2010-\u2015\u2212]/g, "-");
+  normalized.split(",").forEach((token) => {
     const part = token.trim();
     if (!part) return;
-    if (/[-â€“â€”]/.test(part)) {
-      let [a, b] = part.split(/[-â€“â€”]/, 2).map((v) => Number(v.trim()));
+    if (part.includes("-")) {
+      let [a, b] = part.split("-", 2).map((v) => Number(v.trim()));
       if (Number.isFinite(a) && Number.isFinite(b)) {
         if (b < a) [a, b] = [b, a];
         for (let page = a; page <= b; page += 1) {

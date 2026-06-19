@@ -307,6 +307,323 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertTrue(Path(rows[0]["images"][0]["bank_path"]).exists())
             self.assertEqual(updated.artifacts["normalizer_training_samples_total"], 1)
 
+    def test_review_save_repairs_empty_final_latex_number_from_raw_ocr(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            crop = root / "crop_024.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="GEO", instance_type="s01")
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_024",
+                    crop_id="crop_024",
+                    crop_path=str(crop),
+                    raw_ocr="<24.> Indique el valor de verdad. A) FFFV B) VFVF",
+                )
+            )
+
+            updated = store.update_review(
+                "crop_024",
+                {
+                    "latex_rendered_item": (
+                        r"\item[\textbf{.}] [[curso=SIN_CURSO]] [[tema=SIN_TEMA]] "
+                        r"[[Estado=sin_revisar]] [[Clave=]] <24.> Indique el valor de verdad."
+                    ),
+                },
+                mark_ready=True,
+            )
+
+            self.assertEqual(updated.normalized["numero"], "24")
+            self.assertIn(r"\item[\textbf{24.}]", updated.normalized["latex_rendered_item"])
+            self.assertNotIn("<24.>", updated.normalized["latex_rendered_item"])
+
+    def test_summary_counts_records_uploaded_to_db(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            context = InstancePipelineContext(book_code="GEO", instance_type="s02")
+            store = InstanceStagingStore(context, root=root / "staging")
+            crop = root / "crop.png"
+            crop.write_bytes(b"png")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_002",
+                    crop_id="crop_002",
+                    crop_path=str(crop),
+                    status=StageStatus.READY,
+                    raw_ocr="<12.> Halle x.",
+                    normalized={"latex_rendered_item": r"\item[\textbf{12.}] Halle $x$."},
+                    audit={
+                        "db_promotion": {
+                            "schema_version": "pdf_factory_db_promotion_audit_v1",
+                            "problem_id": 321,
+                        }
+                    },
+                )
+            )
+
+            summary = store.summarize_records()
+
+            self.assertEqual(summary["ready"], 1)
+            self.assertEqual(summary["subidos_bd"], 1)
+
+    def test_summary_counts_continuation_as_crop_not_problem(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            context = InstancePipelineContext(book_code="GEO", instance_type="s02")
+            store = InstanceStagingStore(context, root=root / "staging")
+            main_crop = root / "crop_main.png"
+            cont_crop = root / "crop_cont.png"
+            main_crop.write_bytes(b"png")
+            cont_crop.write_bytes(b"png")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="crop_008",
+                        crop_id="crop_008",
+                        crop_path=str(main_crop),
+                        status=StageStatus.READY,
+                        raw_ocr="<08.> Indique el valor de verdad.",
+                        normalized={
+                            "latex_rendered_item": r"\item[\textbf{8.}] Indique...",
+                            "continuaciones_fusionadas": [{"record_id": "crop_009"}],
+                        },
+                    ),
+                    StagingProblemRecord(
+                        record_id="crop_009",
+                        crop_id="crop_009",
+                        crop_path=str(cont_crop),
+                        status=StageStatus.READY,
+                        raw_ocr="[CONT.] A) FVVF B) FFVF C) FFFF D) FVFV E) FFVF",
+                        normalized={
+                            "latex_rendered_item": "[CONT.] A) FVVF B) FFVF C) FFFF D) FVFV E) FFVF",
+                        },
+                    ),
+                ]
+            )
+
+            summary = store.summarize_records()
+
+            self.assertEqual(summary["records_total"], 2)
+            self.assertEqual(summary["crops_found"], 2)
+            self.assertEqual(summary["ocr_done"], 2)
+            self.assertEqual(summary["problems_total"], 1)
+            self.assertEqual(summary["primary_records_total"], 1)
+            self.assertEqual(summary["normalized_done"], 1)
+            self.assertEqual(summary["ready"], 1)
+
+    def test_normalizer_training_bank_keeps_parent_linked_continuation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bank = root / "normalizer_bank"
+            context = InstancePipelineContext(book_code="GEO", instance_type="s02")
+            store = InstanceStagingStore(context, root=root / "staging")
+            main_crop = root / "crop_main.png"
+            cont_crop = root / "crop_cont.png"
+            main_crop.write_bytes(b"png")
+            cont_crop.write_bytes(b"png")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="crop_002",
+                        crop_id="crop_002",
+                        crop_path=str(main_crop),
+                        raw_ocr="<08.> Indique el valor de verdad.",
+                        normalized={"continuaciones_fusionadas": [{"record_id": "crop_003"}]},
+                    ),
+                    StagingProblemRecord(
+                        record_id="crop_003",
+                        crop_id="crop_003",
+                        crop_path=str(cont_crop),
+                        raw_ocr="A) FVVF B) FFVF C) FFFF D) FVFV E) FFVF",
+                    ),
+                ]
+            )
+
+            final_latex = (
+                r"\item[\textbf{8.}] [[curso=Geometria]] [[tema=angulos]] [[Estado=sin_revisar]] "
+                r"[[Clave=-]] Indique el valor de verdad. £A)FVVFæB)FFVFæC)FFFF£D)FVFVææE)FFVF£"
+            )
+            with patch.dict(os.environ, {"NORMALIZER_TRAINING_BANK_ROOT": str(bank)}):
+                store.update_review(
+                    "crop_002",
+                    {
+                        "numero": "8",
+                        "continuaciones_fusionadas": [{"record_id": "crop_003"}],
+                        "latex_rendered_item": final_latex,
+                    },
+                    notes="listo",
+                    mark_ready=True,
+                )
+
+            row = json.loads((bank / "samples.jsonl").read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(row["continuations"][0]["record_id"], "crop_003")
+            self.assertIn("FVVF", row["continuations"][0]["raw_ocr"])
+            self.assertEqual([image["role"] for image in row["images"]], ["main", "continuation_01"])
+
+    def test_normalizer_training_bank_skips_angle_bracket_continuation_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bank = root / "normalizer_bank"
+            context = InstancePipelineContext(book_code="GEO", instance_type="s02")
+            store = InstanceStagingStore(context, root=root / "staging")
+            crop = root / "crop_cont.png"
+            crop.write_bytes(b"png")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_cont",
+                    crop_id="crop_cont",
+                    crop_path=str(crop),
+                    raw_ocr="<CONT.> A) FVVF B) FFVF C) FFFF D) FVFV E) FFVF",
+                )
+            )
+
+            with patch.dict(os.environ, {"NORMALIZER_TRAINING_BANK_ROOT": str(bank)}):
+                store.update_review(
+                    "crop_cont",
+                    {
+                        "latex_rendered_item": (
+                            r"\item[\textbf{8.}] [[curso=Geometria]] [[tema=angulos]] "
+                            r"[[Estado=sin_revisar]] [[Clave=-]] A) FVVF B) FFVF"
+                        )
+                    },
+                    notes="continuacion",
+                    mark_ready=True,
+                )
+
+            self.assertTrue((bank / "samples.jsonl").exists())
+            self.assertEqual((bank / "samples.jsonl").read_text(encoding="utf-8"), "")
+
+    def test_update_review_auto_links_immediate_continuation_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bank = root / "normalizer_bank"
+            context = InstancePipelineContext(book_code="GEO", instance_type="s02")
+            store = InstanceStagingStore(context, root=root / "staging")
+            main_crop = root / "crop_008.png"
+            cont_crop = root / "crop_009.png"
+            main_crop.write_bytes(b"png")
+            cont_crop.write_bytes(b"png")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="crop_008",
+                        crop_id="crop_008",
+                        crop_path=str(main_crop),
+                        raw_ocr="<08.> Indique el valor de verdad.",
+                        source={"page_number": 1, "source_order": 8, "box_index": 8, "bbox_px": [10, 10, 40, 40]},
+                    ),
+                    StagingProblemRecord(
+                        record_id="crop_009",
+                        crop_id="crop_009",
+                        crop_path=str(cont_crop),
+                        raw_ocr="[CONT.] A) FVVF B) FFVF C) FFFF D) FVFV E) FFVF",
+                        source={"page_number": 2, "source_order": 9, "box_index": 1, "bbox_px": [10, 10, 40, 40]},
+                    ),
+                ]
+            )
+            final_latex = (
+                r"\item[\textbf{8.}] [[curso=Geometria]] [[tema=angulos]] [[Estado=sin_revisar]] "
+                r"[[Clave=-]] Indique el valor de verdad. Â£A)FVVFÃ¦B)FFVFÃ¦C)FFFFÂ£D)FVFVÃ¦Ã¦E)FFVFÂ£"
+            )
+
+            with patch.dict(os.environ, {"NORMALIZER_TRAINING_BANK_ROOT": str(bank)}):
+                updated = store.update_review(
+                    "crop_008",
+                    {"numero": "8", "latex_rendered_item": final_latex},
+                    notes="listo",
+                    mark_ready=True,
+                )
+
+            fused = updated.normalized.get("continuaciones_fusionadas") or []
+            self.assertEqual(fused[0]["record_id"], "crop_009")
+            self.assertIn("FVVF", fused[0]["texto_fusionado"])
+            row = json.loads((bank / "samples.jsonl").read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual([image["role"] for image in row["images"]], ["main", "continuation_01"])
+
+    def test_update_review_preserves_existing_unmarked_continuation_link(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bank = root / "normalizer_bank"
+            context = InstancePipelineContext(book_code="GEO", instance_type="s02")
+            store = InstanceStagingStore(context, root=root / "staging")
+            main_crop = root / "crop_020.png"
+            cont_crop = root / "crop_021.png"
+            main_crop.write_bytes(b"png")
+            cont_crop.write_bytes(b"png")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="crop_020",
+                        crop_id="crop_020",
+                        crop_path=str(main_crop),
+                        raw_ocr="<20.> Dadas las proposiciones.",
+                        normalized={"continuaciones_fusionadas": [{"record_id": "crop_021"}]},
+                    ),
+                    StagingProblemRecord(
+                        record_id="crop_021",
+                        crop_id="crop_021",
+                        crop_path=str(cont_crop),
+                        raw_ocr="A) FVF B) FFF C) FVV D) VVF E) FFV",
+                    ),
+                ]
+            )
+
+            with patch.dict(os.environ, {"NORMALIZER_TRAINING_BANK_ROOT": str(bank)}):
+                updated = store.update_review(
+                    "crop_020",
+                    {
+                        "numero": "20",
+                        "latex_rendered_item": (
+                            r"\item[\textbf{20.}] [[curso=Geometria]] [[tema=angulos]] "
+                            r"[[Estado=sin_revisar]] [[Clave=-]] Dadas las proposiciones."
+                        ),
+                    },
+                    notes="listo",
+                    mark_ready=True,
+                )
+
+            fused = updated.normalized.get("continuaciones_fusionadas") or []
+            self.assertEqual(fused[0]["record_id"], "crop_021")
+            self.assertIn("FVF", fused[0]["texto_fusionado"])
+
+    def test_repair_detected_continuation_links_persists_legacy_marker_only_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            context = InstancePipelineContext(book_code="GEO", instance_type="s02")
+            store = InstanceStagingStore(context, root=root / "staging")
+            main_crop = root / "crop_024.png"
+            cont_crop = root / "crop_025.png"
+            main_crop.write_bytes(b"png")
+            cont_crop.write_bytes(b"png")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="crop_024",
+                        crop_id="crop_024",
+                        crop_path=str(main_crop),
+                        raw_ocr="<24.> Indique el valor de verdad.",
+                        normalized={"numero": "24"},
+                        source={"page_number": 3, "source_order": 24, "box_index": 9, "bbox_px": [10, 10, 40, 40]},
+                    ),
+                    StagingProblemRecord(
+                        record_id="crop_025",
+                        crop_id="crop_025",
+                        crop_path=str(cont_crop),
+                        raw_ocr="[CONT.] A) FFFV B) VFVF C) FVFF D) VFFV E) VFFF",
+                        source={"page_number": 4, "source_order": 25, "box_index": 1, "bbox_px": [10, 10, 40, 40]},
+                    ),
+                ]
+            )
+
+            changed = store.repair_detected_continuation_links()
+            loaded = store.get_record("crop_024")
+
+            self.assertEqual([row.record_id for row in changed], ["crop_024"])
+            fused = loaded.normalized.get("continuaciones_fusionadas") or []
+            self.assertEqual(fused[0]["record_id"], "crop_025")
+            self.assertIn("FFFV", fused[0]["texto_fusionado"])
+
     def test_ready_review_recorrection_keeps_normalizer_training_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -472,6 +789,58 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertEqual(updated.normalized["enunciado_latex"], "preservar")
             self.assertFalse((ocr_bank / "manifest.json").exists())
 
+    def test_update_raw_ocr_same_text_rebuilds_missing_raw_artifacts(self) -> None:
+        try:
+            from modulos.instance_factory.pipeline import InstancePdfPipelineService
+        except Exception as exc:  # pragma: no cover - optional detector/OCR dependencies.
+            self.skipTest(f"pipeline deps unavailable: {exc}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            crop = Path(tmp) / "crop_001.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="GEO", instance_type="s03")
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            record = StagingProblemRecord(
+                record_id="crop_001",
+                crop_id="crop_001",
+                crop_path=str(crop),
+                raw_ocr="<01.> Texto modelo",
+                structured_ocr={"items_total": 1},
+                trace={"last_raw_ocr_review": {"source": "human_raw_ocr_editor"}},
+            )
+            store.upsert_record(record)
+            service = InstancePdfPipelineService(context, staging_store=store)
+            raw_dir = store.artifact_dir("raw_outputs", "crop_001", probe_file="figure_segmentation.json")
+            structured_path = raw_dir / "structured_ocr.json"
+            self.assertFalse(structured_path.exists())
+
+            updated = service.update_raw_ocr("crop_001", "<01.> Texto modelo")
+
+            self.assertEqual(updated.raw_ocr, "<01.> Texto modelo")
+            self.assertEqual(updated.structured_ocr, {"items_total": 1})
+            self.assertTrue(structured_path.exists())
+            self.assertEqual(json.loads(structured_path.read_text(encoding="utf-8")), {"items_total": 1})
+
+    def test_update_raw_ocr_rejects_invalidated_downstream_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            crop = Path(tmp) / "crop_001.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="GEO", instance_type="s03")
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(crop),
+                    raw_ocr="<01.> Texto previo",
+                    audit={"downstream_state": {"status": "invalidated", "reason": "page_boxes_changed"}},
+                )
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            with self.assertRaisesRegex(ValueError, "Regenera staging"):
+                service.update_raw_ocr("crop_001", "<01.> Texto corregido")
+
     def test_update_raw_ocr_force_review_accepts_same_text_once(self) -> None:
         try:
             from modulos.instance_factory.pipeline import InstancePdfPipelineService
@@ -608,6 +977,29 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertEqual(updated.step_status(PipelineStep.SEGMENTATION), StageStatus.READY)
             self.assertEqual(updated.step_status(PipelineStep.NORMALIZATION), StageStatus.PENDING)
             self.assertEqual(updated.step_status(PipelineStep.REVIEW), StageStatus.PENDING)
+            raw_dir = store.artifact_dir("raw_outputs", "crop_001", probe_file="figure_segmentation.json")
+            figure_path = raw_dir / "figure_segmentation.json"
+            self.assertTrue(figure_path.exists())
+            self.assertEqual(json.loads(figure_path.read_text(encoding="utf-8"))["segments_total"], 1)
+
+    def test_update_figure_segments_rejects_invalidated_downstream_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            crop = Path(tmp) / "crop_001.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="GEO", instance_type="s03")
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(crop),
+                    audit={"downstream_state": {"status": "invalidated", "reason": "page_boxes_changed"}},
+                )
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            with self.assertRaisesRegex(ValueError, "Regenera staging"):
+                service.update_figure_segments("crop_001", [[1, 2, 30, 40]])
 
     def test_normalize_existing_ocr_prepares_review_from_raw_ocr_only(self) -> None:
         try:
@@ -642,6 +1034,54 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertEqual(loaded.step_status(PipelineStep.NORMALIZATION), StageStatus.NEEDS_REVIEW)
             self.assertEqual(loaded.normalized["normalizer"], "manual_raw_ocr_review")
             self.assertEqual(loaded.normalized["enunciado_latex"], "<01.> Determinar x. A) $10^\\circ$ B) $20^\\circ$")
+
+    def test_string_false_continuation_flags_keep_record_as_primary(self) -> None:
+        try:
+            from modulos.instance_factory.pipeline import InstancePdfPipelineService
+        except Exception as exc:  # pragma: no cover - optional detector/OCR dependencies.
+            self.skipTest(f"pipeline deps unavailable: {exc}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            crop = Path(tmp) / "crop_024.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="GEO", instance_type="s01")
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            record = StagingProblemRecord(
+                record_id="crop_024",
+                crop_id="crop_024",
+                crop_path=str(crop),
+                raw_ocr="<24.> Indique el valor de verdad. A) FFFV B) VFVF",
+                normalized={
+                    "numero": "24",
+                    "latex_rendered_item": r"\item[\textbf{24.}] Indique el valor de verdad.",
+                    "continuacion": {
+                        "es_continuacion": "false",
+                        "fusionar_con_anterior": "false",
+                    },
+                },
+                status=StageStatus.READY,
+            )
+            store.upsert_record(record)
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            self.assertFalse(service._is_continuation_record(record))
+            self.assertFalse(store._is_summary_continuation_record(record))
+            self.assertEqual(store.summarize_records([record])["primary_records_total"], 1)
+            candidate = store.build_promotion_candidate("crop_024")
+            self.assertNotIn("continuacion:fusionada_con_anterior", candidate["blocking_issues"])
+
+            record.normalized["continuacion"]["fusionar_con_anterior"] = "true"
+            self.assertTrue(service._is_continuation_record(record))
+            self.assertTrue(store._is_summary_continuation_record(record))
+
+    def test_continuation_flag_accepts_spanish_yes_without_accepting_false(self) -> None:
+        from modulos.instance_factory.continuations import truthy_continuation_flag
+
+        self.assertFalse(truthy_continuation_flag("false"))
+        self.assertFalse(truthy_continuation_flag("no"))
+        self.assertTrue(truthy_continuation_flag("si"))
+        self.assertTrue(truthy_continuation_flag("s\u00ed"))
+        self.assertTrue(truthy_continuation_flag("s\u00c3\u00ad"))
 
     def test_normalize_existing_ocr_merges_continuation_raw_ocr_into_parent(self) -> None:
         try:
@@ -697,6 +1137,150 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertEqual(loaded.normalized["metadata_tecnica"]["raw_ocr_source"], "raw_ocr_plus_continuations")
             self.assertEqual(loaded.normalized["metadata_tecnica"]["continuation_record_ids"], ["crop_002"])
             self.assertEqual(loaded.normalized["continuaciones_fusionadas"][0]["record_id"], "crop_002")
+
+    def test_normalize_existing_ocr_repairs_marker_only_continuation_before_draft(self) -> None:
+        try:
+            from modulos.instance_factory.pipeline import InstancePdfPipelineService
+        except Exception as exc:  # pragma: no cover - optional detector/OCR dependencies.
+            self.skipTest(f"pipeline deps unavailable: {exc}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            main_crop = Path(tmp) / "crop_024.png"
+            cont_crop = Path(tmp) / "crop_025.png"
+            main_crop.write_bytes(b"png")
+            cont_crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="GEO", instance_type="s03")
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="crop_024",
+                        crop_id="crop_024",
+                        crop_path=str(main_crop),
+                        raw_ocr="<24.> Indique el valor de verdad.",
+                        source={"problem_number": 24, "page_number": 3, "source_order": 24, "box_index": 9},
+                    ),
+                    StagingProblemRecord(
+                        record_id="crop_025",
+                        crop_id="crop_025",
+                        crop_path=str(cont_crop),
+                        raw_ocr="[CONT.] A) FFFV B) VFVF C) FVFF D) VFFV E) VFFF",
+                        source={"page_number": 4, "source_order": 25, "box_index": 1},
+                    ),
+                ]
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            service.normalize_existing_ocr(record_id="crop_024")
+            loaded = store.get_record("crop_024")
+
+            self.assertIn("Indique el valor", loaded.normalized["enunciado_latex"])
+            self.assertIn("FFFV", loaded.normalized["enunciado_latex"])
+            self.assertEqual(loaded.normalized["metadata_tecnica"]["continuation_record_ids"], ["crop_025"])
+            self.assertEqual(loaded.normalized["continuaciones_fusionadas"][0]["record_id"], "crop_025")
+
+    def test_normalize_existing_ocr_replaces_stale_final_latex_with_parent_continuation(self) -> None:
+        try:
+            from modulos.instance_factory.pipeline import InstancePdfPipelineService
+        except Exception as exc:  # pragma: no cover - optional detector/OCR dependencies.
+            self.skipTest(f"pipeline deps unavailable: {exc}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            main_crop = Path(tmp) / "crop_001.png"
+            cont_crop = Path(tmp) / "crop_002.png"
+            main_crop.write_bytes(b"png")
+            cont_crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="GEO", instance_type="s03")
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="crop_001",
+                        crop_id="crop_001",
+                        crop_path=str(main_crop),
+                        raw_ocr="<08.> Indique el valor de verdad.",
+                        source={"problem_number": 8},
+                        normalized={
+                            "numero": "8",
+                            "curso": "Geometria",
+                            "tema": "angulos",
+                            "latex_rendered_item": r"\item[\textbf{8.}] Indique el valor de verdad.",
+                            "continuaciones_fusionadas": [{"record_id": "crop_002"}],
+                        },
+                    ),
+                    StagingProblemRecord(
+                        record_id="crop_002",
+                        crop_id="crop_002",
+                        crop_path=str(cont_crop),
+                        raw_ocr="A) FVVF B) FFVF C) FFFF D) FVFV E) FFVF",
+                    ),
+                ]
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            service.normalize_existing_ocr(record_id="crop_001")
+            loaded = store.get_record("crop_001")
+
+            self.assertEqual(loaded.normalized["latex_rendered_item"], "")
+            self.assertIn("Indique el valor", loaded.normalized["enunciado_latex"])
+            self.assertIn("A) FVVF", loaded.normalized["enunciado_latex"])
+            self.assertEqual(loaded.normalized["metadata_tecnica"]["raw_ocr_source"], "raw_ocr_plus_continuations")
+            self.assertEqual(loaded.normalized["continuaciones_fusionadas"][0]["record_id"], "crop_002")
+
+    def test_normalize_existing_ocr_rejects_single_invalidated_downstream_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            crop = Path(tmp) / "crop_001.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="GEO", instance_type="s03")
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(crop),
+                    raw_ocr="<01.> Determinar x.",
+                    audit={"downstream_state": {"status": "invalidated", "reason": "page_boxes_changed"}},
+                )
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            with self.assertRaisesRegex(ValueError, "Regenera staging"):
+                service.normalize_existing_ocr(record_id="crop_001")
+
+    def test_normalize_existing_ocr_marks_invalidated_record_and_continues_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stale_crop = Path(tmp) / "stale.png"
+            good_crop = Path(tmp) / "good.png"
+            stale_crop.write_bytes(b"png")
+            good_crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="GEO", instance_type="s03")
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="crop_stale",
+                        crop_id="crop_stale",
+                        crop_path=str(stale_crop),
+                        raw_ocr="<01.> Determinar x.",
+                        audit={"downstream_state": {"status": "invalidated", "reason": "page_boxes_changed"}},
+                    ),
+                    StagingProblemRecord(
+                        record_id="crop_good",
+                        crop_id="crop_good",
+                        crop_path=str(good_crop),
+                        raw_ocr="<02.> Halle y.",
+                    ),
+                ]
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            service.normalize_existing_ocr()
+
+            stale = store.get_record("crop_stale")
+            good = store.get_record("crop_good")
+            self.assertIn("normalizacion:Regenera staging", stale.errors[0])
+            self.assertEqual(stale.step_status(PipelineStep.NORMALIZATION), StageStatus.ERROR)
+            self.assertIn("Halle y", good.normalized["enunciado_latex"])
 
     def test_normalize_with_ai_stores_review_draft_without_marking_ready(self) -> None:
         class FakeNormalizerClient:
@@ -805,6 +1389,82 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertEqual(sent["continuations"][0]["record_id"], "crop_002")
             self.assertEqual(len(sent["images"]), 2)
 
+    def test_normalize_with_ai_rejects_explicit_continuation_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            crop = Path(tmp) / "crop_cont.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="GEO", instance_type="s03")
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_cont",
+                    crop_id="crop_cont",
+                    crop_path=str(crop),
+                    raw_ocr="<CONT.> A) FVVF B) FFVF C) FFFF D) FVFV E) FFVF",
+                    normalized={
+                        "continuacion": {
+                            "es_continuacion": True,
+                            "fusionar_con_anterior": True,
+                            "parent_record_id": "crop_prev",
+                        }
+                    },
+                )
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            with self.assertRaisesRegex(ValueError, "continuacion fusionada"):
+                service.normalize_with_ai("crop_cont")
+
+    def test_normalize_with_ai_rejects_parent_fused_continuation_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            parent_crop = Path(tmp) / "parent.png"
+            cont_crop = Path(tmp) / "cont.png"
+            parent_crop.write_bytes(b"png")
+            cont_crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="GEO", instance_type="s03")
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="crop_parent",
+                        crop_id="crop_parent",
+                        crop_path=str(parent_crop),
+                        raw_ocr="<08.> Indique el valor de verdad.",
+                        normalized={"continuaciones_fusionadas": [{"record_id": "crop_cont"}]},
+                    ),
+                    StagingProblemRecord(
+                        record_id="crop_cont",
+                        crop_id="crop_cont",
+                        crop_path=str(cont_crop),
+                        raw_ocr="A) FVVF B) FFVF C) FFFF D) FVFV E) FFVF",
+                    ),
+                ]
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            with self.assertRaisesRegex(ValueError, "continuacion fusionada"):
+                service.normalize_with_ai("crop_cont")
+
+    def test_normalize_with_ai_rejects_invalidated_downstream_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            crop = Path(tmp) / "crop_001.png"
+            crop.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="GEO", instance_type="s03")
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(crop),
+                    raw_ocr="<01.> Determinar x. A) $10$ B) $20$ C) $30$ D) $40$ E) $50$",
+                    audit={"downstream_state": {"status": "invalidated", "reason": "page_boxes_changed"}},
+                )
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            with self.assertRaisesRegex(ValueError, "Regenera staging"):
+                service.normalize_with_ai("crop_001")
+
     def test_trained_ocr_rejects_hf_router_as_dedicated_endpoint(self) -> None:
         try:
             from modulos.instance_factory.pipeline import InstancePdfPipelineService
@@ -908,6 +1568,157 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertFalse(candidate["ready_for_future_promotion"])
             self.assertIn("continuacion:fusionada_con_anterior", candidate["blocking_issues"])
             self.assertEqual(candidate["write_operations"], [])
+
+    def test_promotion_candidate_blocks_raw_cont_marker_without_structured_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = InstancePipelineContext(
+                book_code="GEO",
+                instance_type="s03",
+                pdf_path="E:/Banco/geometria.pdf",
+            )
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            crop = Path(tmp) / "crop_cont.png"
+            crop.write_bytes(b"png")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_cont",
+                    crop_id="crop_cont",
+                    crop_path=str(crop),
+                    status=StageStatus.READY,
+                    source={"page_number": 2, "bbox_px": [10, 20, 210, 320]},
+                    raw_ocr="[CONT.] A) FVVF B) FFVF C) FFFF D) FVFV E) FFVF",
+                    normalized={
+                        "status": "listo",
+                        "latex_rendered_item": r"\item[\textbf{8.}] A) FVVF B) FFVF",
+                    },
+                    models={"ocr": "test", "normalizer": "human"},
+                    confidence={"ocr": 0.95},
+                    review={"review_status": StageStatus.READY},
+                )
+            )
+
+            candidate = store.build_promotion_candidate("crop_cont")
+
+            self.assertFalse(candidate["ready_for_future_promotion"])
+            self.assertIn("continuacion:fusionada_con_anterior", candidate["blocking_issues"])
+
+    def test_promotion_candidate_blocks_invalidated_downstream_even_if_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = InstancePipelineContext(
+                book_code="GEO",
+                instance_type="s03",
+                pdf_path="E:/Banco/geometria.pdf",
+            )
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            crop = Path(tmp) / "crop.png"
+            crop.write_bytes(b"png")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(crop),
+                    status=StageStatus.READY,
+                    source={"page_number": 2, "bbox_px": [10, 20, 210, 320]},
+                    raw_ocr="<08.> Indique el valor de verdad.",
+                    normalized={
+                        "status": "listo",
+                        "latex_rendered_item": r"\item[\textbf{8.}] [[curso=Geometria]] [[tema=angulos]] Texto.",
+                    },
+                    models={"ocr": "test", "normalizer": "human"},
+                    confidence={"ocr": 0.95},
+                    review={"review_status": StageStatus.READY},
+                    audit={"downstream_state": {"status": "invalidated", "reason": "page_boxes_changed"}},
+                )
+            )
+
+            candidate = store.build_promotion_candidate("crop_001")
+
+            self.assertFalse(candidate["ready_for_future_promotion"])
+            self.assertIn("source_stale:page_boxes_changed", candidate["blocking_issues"])
+
+    def test_update_review_rejects_invalidated_downstream_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = InstancePipelineContext(
+                book_code="GEO",
+                instance_type="s03",
+                pdf_path="E:/Banco/geometria.pdf",
+            )
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            crop = Path(tmp) / "crop.png"
+            crop.write_bytes(b"png")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(crop),
+                    status=StageStatus.NEEDS_REVIEW,
+                    raw_ocr="<08.> Indique el valor de verdad.",
+                    audit={"downstream_state": {"status": "invalidated", "reason": "page_boxes_changed"}},
+                )
+            )
+
+            with self.assertRaisesRegex(ValueError, "Regenera staging"):
+                store.update_review(
+                    "crop_001",
+                    {
+                        "status": "listo",
+                        "latex_rendered_item": r"\item[\textbf{8.}] [[curso=Geometria]] [[tema=angulos]] Texto.",
+                    },
+                    mark_ready=True,
+                )
+
+    def test_promotion_candidate_blocks_parent_fused_continuation_without_raw_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = InstancePipelineContext(
+                book_code="GEO",
+                instance_type="s03",
+                pdf_path="E:/Banco/geometria.pdf",
+            )
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            parent_crop = Path(tmp) / "parent.png"
+            cont_crop = Path(tmp) / "cont.png"
+            parent_crop.write_bytes(b"png")
+            cont_crop.write_bytes(b"png")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="crop_parent",
+                        crop_id="crop_parent",
+                        crop_path=str(parent_crop),
+                        status=StageStatus.READY,
+                        source={"page_number": 2, "bbox_px": [10, 20, 210, 320]},
+                        raw_ocr="<08.> Indique el valor de verdad.",
+                        normalized={
+                            "status": "listo",
+                            "latex_rendered_item": r"\item[\textbf{8.}] Indique...",
+                            "continuaciones_fusionadas": [{"record_id": "crop_cont"}],
+                        },
+                        models={"ocr": "test", "normalizer": "human"},
+                        confidence={"ocr": 0.95},
+                        review={"review_status": StageStatus.READY},
+                    ),
+                    StagingProblemRecord(
+                        record_id="crop_cont",
+                        crop_id="crop_cont",
+                        crop_path=str(cont_crop),
+                        status=StageStatus.READY,
+                        source={"page_number": 2, "bbox_px": [220, 20, 410, 120]},
+                        raw_ocr="A) FVVF B) FFVF C) FFFF D) FVFV E) FFVF",
+                        normalized={
+                            "status": "listo",
+                            "latex_rendered_item": r"\item[\textbf{9.}] A) FVVF B) FFVF",
+                        },
+                        models={"ocr": "test", "normalizer": "human"},
+                        confidence={"ocr": 0.95},
+                        review={"review_status": StageStatus.READY},
+                    ),
+                ]
+            )
+
+            candidate = store.build_promotion_candidate("crop_cont")
+
+            self.assertFalse(candidate["ready_for_future_promotion"])
+            self.assertIn("continuacion:fusionada_con_anterior", candidate["blocking_issues"])
 
     def test_upsert_many_coalesces_duplicate_source_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1495,7 +2306,8 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertEqual(loaded.step_status(PipelineStep.CROPS), StageStatus.READY)
             self.assertEqual(loaded.step_status(PipelineStep.OCR), StageStatus.PENDING)
             self.assertEqual(loaded.step_status(PipelineStep.SEGMENTATION), StageStatus.PENDING)
-            self.assertEqual(loaded.audit["downstream_state"]["status"], "invalidated")
+            self.assertEqual(loaded.audit["downstream_state"]["status"], "active")
+            self.assertEqual(loaded.audit["downstream_state"]["reason"], "crop_source_regenerated_after_change")
             self.assertEqual(loaded.trace["downstream_invalidations"][-1]["reason"], "crop_source_changed")
 
     def test_materialization_relinks_unchanged_bbox_when_new_box_shifts_crop_ids(self) -> None:
@@ -1593,6 +2405,61 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertEqual(relinked.review["final_latex"], "final 2")
             self.assertEqual(relinked.source["bbox_px"], [10, 60, 40, 90])
             self.assertEqual(relinked.trace["source_relinks"][-1]["previous_record_id"], "crop_02")
+
+    def test_materialization_keeps_changed_source_invalidated_when_new_crop_is_missing(self) -> None:
+        try:
+            from modulos.instance_factory.pipeline import InstancePdfPipelineService
+        except Exception as exc:  # pragma: no cover - optional detector/OCR dependencies.
+            self.skipTest(f"pipeline deps unavailable: {exc}")
+
+        class FakeGolden:
+            def __init__(self, root: Path) -> None:
+                self.root = root
+
+            def materialize_problem_crops_for_downstream(self, *_args, **_kwargs):
+                target = self.root / "problem_crops_live"
+                records = target / "records"
+                records.mkdir(parents=True, exist_ok=True)
+                crop_id = "crop_pipeline_001"
+                payload = {
+                    "schema_version": "problem_crop_live_v1",
+                    "crop_id": crop_id,
+                    "source_pdf_path": "E:/Banco/libro.pdf",
+                    "source_page_number": 4,
+                    "bbox_px": [9, 10, 90, 100],
+                    "crop_image_rel": f"images/{crop_id}.png",
+                    "source_record_id": "page_0004",
+                }
+                (records / f"{crop_id}.json").write_text(json.dumps(payload), encoding="utf-8")
+                return target, [crop_id]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_crop = root / "old_crop.png"
+            old_crop.write_bytes(b"old-png")
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s05", pdf_path="E:/Banco/libro.pdf")
+            store = InstanceStagingStore(context, root=root / "staging")
+            record = StagingProblemRecord(
+                record_id="crop_pipeline_001",
+                crop_id="crop_pipeline_001",
+                crop_path=str(old_crop),
+                status=StageStatus.READY,
+                source={"page_number": 4, "source_record_id": "page_0004", "bbox_px": [1, 2, 30, 40]},
+                raw_ocr="OCR viejo",
+                normalized={"numero": "4"},
+            )
+            record.set_step(PipelineStep.CROPS, StageStatus.READY, "listo")
+            record.set_step(PipelineStep.OCR, StageStatus.READY, "listo")
+            store.upsert_record(record)
+            service = InstancePdfPipelineService(context, golden_controller=FakeGolden(root), staging_store=store)
+
+            service.materialize_crops_to_staging(rows=[])
+
+            loaded = store.get_record("crop_pipeline_001")
+            assert loaded is not None
+            self.assertEqual(loaded.step_status(PipelineStep.CROPS), StageStatus.ERROR)
+            self.assertEqual(loaded.audit["downstream_state"]["status"], "invalidated")
+            self.assertEqual(loaded.audit["downstream_state"]["reason"], "crop_source_changed")
 
     def test_materialization_uses_crop_payload_order_not_crop_id_order(self) -> None:
         try:
@@ -1851,6 +2718,9 @@ class InstanceFactoryStagingTests(unittest.TestCase):
 
     def test_page_selection_supports_ranges_and_rejects_invalid_pages(self) -> None:
         self.assertEqual(parse_page_selection("1-3, 5, 7-6", 10), [1, 2, 3, 5, 6, 7])
+        self.assertEqual(parse_page_selection("22-25", 50), [22, 23, 24, 25])
+        self.assertEqual(parse_page_selection("22\u201350", 60), list(range(22, 51)))
+        self.assertEqual(parse_page_selection("50\u201322", 60), list(range(22, 51)))
         with self.assertRaises(ValueError):
             parse_page_selection("1, 12", 10)
 

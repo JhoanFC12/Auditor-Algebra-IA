@@ -312,7 +312,10 @@ class FactoryWebRuntime:
         except PermissionError as exc:
             self._send_error(handler, exc, status=403, code="forbidden")
         except Exception as exc:
-            self._send_error(handler, exc, status=500, code="internal_error")
+            request_id = uuid.uuid4().hex[:12]
+            print(f"[FactoryWebRuntime] internal_error request_id={request_id} {method} {path}")
+            traceback.print_exc()
+            self._send_error(handler, exc, status=500, code="internal_error", request_id=request_id)
 
     def _dispatch_api(
         self,
@@ -699,6 +702,8 @@ class FactoryWebRuntime:
                 "current": 0,
                 "ok": 0,
                 "failed": 0,
+                "phase_errors": 0,
+                "ocr_errors": 0,
                 "active_id": record_ids[0] if record_ids else "",
                 "active_name": "",
                 "phase": "queued",
@@ -1157,6 +1162,8 @@ class FactoryWebRuntime:
                     errors = list(job.get("errors") or [])
                     errors.append({"record_id": record_id, "phase": "segmentation", "message": str(exc)})
                     job["errors"] = errors[-50:]
+                    job["phase_errors"] = int(job.get("phase_errors") or 0) + 1
+                    job["failed"] = int(job.get("failed") or 0) + 1
                     job["current"] = position
                     job["active_position"] = position
                     job["progress_label"] = f"{position}/{total}"
@@ -1240,8 +1247,9 @@ class FactoryWebRuntime:
                     with self._job_lock:
                         job = self._ocr_jobs.get(job_id) or {}
                         errors = list(job.get("errors") or [])
-                        errors.append({"record_id": record_id, "message": str(exc)})
+                        errors.append({"record_id": record_id, "phase": "ocr", "message": str(exc)})
                         job["errors"] = errors[-50:]
+                        job["ocr_errors"] = int(job.get("ocr_errors") or 0) + 1
                         job["failed"] = int(job.get("failed") or 0) + 1
                         job["current"] = position
                         job["active_position"] = position
@@ -2076,16 +2084,21 @@ class FactoryWebRuntime:
         status: int,
         code: str,
         include_traceback: bool = False,
+        request_id: str = "",
     ) -> None:
         message = str(exc).strip("'") or code
         if code == "internal_error" and not include_traceback:
             message = "Error interno de la Fabrica. Revisa el log local para mas detalle."
+            if request_id:
+                message = f"{message} request_id={request_id}"
         payload: dict[str, Any] = {
             "schema_version": "pdf_factory_web_error_v1",
             "error": message,
             "code": code,
             "status": int(status),
         }
+        if request_id:
+            payload["request_id"] = request_id
         if include_traceback:
             payload["traceback"] = traceback.format_exc(limit=8)
         FactoryWebRuntime._send_json(handler, payload, status=status)

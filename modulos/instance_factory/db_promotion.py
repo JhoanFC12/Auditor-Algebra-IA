@@ -10,6 +10,7 @@ from typing import Any
 
 from database.problem_origins import TAG_EXAMEN_RE, ensure_problem_origin_schema, normalize_origin_code
 
+from .continuations import continuation_flags_enabled, has_continuation_marker
 from .models import InstancePipelineContext, StageStatus, StagingProblemRecord, utc_now_text
 from .staging import InstanceStagingStore
 
@@ -137,30 +138,78 @@ def _canonical_image_dir(context: InstancePipelineContext) -> Path:
     return context.staging_root() / "db_images"
 
 
+def _file_sha1(path: Path) -> str:
+    digest = hashlib.sha1()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _same_existing_file(left: Path, right: Path) -> bool:
+    try:
+        if left.resolve() == right.resolve():
+            return True
+    except Exception:
+        pass
+    try:
+        if not left.exists() or not right.exists() or not left.is_file() or not right.is_file():
+            return False
+        if left.stat().st_size != right.stat().st_size:
+            return False
+        return _file_sha1(left) == _file_sha1(right)
+    except Exception:
+        return False
+
+
+def _unique_image_target(target_dir: Path, marker: str, suffix: str, source: Path) -> Path:
+    target = target_dir / f"{marker}{suffix}"
+    try:
+        if not target.exists() or _same_existing_file(source, target):
+            return target
+    except Exception:
+        return target
+
+    try:
+        digest = _file_sha1(source)[:12]
+    except Exception:
+        digest = hashlib.sha1(str(source).encode("utf-8", errors="ignore")).hexdigest()[:12]
+    base = f"{marker}_{digest}".strip("._-")
+    candidate = target_dir / f"{base}{suffix}"
+    if not candidate.exists() or _same_existing_file(source, candidate):
+        return candidate
+    for index in range(2, 1000):
+        candidate = target_dir / f"{base}_{index}{suffix}"
+        if not candidate.exists() or _same_existing_file(source, candidate):
+            return candidate
+    return target_dir / f"{base}_{int(time.time())}{suffix}"
+
+
 def _is_continuation(record: StagingProblemRecord) -> bool:
     normalized = dict(record.normalized or {})
     continuation = normalized.get("continuacion") if isinstance(normalized.get("continuacion"), dict) else {}
     return bool(
-        continuation.get("es_continuacion")
-        or continuation.get("fusionar_con_anterior")
-        or _clean_text(record.raw_ocr).lower().startswith("[cont.")
+        continuation_flags_enabled(continuation)
+        or has_continuation_marker(record.raw_ocr)
+        or has_continuation_marker(normalized.get("latex_rendered_item"))
+        or has_continuation_marker(normalized.get("enunciado_latex"))
     )
 
 
 def _continuation_records(parent: StagingProblemRecord, all_records: list[StagingProblemRecord]) -> list[StagingProblemRecord]:
     normalized = dict(parent.normalized or {})
     fused = normalized.get("continuaciones_fusionadas") if isinstance(normalized.get("continuaciones_fusionadas"), list) else []
-    wanted_ids = {
+    wanted_ids = [
         _clean_text(item.get("record_id"))
         for item in fused
         if isinstance(item, dict) and _clean_text(item.get("record_id"))
-    }
+    ]
     by_id = {_clean_text(row.record_id): row for row in all_records}
     out: list[StagingProblemRecord] = []
     seen: set[str] = set()
 
-    def add(row: StagingProblemRecord | None) -> None:
-        if row is None or not _is_continuation(row):
+    def add(row: StagingProblemRecord | None, *, allow_unmarked: bool = False) -> None:
+        if row is None or (not allow_unmarked and not _is_continuation(row)):
             return
         key = _clean_text(row.record_id)
         if not key or key in seen:
@@ -168,10 +217,16 @@ def _continuation_records(parent: StagingProblemRecord, all_records: list[Stagin
         out.append(row)
         seen.add(key)
 
-    for record_id in sorted(wanted_ids):
-        add(by_id.get(record_id))
+    for record_id in wanted_ids:
+        add(by_id.get(record_id), allow_unmarked=True)
 
-    parent_index = next((index for index, row in enumerate(all_records) if _clean_text(row.record_id) == _clean_text(parent.record_id)), -1)
+    parent_id = _clean_text(parent.record_id)
+    for row in all_records:
+        continuation = row.normalized.get("continuacion") if isinstance(row.normalized.get("continuacion"), dict) else {}
+        if _clean_text(continuation.get("parent_record_id")) == parent_id:
+            add(row, allow_unmarked=True)
+
+    parent_index = next((index for index, row in enumerate(all_records) if _clean_text(row.record_id) == parent_id), -1)
     if parent_index >= 0:
         for row in all_records[parent_index + 1 :]:
             if not _is_continuation(row):
@@ -188,22 +243,31 @@ def _source_image_paths(record: StagingProblemRecord, all_records: list[StagingP
         if value and value not in paths:
             paths.append(value)
 
-    def add_record_images(row: StagingProblemRecord) -> None:
+    rows = [record, *_continuation_records(record, all_records)]
+
+    def add_record_segments(row: StagingProblemRecord) -> None:
         figure = dict(row.figure_segmentation or {})
         segments = figure.get("segments") if isinstance(figure.get("segments"), list) else []
         for segment in segments:
             if not isinstance(segment, dict):
                 continue
             add(segment.get("image_path") or segment.get("file_path") or segment.get("path"))
+
+    for row in rows:
+        add_record_segments(row)
+    if paths:
+        return paths
+
+    def add_record_crop_if_image_tagged(row: StagingProblemRecord) -> None:
+        figure = dict(row.figure_segmentation or {})
         final_latex = _record_final_latex(row)
         normalized = dict(row.normalized or {})
         has_image_tag = "[[Imagen=" in final_latex or bool(normalized.get("tiene_grafico")) or bool(figure.get("segments_total"))
         if has_image_tag and not paths:
             add(row.crop_path)
 
-    add_record_images(record)
-    for continuation in _continuation_records(record, all_records):
-        add_record_images(continuation)
+    for row in rows:
+        add_record_crop_if_image_tagged(row)
     return paths
 
 
@@ -251,9 +315,9 @@ def _image_paths(
         source = Path(source_raw)
         marker = markers[index] if index < len(markers) else f"img-{int(numero_original)}-{index + 1}"
         suffix = source.suffix if source.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"} else ".png"
-        target = target_dir / f"{marker}{suffix}"
         try:
             if source.exists() and source.is_file():
+                target = _unique_image_target(target_dir, marker, suffix, source)
                 try:
                     if source.resolve() != target.resolve():
                         shutil.copy2(str(source), str(target))
@@ -536,6 +600,8 @@ def promote_staging_records_to_db(
     if not target_db:
         raise ValueError("db_name es requerido para subir a BD.")
     selected_ids = [_clean_text(item) for item in list(record_ids or []) if _clean_text(item)]
+    if not dry_run:
+        staging.repair_detected_continuation_links()
     all_records = staging.load_records()
     by_id = {_clean_text(row.record_id): row for row in all_records}
     records = [by_id[item] for item in selected_ids if item in by_id] if selected_ids else all_records

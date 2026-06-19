@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -16,6 +17,7 @@ from modulos.modulo13_laboratorio_pdf_segmentacion.controlador_laboratorio_pdf i
 )
 
 from .model_inventory import build_model_inventory_manifest, resolve_model_defaults
+from .continuations import continuation_flags_enabled, has_continuation_marker
 from .models import (
     PIPELINE_CONTRACT_VERSION,
     InstancePipelineContext,
@@ -942,6 +944,7 @@ class InstancePdfPipelineService:
             existing = self.staging.get_record(crop_id)
             source_match = existing_by_dependency.get(self._source_dependency_signature(new_source))
             relinked_from = ""
+            source_changed = False
             if existing is None and source_match is not None and str(source_match.record_id or "") != str(crop_id or ""):
                 relinked_from = str(source_match.record_id or "")
                 payload = copy.deepcopy(source_match.to_dict())
@@ -966,6 +969,7 @@ class InstancePdfPipelineService:
                         "current_bbox_px": new_source.get("bbox_px") or [],
                     },
                 )
+                source_changed = True
             elif relinked_from:
                 relinks = list(dict(record.trace or {}).get("source_relinks") or [])
                 relinks.append(
@@ -1006,6 +1010,8 @@ class InstancePdfPipelineService:
                 "crop disponible en staging/live" if crop_path.exists() else "crop no encontrado",
                 crop_path=str(crop_path),
             )
+            if source_changed and crop_path.exists():
+                self._mark_record_downstream_active(record, reason="crop_source_regenerated_after_change")
             if not record.raw_ocr:
                 record.set_step(PipelineStep.OCR, StageStatus.PENDING, "pendiente de OCR")
             if not record.figure_segmentation:
@@ -1492,6 +1498,7 @@ class InstancePdfPipelineService:
         record_id: str = "",
         record_ids: list[str] | None = None,
     ) -> list[StagingProblemRecord]:
+        self.staging.repair_detected_continuation_links()
         all_records = self.staging.load_records()
         records = list(all_records)
         selected_record_ids = [str(item or "").strip() for item in list(record_ids or []) if str(item or "").strip()]
@@ -1506,9 +1513,30 @@ class InstancePdfPipelineService:
             records = [record for record in records if str(record.record_id or "") == selected_record_id]
             if not records:
                 raise KeyError(selected_record_id)
+        single_record_requested = bool(selected_record_id and not selected_record_ids) or len(selected_record_ids) == 1
         out: list[StagingProblemRecord] = []
         for record in records:
-            record.errors = []
+            invalidated_reason = self._invalidated_downstream_reason(record)
+            if invalidated_reason:
+                message = f"Regenera staging antes de preparar revision: {invalidated_reason}."
+                if single_record_requested:
+                    raise ValueError(message)
+                record.errors = [
+                    str(item)
+                    for item in list(record.errors or [])
+                    if not str(item).startswith("normalizacion:")
+                ]
+                record.errors.append(f"normalizacion:{message}")
+                record.set_step(PipelineStep.NORMALIZATION, StageStatus.ERROR, f"normalizacion: {message}")
+                record.sync_status_from_steps()
+                record.touch()
+                out.append(record)
+                continue
+            record.errors = [
+                str(item)
+                for item in list(record.errors or [])
+                if not str(item).startswith("normalizacion:")
+            ]
             try:
                 record.models = {**record.models, **self._model_snapshot()}
                 if str(record.raw_ocr or "").strip():
@@ -1541,13 +1569,19 @@ class InstancePdfPipelineService:
         record = self.staging.get_record(record_id)
         if record is None:
             raise KeyError(record_id)
-        if not str(record.raw_ocr or "").strip():
-            raise ValueError("Este registro no tiene OCR crudo para normalizar con IA.")
 
         all_records = self.staging.load_records()
         current = next((row for row in all_records if str(row.record_id or "") == record_id), None)
         if current is not None:
             record = current
+        continuation_ids = self._continuation_record_ids(all_records)
+        if self._is_continuation_record(record) or record_id in continuation_ids or str(record.crop_id or "").strip() in continuation_ids:
+            raise ValueError("Este registro es una continuacion fusionada; normaliza el problema principal.")
+        reason = self._invalidated_downstream_reason(record)
+        if reason:
+            raise ValueError(f"Regenera staging antes de normalizar este registro: {reason}.")
+        if not str(record.raw_ocr or "").strip():
+            raise ValueError("Este registro no tiene OCR crudo para normalizar con IA.")
         continuations = self._continuation_records_for_parent(record, all_records)
         base_normalized = dict(record.normalized or {})
         if not base_normalized:
@@ -1612,13 +1646,22 @@ class InstancePdfPipelineService:
         record = self.staging.get_record(record_id)
         if record is None:
             raise KeyError(record_id)
+        invalidated_reason = self._invalidated_downstream_reason(record)
+        if invalidated_reason:
+            raise ValueError(f"Regenera staging antes de editar OCR crudo: {invalidated_reason}.")
         previous_raw_ocr = str(record.raw_ocr or "")
         next_raw_ocr = str(raw_ocr or "")
         same_text = _canonical_human_review_text(previous_raw_ocr) == _canonical_human_review_text(next_raw_ocr)
         previous_review = dict(dict(record.trace or {}).get("last_raw_ocr_review") or {})
         if same_text and previous_review:
+            self._write_raw_artifacts(record)
+            record.touch()
+            self.staging.upsert_record(record)
             return record
         if same_text and not force_review:
+            self._write_raw_artifacts(record)
+            record.touch()
+            self.staging.upsert_record(record)
             return record
         record.raw_ocr = next_raw_ocr
         record.structured_ocr = {}
@@ -1681,6 +1724,9 @@ class InstancePdfPipelineService:
         record = self.staging.get_record(record_id)
         if record is None:
             raise KeyError(record_id)
+        invalidated_reason = self._invalidated_downstream_reason(record)
+        if invalidated_reason:
+            raise ValueError(f"Regenera staging antes de guardar segmentos graficos: {invalidated_reason}.")
         crop_path = Path(record.crop_path)
         if not crop_path.exists():
             raise FileNotFoundError(f"No se encontro el crop: {crop_path}")
@@ -1784,18 +1830,44 @@ class InstancePdfPipelineService:
             return False
         normalized = dict(record.normalized or {})
         continuation = normalized.get("continuacion") if isinstance(normalized.get("continuacion"), dict) else {}
-        raw = str(record.raw_ocr or "").strip()
         return bool(
-            continuation.get("es_continuacion")
-            or continuation.get("fusionar_con_anterior")
-            or raw.lower().startswith("[cont.")
+            continuation_flags_enabled(continuation)
+            or has_continuation_marker(record.raw_ocr)
+            or has_continuation_marker(normalized.get("latex_rendered_item"))
+            or has_continuation_marker(normalized.get("enunciado_latex"))
         )
 
     @staticmethod
-    def _strip_continuation_marker(value: str) -> str:
-        import re
+    def _has_continuation_marker(value: Any) -> bool:
+        return has_continuation_marker(value)
 
-        return re.sub(r"^\s*\[CONT\.?\]\s*", "", str(value or ""), flags=re.IGNORECASE).strip()
+    @staticmethod
+    def _invalidated_downstream_reason(record: StagingProblemRecord | None) -> str:
+        if record is None:
+            return ""
+        downstream_state = dict(dict(record.audit or {}).get("downstream_state") or {})
+        if downstream_state.get("status") != "invalidated":
+            return ""
+        return str(downstream_state.get("reason") or "source_changed").strip() or "source_changed"
+
+    @staticmethod
+    def _continuation_record_ids(rows: list[StagingProblemRecord]) -> set[str]:
+        ids: set[str] = set()
+        for row in rows:
+            normalized = dict(row.normalized or {})
+            fused = normalized.get("continuaciones_fusionadas") if isinstance(normalized.get("continuaciones_fusionadas"), list) else []
+            for item in fused:
+                if not isinstance(item, dict):
+                    continue
+                for key in ("record_id", "crop_id"):
+                    value = str(item.get(key) or "").strip()
+                    if value:
+                        ids.add(value)
+        return ids
+
+    @staticmethod
+    def _strip_continuation_marker(value: str) -> str:
+        return re.sub(r"^\s*(?:\[CONT\.?\]|<\s*CONT\.?\s*>)\s*", "", str(value or ""), flags=re.IGNORECASE).strip()
 
     def _continuation_text_for_normalization(self, record: StagingProblemRecord) -> str:
         normalized = dict(record.normalized or {})
@@ -1914,8 +1986,34 @@ class InstancePdfPipelineService:
                 "continuations_total": len(continuation_rows),
             },
         }
-        if isinstance(base_normalized.get("continuaciones_fusionadas"), list):
-            draft["continuaciones_fusionadas"] = list(base_normalized.get("continuaciones_fusionadas") or [])
+        fused_rows: list[dict[str, Any]] = []
+        seen_fused: set[str] = set()
+        for item in list(base_normalized.get("continuaciones_fusionadas") or []):
+            if not isinstance(item, dict):
+                continue
+            row_id = str(item.get("record_id") or "").strip()
+            if not row_id or row_id in seen_fused:
+                continue
+            fused_rows.append(dict(item))
+            seen_fused.add(row_id)
+        for row in continuation_rows:
+            row_id = str(row.record_id or "").strip()
+            if not row_id or row_id in seen_fused:
+                continue
+            row_source = dict(row.source or {})
+            fused_rows.append(
+                {
+                    "record_id": row_id,
+                    "crop_id": str(row.crop_id or ""),
+                    "crop_name": Path(str(row.crop_path or "")).name,
+                    "page_number": row_source.get("page_number", row_source.get("source_page_number")),
+                    "bbox_px": row_source.get("bbox_px") if isinstance(row_source.get("bbox_px"), list) else None,
+                    "texto_fusionado": self._continuation_text_for_normalization(row),
+                }
+            )
+            seen_fused.add(row_id)
+        if fused_rows:
+            draft["continuaciones_fusionadas"] = fused_rows
         return draft
 
     def _normalize_from_pipeline_record(self, record: StagingProblemRecord, report: dict[str, Any]) -> dict[str, Any]:
