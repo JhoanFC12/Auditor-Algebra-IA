@@ -51,6 +51,7 @@ except ModuleNotFoundError as exc:
         libro_id: int
         tipo: str
         total_esperado: int = 0
+        titulo_practica: str = ""
         session_path: str = ""
         soluciones_dir: str = ""
         notas: str = ""
@@ -289,10 +290,12 @@ class LibraryWebRuntime:
                 db_name = self._first(query, "db_name", self.default_db_name)
                 root = self._first(query, "root", "")
                 self.word_service.controller = self._word_controller()
+                self.word_service.practice_controller = self._word_practice_controller(db_name)
                 return self.word_service.list_sessions(db_name=db_name, root=root)
             if method == "GET" and path == "/api/word/problems":
                 db_name = self._first(query, "db_name", self.default_db_name)
                 self.word_service.controller = self._word_controller()
+                self.word_service.practice_controller = self._word_practice_controller(db_name)
                 return self.word_service.list_db_problems(
                     db_name=db_name,
                     curso=self._first(query, "curso", ""),
@@ -300,6 +303,7 @@ class LibraryWebRuntime:
                     subtema_id=self._optional_int(self._first(query, "subtema_id", "")),
                     autor=self._first(query, "autor", ""),
                     editorial=self._first(query, "editorial", ""),
+                    libro=self._first(query, "libro", ""),
                     estado=self._first(query, "estado", "Todos") or "Todos",
                     clave=self._first(query, "clave", "Todos") or "Todos",
                     limit=self._bounded_int(self._first(query, "limit", "100"), "limit", minimum=1, maximum=500),
@@ -315,8 +319,40 @@ class LibraryWebRuntime:
                     template=str(payload.get("template") or ""),
                     style=str(payload.get("style") or "Estilo_plantilla"),
                 )
+            if method == "POST" and path == "/api/word/convert-instance":
+                self.word_service.controller = self._word_controller()
+                self.word_service.practice_controller = self._word_practice_controller(str(payload.get("db_name") or self.default_db_name))
+                return self.word_service.convert_db_instance(
+                    db_name=str(payload.get("db_name") or self.default_db_name),
+                    libro_codigo=self._required_str(payload, "libro_codigo"),
+                    codigo_instancia=self._required_str(payload, "codigo_instancia"),
+                    session_path=str(payload.get("session_path") or ""),
+                    output_docx=str(payload.get("output_docx") or ""),
+                    title=str(payload.get("title") or ""),
+                    repo=str(payload.get("repo") or ""),
+                    python=str(payload.get("python") or ""),
+                    template=str(payload.get("template") or ""),
+                    style=str(payload.get("style") or "Estilo_plantilla"),
+                )
+            if method == "POST" and path == "/api/word/convert-instances":
+                self.word_service.controller = self._word_controller()
+                self.word_service.practice_controller = self._word_practice_controller(str(payload.get("db_name") or self.default_db_name))
+                instances = payload.get("instances")
+                if not isinstance(instances, list):
+                    raise ValueError("instances debe ser una lista.")
+                return self.word_service.convert_db_instances_combined(
+                    db_name=str(payload.get("db_name") or self.default_db_name),
+                    instances=instances,
+                    output_docx=str(payload.get("output_docx") or ""),
+                    title=str(payload.get("title") or ""),
+                    repo=str(payload.get("repo") or ""),
+                    python=str(payload.get("python") or ""),
+                    template=str(payload.get("template") or ""),
+                    style=str(payload.get("style") or "Estilo_plantilla"),
+                )
             if method == "POST" and path == "/api/word/convert-problems":
                 self.word_service.controller = self._word_controller()
+                self.word_service.practice_controller = self._word_practice_controller(str(payload.get("db_name") or self.default_db_name))
                 problem_ids = payload.get("problem_ids")
                 if not isinstance(problem_ids, list):
                     raise ValueError("problem_ids debe ser una lista.")
@@ -370,6 +406,25 @@ class LibraryWebRuntime:
         try:
             return self.library_api.controller
         except Exception:
+            return None
+
+    def _word_practice_controller(self, db_name: str = "") -> Any | None:
+        existing = getattr(self.word_service, "practice_controller", None)
+        if existing is not None and not bool(getattr(existing, "_library_web_runtime_auto", False)):
+            return existing
+        db_text = str(db_name or "").strip().lower()
+        try:
+            from database.connection import DatabaseManager
+            from modulos.modulo6_practicas.controlador_practicas import PracticeBuilderController
+
+            if "local_mirror" in db_text or db_text.endswith("_local"):
+                controller = PracticeBuilderController(DatabaseManager.from_profile("local_mirror", db_name=str(db_name or "").strip() or None))
+            else:
+                controller = PracticeBuilderController()
+            setattr(controller, "_library_web_runtime_auto", True)
+            return controller
+        except Exception as exc:
+            print(f"[LibraryWebRuntime] word_practice_controller_error db={db_name}: {exc}")
             return None
 
     def _dispatch_factory_api(
@@ -838,6 +893,7 @@ class LibraryWebRuntime:
         return {
             "libro_id": int(data.get("libro_id") or 0),
             "tipo": str(data.get("tipo") or ""),
+            "titulo_practica": str(data.get("titulo_practica") or data.get("practice_title") or ""),
             "total_esperado": int(data.get("total_esperado") or 0),
             "session_path": str(data.get("session_path") or ""),
             "soluciones_dir": str(data.get("soluciones_dir") or ""),
@@ -1099,6 +1155,8 @@ class LibraryWebRuntime:
             "/api/word/sessions": {"GET"},
             "/api/word/problems": {"GET"},
             "/api/word/convert": {"POST"},
+            "/api/word/convert-instance": {"POST"},
+            "/api/word/convert-instances": {"POST"},
             "/api/word/convert-problems": {"POST"},
         }
         if path in exact:

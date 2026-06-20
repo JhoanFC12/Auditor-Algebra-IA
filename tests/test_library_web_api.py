@@ -1713,6 +1713,9 @@ class LibraryWebApiTests(unittest.TestCase):
             def listar_editoriales(self, _db_name, **_filters):
                 return ["Editorial"]
 
+            def listar_libros_problemas(self, _db_name, **_filters):
+                return [{"id": "catalog:book:9:Libro Test", "label": "LIB | Libro Test"}]
+
         runtime = LibraryWebRuntime(controller=_FakeController())
         practice = _PracticeController()
         runtime.word_service.practice_controller = practice
@@ -1720,7 +1723,7 @@ class LibraryWebApiTests(unittest.TestCase):
             base = runtime.start()
             payload = _get_json(
                 base,
-                "api/word/problems?db_name=demo_db&curso=Geometria&tema_id=7&subtema_id=8&autor=Autor&editorial=Editorial&estado=Todos&clave=D&limit=25",
+                "api/word/problems?db_name=demo_db&curso=Geometria&tema_id=7&subtema_id=8&autor=Autor&editorial=Editorial&libro=catalog%3Abook%3A9%3ALibro%20Test&estado=Todos&clave=D&limit=25",
             )
 
             self.assertEqual(payload["schema_version"], "latex_word_problem_selection_v1")
@@ -1730,8 +1733,10 @@ class LibraryWebApiTests(unittest.TestCase):
             self.assertEqual(practice.filters["subtema_id"], 8)
             self.assertEqual(practice.filters["autor"], "Autor")
             self.assertEqual(practice.filters["editorial"], "Editorial")
+            self.assertEqual(practice.filters["libro"], "catalog:book:9:Libro Test")
             self.assertEqual(practice.filters["clave"], "D")
             self.assertEqual(payload["options"]["temas"][0]["id"], 7)
+            self.assertEqual(payload["options"]["libros"][0]["label"], "LIB | Libro Test")
         finally:
             runtime.stop()
 
@@ -1794,6 +1799,67 @@ class LibraryWebApiTests(unittest.TestCase):
                 self.assertTrue(output.exists())
                 self.assertTrue((root / "bd_practica__db_images" / "p44_figura.png").exists())
                 self.assertIn("/api/library/file/", payload["word_url"])
+            finally:
+                runtime.stop()
+
+    def test_library_runtime_converts_latex_word_db_instance_via_api(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "Editor_de_practicas"
+            repo.mkdir()
+            (repo / "latex_to_word.py").write_text(
+                "\n".join(
+                    [
+                        "from pathlib import Path",
+                        "import sys",
+                        "out = Path(sys.argv[2])",
+                        "out.write_bytes(b'docx')",
+                        "print(f'Word generado en: {out}')",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            class _PracticeController:
+                def obtener_problemas_por_instancia(self, _db_name, *, libro_codigo, codigo_instancia):
+                    self.libro_codigo = libro_codigo
+                    self.codigo_instancia = codigo_instancia
+                    return [
+                        {
+                            "id": 77,
+                            "numero_original": 4,
+                            "curso": "Geometria",
+                            "tema": "Angulos",
+                            "respuesta_correcta": "B",
+                            "enunciado_latex": r"\item[\textbf{4.}] Calcule $x$.",
+                        }
+                    ]
+
+            output = root / "instancia_bd.docx"
+            practice = _PracticeController()
+            runtime = LibraryWebRuntime(controller=_FakeController())
+            runtime.word_service.practice_controller = practice
+            try:
+                base = runtime.start()
+                payload = _post_json(
+                    base,
+                    "api/word/convert-instance",
+                    {
+                        "db_name": "demo_db",
+                        "libro_codigo": "ALG01",
+                        "codigo_instancia": "S01",
+                        "output_docx": str(output),
+                        "repo": str(repo),
+                        "python": sys.executable,
+                    },
+                )
+
+                self.assertEqual(payload["schema_version"], "latex_word_db_instance_conversion_v1")
+                self.assertEqual(payload["count"], 1)
+                self.assertEqual(practice.libro_codigo, "ALG01")
+                self.assertEqual(practice.codigo_instancia, "S01")
+                self.assertTrue(payload["word_exists"])
+                self.assertTrue(output.exists())
             finally:
                 runtime.stop()
 

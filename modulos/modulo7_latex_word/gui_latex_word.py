@@ -69,6 +69,7 @@ class LatexWordBridgeWindow(tk.Toplevel):
         self.repo_var = tk.StringVar(value=str(self._default_editor_repo()))
         self.python_var = tk.StringVar(value=self._detect_python(str(self._default_editor_repo())))
         self.source_mode_var = tk.StringVar(value="db")
+        self._source_mode_help_var = tk.StringVar(value="")
         self.input_tex_var = tk.StringVar(value="")
         self.session_path_var = tk.StringVar(value="")
         self.session_root_var = tk.StringVar(value=str(self._default_sessions_root()))
@@ -85,6 +86,7 @@ class LatexWordBridgeWindow(tk.Toplevel):
         self.subtema_var = tk.StringVar(value="Todos")
         self.autor_var = tk.StringVar(value="Todos")
         self.editorial_var = tk.StringVar(value="Todos")
+        self.libro_var = tk.StringVar(value="Todos")
         self.estado_var = tk.StringVar(value="Todos")
         self.clave_var = tk.StringVar(value="Todos")
         self.cantidad_var = tk.IntVar(value=20)
@@ -95,6 +97,7 @@ class LatexWordBridgeWindow(tk.Toplevel):
         self._running = False
         self._tema_label_to_id: dict[str, object] = {}
         self._subtema_label_to_id: dict[str, object] = {}
+        self._libro_label_to_id: dict[str, object] = {}
         self._db_source_count_var = tk.StringVar(value="Problemas disponibles: 0")
         self._db_preview_count_var = tk.StringVar(value="Vista previa: 0 | Seleccion actual: 0 | Acumulados: 0")
         self._db_schema_notice_key: tuple[str, str] | None = None
@@ -179,7 +182,7 @@ class LatexWordBridgeWindow(tk.Toplevel):
         ttk.Label(root, text="Modulo 7 - Integracion LaTeX a Word", style="Header.TLabel").pack(anchor="w")
         ttk.Label(
             root,
-            text="Usa tu repo Editor_de_practicas sin duplicar codigo.",
+            text="Dos caminos claros: practica por filtros de BD o conversion por biblioteca de sesiones.",
             style="SubHeader.TLabel",
         ).pack(anchor="w", pady=(4, 12))
 
@@ -210,40 +213,51 @@ class LatexWordBridgeWindow(tk.Toplevel):
         source.grid(row=0, column=0, columnspan=3, sticky="ew", padx=8, pady=(8, 8))
         source.columnconfigure(0, weight=1)
         source.columnconfigure(1, weight=1)
-        ttk.Label(source, text="Elige una fuente de conversion", style="Section.TLabel").grid(
-            row=0, column=0, columnspan=2, sticky="w", pady=(0, 8)
+        ttk.Label(source, text="Modo de trabajo", style="Section.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 8)
         )
-        db_card = ttk.Frame(source, style="Card.TFrame", padding=12)
-        db_card.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
-        ttk.Label(db_card, text="Seleccionador de problemas", style="Section.TLabel").pack(anchor="w")
         ttk.Label(
-            db_card,
-            text="Busca, filtra, acumula y ordena problemas desde la base de datos en una ventana dedicada.",
+            source,
+            text="Elige si vas a crear una practica filtrando problemas o convertir una instancia ya trabajada.",
             style="Muted.TLabel",
-            wraplength=420,
-        ).pack(anchor="w", pady=(4, 10))
+        ).grid(row=0, column=1, sticky="e", pady=(0, 8))
+
+        mode_box = ttk.Frame(source, style="Card.TFrame", padding=10)
+        mode_box.grid(row=1, column=0, columnspan=2, sticky="ew")
+        mode_box.columnconfigure(2, weight=1)
+        ttk.Radiobutton(
+            mode_box,
+            text="Seleccion por filtros",
+            value="db",
+            variable=self.source_mode_var,
+            command=self._on_source_mode_change,
+        ).grid(row=0, column=0, sticky="w", padx=(0, 18))
+        ttk.Radiobutton(
+            mode_box,
+            text="Instancias / sesiones",
+            value="session",
+            variable=self.source_mode_var,
+            command=self._on_source_mode_change,
+        ).grid(row=0, column=1, sticky="w", padx=(0, 18))
+        ttk.Label(
+            mode_box,
+            textvariable=self._source_mode_help_var,
+            style="Muted.TLabel",
+        ).grid(row=0, column=2, sticky="w")
+        mode_actions = ttk.Frame(mode_box)
+        mode_actions.grid(row=0, column=3, sticky="e")
         ttk.Button(
-            db_card,
+            mode_actions,
             text="Abrir seleccionador",
             command=self._open_db_source_window,
-            style="Accent.TButton",
-        ).pack(anchor="w")
-
-        session_card = ttk.Frame(source, style="Card.TFrame", padding=12)
-        session_card.grid(row=1, column=1, sticky="nsew", padx=(8, 0))
-        ttk.Label(session_card, text="Sesion Transcriptor IA", style="Section.TLabel").pack(anchor="w")
-        ttk.Label(
-            session_card,
-            text="Abre solo la biblioteca visual de sesiones. Click selecciona; doble click abre Word exportado.",
-            style="Muted.TLabel",
-            wraplength=420,
-        ).pack(anchor="w", pady=(4, 10))
+            style="Ghost.TButton",
+        ).pack(side="left")
         ttk.Button(
-            session_card,
-            text="Abrir biblioteca de sesiones",
+            mode_actions,
+            text="Abrir instancias",
             command=self._open_session_source_window,
-            style="Accent.TButton",
-        ).pack(anchor="w")
+            style="Ghost.TButton",
+        ).pack(side="left", padx=(8, 0))
 
         self.tex_frame = ttk.Frame(quick)
         self.tex_frame.grid(row=1, column=0, columnspan=3, sticky="ew", padx=0, pady=(4, 0))
@@ -293,25 +307,30 @@ class LatexWordBridgeWindow(tk.Toplevel):
         self.combo_editorial.grid(row=3, column=3, sticky="ew", padx=(0, 8), pady=(0, 8))
         self.combo_editorial.bind("<<ComboboxSelected>>", lambda _e: self._on_editorial_change())
 
+        ttk.Label(self.db_frame, text="Libro / obra").grid(row=4, column=0, sticky="w", padx=8, pady=(0, 8))
+        self.combo_libro = ttk.Combobox(self.db_frame, textvariable=self.libro_var, values=["Todos"])
+        self.combo_libro.grid(row=4, column=1, sticky="ew", padx=8, pady=(0, 8))
+        self.combo_libro.bind("<<ComboboxSelected>>", lambda _e: self._on_libro_change())
+
         ttk.Checkbutton(self.db_frame, text="Seleccion aleatoria (desmarcar = orden por numero)", variable=self.aleatorio_var).grid(
-            row=4, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 8)
+            row=5, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 8)
         )
-        ttk.Label(self.db_frame, text="Clave").grid(row=4, column=2, sticky="w", padx=8, pady=(0, 8))
+        ttk.Label(self.db_frame, text="Clave").grid(row=5, column=2, sticky="w", padx=8, pady=(0, 8))
         ttk.Combobox(
             self.db_frame,
             textvariable=self.clave_var,
             state="readonly",
             values=["Todos", "Con clave", "Sin clave", "Abiertos"],
-        ).grid(row=4, column=3, sticky="ew", padx=(0, 8), pady=(0, 8))
+        ).grid(row=5, column=3, sticky="ew", padx=(0, 8), pady=(0, 8))
 
-        ttk.Label(self.db_frame, text="Titulo del lote").grid(row=5, column=0, sticky="w", padx=8, pady=(0, 8))
+        ttk.Label(self.db_frame, text="Titulo del lote").grid(row=6, column=0, sticky="w", padx=8, pady=(0, 8))
         ttk.Entry(self.db_frame, textvariable=self.titulo_var).grid(
-            row=5, column=1, columnspan=3, sticky="ew", padx=(8, 8), pady=(0, 8)
+            row=6, column=1, columnspan=3, sticky="ew", padx=(8, 8), pady=(0, 8)
         )
 
-        ttk.Label(self.db_frame, text="Estructura").grid(row=6, column=0, sticky="nw", padx=8, pady=(0, 8))
+        ttk.Label(self.db_frame, text="Estructura").grid(row=7, column=0, sticky="nw", padx=8, pady=(0, 8))
         structure_box = ttk.Frame(self.db_frame)
-        structure_box.grid(row=6, column=1, columnspan=3, sticky="ew", padx=(8, 8), pady=(0, 8))
+        structure_box.grid(row=7, column=1, columnspan=3, sticky="ew", padx=(8, 8), pady=(0, 8))
         self.txt_practice_structure = tk.Text(
             structure_box,
             height=4,
@@ -338,13 +357,13 @@ class LatexWordBridgeWindow(tk.Toplevel):
             self.db_frame,
             text="Agregar hoja final de clave",
             variable=self.incluir_clave_final_var,
-        ).grid(row=7, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 8))
+        ).grid(row=8, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 8))
         ttk.Label(self.db_frame, textvariable=self._db_source_count_var).grid(
-            row=7, column=2, columnspan=2, sticky="e", padx=(8, 8), pady=(0, 8)
+            row=8, column=2, columnspan=2, sticky="e", padx=(8, 8), pady=(0, 8)
         )
 
         preview_actions = ttk.Frame(self.db_frame)
-        preview_actions.grid(row=8, column=0, columnspan=4, sticky="ew", padx=8, pady=(4, 8))
+        preview_actions.grid(row=9, column=0, columnspan=4, sticky="ew", padx=8, pady=(4, 8))
         ttk.Button(
             preview_actions,
             text="Abrir visualizador",
@@ -1998,19 +2017,24 @@ class LatexWordBridgeWindow(tk.Toplevel):
         self.combo_editorial_source.grid(row=3, column=3, sticky="ew", pady=6)
         self.combo_editorial_source.bind("<<ComboboxSelected>>", lambda _e: self._on_db_source_editorial_change())
 
+        ttk.Label(filters, text="Libro / obra").grid(row=4, column=0, sticky="w", pady=6)
+        self.combo_libro_source = ttk.Combobox(filters, textvariable=self.libro_var, values=self._combo_values(getattr(self, "combo_libro", None)))
+        self.combo_libro_source.grid(row=4, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=6)
+        self.combo_libro_source.bind("<<ComboboxSelected>>", lambda _e: self._on_db_source_libro_change())
+
         ttk.Checkbutton(filters, text="Seleccion aleatoria (desmarcar = orden por numero)", variable=self.aleatorio_var).grid(
-            row=4, column=0, columnspan=2, sticky="w", pady=6
+            row=5, column=0, columnspan=2, sticky="w", pady=6
         )
-        ttk.Label(filters, text="Clave").grid(row=4, column=2, sticky="w", pady=6)
+        ttk.Label(filters, text="Clave").grid(row=5, column=2, sticky="w", pady=6)
         ttk.Combobox(
             filters,
             textvariable=self.clave_var,
             state="readonly",
             values=["Todos", "Con clave", "Sin clave", "Abiertos"],
-        ).grid(row=4, column=3, sticky="ew", pady=6)
+        ).grid(row=5, column=3, sticky="ew", pady=6)
 
-        ttk.Label(filters, text="Titulo del lote").grid(row=5, column=0, sticky="w", pady=6)
-        ttk.Entry(filters, textvariable=self.titulo_var).grid(row=5, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=6)
+        ttk.Label(filters, text="Titulo del lote").grid(row=6, column=0, sticky="w", pady=6)
+        ttk.Entry(filters, textvariable=self.titulo_var).grid(row=6, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=6)
 
         structure = ttk.LabelFrame(root, text="Titulos y subtitulos", style="Card.TLabelframe")
         structure.pack(fill="both", expand=True, pady=(12, 0))
@@ -2090,6 +2114,7 @@ class LatexWordBridgeWindow(tk.Toplevel):
             ("combo_subtema_source", self.combo_subtema),
             ("combo_autor_source", self.combo_autor),
             ("combo_editorial_source", self.combo_editorial),
+            ("combo_libro_source", getattr(self, "combo_libro", None)),
         )
         for attr, source_combo in mapping:
             combo = getattr(self, attr, None)
@@ -2126,6 +2151,10 @@ class LatexWordBridgeWindow(tk.Toplevel):
 
     def _on_db_source_editorial_change(self) -> None:
         self._on_editorial_change()
+        self._refresh_db_source_window_values()
+
+    def _on_db_source_libro_change(self) -> None:
+        self._on_libro_change()
         self._refresh_db_source_window_values()
 
     def _open_db_preview_from_source_window(self) -> None:
@@ -2255,9 +2284,17 @@ class LatexWordBridgeWindow(tk.Toplevel):
                 pass
         if mode == "db":
             self.status_var.set("Fuente activa: seleccionador de problemas")
+            if hasattr(self, "_source_mode_help_var"):
+                self._source_mode_help_var.set("Filtra por curso, tema, subtema, libro, autor y editorial.")
+            if getattr(self, "db_frame", None) is not None:
+                self.db_frame.grid()
             self._on_db_change()
         elif mode == "session":
             self.status_var.set("Fuente activa: sesion Transcriptor IA")
+            if hasattr(self, "_source_mode_help_var"):
+                self._source_mode_help_var.set("Explora libros e instancias ya convertidas o listas para Word.")
+            if getattr(self, "session_frame", None) is not None:
+                self.session_frame.grid()
             if not self._session_book_map:
                 try:
                     self._refresh_session_catalog()
@@ -2266,6 +2303,10 @@ class LatexWordBridgeWindow(tk.Toplevel):
         else:
             self.source_mode_var.set("db")
             self.status_var.set("Fuente activa: seleccionador de problemas")
+            if hasattr(self, "_source_mode_help_var"):
+                self._source_mode_help_var.set("Filtra por curso, tema, subtema, libro, autor y editorial.")
+            if getattr(self, "db_frame", None) is not None:
+                self.db_frame.grid()
             self._on_db_change()
 
     def _listar_dbs(self) -> None:
@@ -2295,6 +2336,7 @@ class LatexWordBridgeWindow(tk.Toplevel):
             self.combo_subtema["values"] = ["Todos"]
             self.combo_autor["values"] = ["Todos"]
             self.combo_editorial["values"] = ["Todos"]
+            self.combo_libro["values"] = ["Todos"]
             self._db_source_count_var.set("Problemas disponibles: 0")
             return
         try:
@@ -2309,6 +2351,7 @@ class LatexWordBridgeWindow(tk.Toplevel):
             self._cargar_temas()
             self._cargar_autores()
             self._cargar_editoriales()
+            self._cargar_libros()
             self._refresh_db_count()
             self._log_db_schema_notice(db, schema)
         except Exception as exc:
@@ -2319,6 +2362,7 @@ class LatexWordBridgeWindow(tk.Toplevel):
         self._cargar_temas()
         self._cargar_autores()
         self._cargar_editoriales()
+        self._cargar_libros()
         self._refresh_db_count()
 
     def _on_tema_change(self) -> None:
@@ -2326,22 +2370,32 @@ class LatexWordBridgeWindow(tk.Toplevel):
         self._cargar_subtemas()
         self._cargar_autores()
         self._cargar_editoriales()
+        self._cargar_libros()
         self._refresh_db_count()
 
     def _on_subtema_change(self) -> None:
         self._clear_db_preview(silent=True)
         self._cargar_autores()
         self._cargar_editoriales()
+        self._cargar_libros()
         self._refresh_db_count()
 
     def _on_autor_change(self) -> None:
         self._clear_db_preview(silent=True)
         self._cargar_editoriales()
+        self._cargar_libros()
         self._refresh_db_count()
 
     def _on_editorial_change(self) -> None:
         self._clear_db_preview(silent=True)
         self._cargar_autores()
+        self._cargar_libros()
+        self._refresh_db_count()
+
+    def _on_libro_change(self) -> None:
+        self._clear_db_preview(silent=True)
+        self._cargar_autores()
+        self._cargar_editoriales()
         self._refresh_db_count()
 
     def _on_db_preview_config_change(self, *, refresh_count: bool) -> None:
@@ -2419,6 +2473,7 @@ class LatexWordBridgeWindow(tk.Toplevel):
             tema_id=filters.get("tema_id"),
             subtema_id=filters.get("subtema_id"),
             editorial=str(filters.get("editorial") or ""),
+            libro=filters.get("libro"),
         )
         values = ["Todos"] + autores
         self.combo_autor["values"] = values
@@ -2439,6 +2494,7 @@ class LatexWordBridgeWindow(tk.Toplevel):
             tema_id=filters.get("tema_id"),
             subtema_id=filters.get("subtema_id"),
             autor=str(filters.get("autor") or ""),
+            libro=filters.get("libro"),
         )
         values = ["Todos"] + editoriales
         self.combo_editorial["values"] = values
@@ -2448,11 +2504,47 @@ class LatexWordBridgeWindow(tk.Toplevel):
         if not editoriales:
             self.editorial_var.set("Todos")
 
+    def _cargar_libros(self) -> None:
+        db = (self.db_name_var.get() or "").strip()
+        if not db:
+            return
+        filters = self._current_db_filters(include_book=False)
+        list_books = getattr(self.practice_controller, "listar_libros_problemas", None)
+        libros = []
+        if callable(list_books):
+            libros = list_books(
+                db,
+                curso=str(filters.get("curso") or ""),
+                tema_id=filters.get("tema_id"),
+                subtema_id=filters.get("subtema_id"),
+                autor=str(filters.get("autor") or ""),
+                editorial=str(filters.get("editorial") or ""),
+            )
+        self._libro_label_to_id = {}
+        values = ["Todos"]
+        for book in libros or []:
+            label = str(book.get("label") or "").strip()
+            if not label:
+                code = str(book.get("codigo") or "").strip()
+                title = str(book.get("titulo") or "").strip()
+                label = f"{code} | {title}" if code and title else (title or code)
+            if not label:
+                continue
+            values.append(label)
+            self._libro_label_to_id[label] = book.get("id")
+        self.combo_libro["values"] = values
+        if self.libro_var.get() not in values:
+            self.libro_var.set("Todos")
+        self.combo_libro.configure(state="readonly" if len(values) > 1 else "disabled")
+        if len(values) <= 1:
+            self.libro_var.set("Todos")
+
     def _current_db_filters(
         self,
         *,
         include_author: bool = True,
         include_editorial: bool = True,
+        include_book: bool = True,
     ) -> dict[str, object]:
         curso = (self.curso_var.get() or "").strip()
         if curso == "Todos":
@@ -2461,16 +2553,21 @@ class LatexWordBridgeWindow(tk.Toplevel):
             curso = self.practice_controller.normalizar_curso(curso)
         autor = (self.autor_var.get() or "").strip() if include_author else ""
         editorial = (self.editorial_var.get() or "").strip() if include_editorial else ""
+        libro_label = (self.libro_var.get() or "").strip() if include_book else ""
         if autor == "Todos":
             autor = ""
         if editorial == "Todos":
             editorial = ""
+        libro = ""
+        if libro_label and libro_label != "Todos":
+            libro = self._libro_label_to_id.get(libro_label, libro_label)
         return {
             "curso": curso,
             "tema_id": self._tema_label_to_id.get((self.tema_var.get() or "").strip()),
             "subtema_id": self._subtema_label_to_id.get((self.subtema_var.get() or "").strip()),
             "autor": autor,
             "editorial": editorial,
+            "libro": libro,
             "estado": (self.estado_var.get() or "Todos").strip() or "Todos",
             "clave": (self.clave_var.get() or "Todos").strip() or "Todos",
         }
@@ -2489,6 +2586,7 @@ class LatexWordBridgeWindow(tk.Toplevel):
                 subtema_id=filters.get("subtema_id"),
                 autor=str(filters.get("autor") or ""),
                 editorial=str(filters.get("editorial") or ""),
+                libro=filters.get("libro"),
                 estado=str(filters.get("estado") or "Todos"),
                 clave=str(filters.get("clave") or "Todos"),
             )
@@ -2507,6 +2605,7 @@ class LatexWordBridgeWindow(tk.Toplevel):
             filters.get("subtema_id"),
             str(filters.get("autor") or ""),
             str(filters.get("editorial") or ""),
+            str(filters.get("libro") or ""),
             str(filters.get("estado") or "Todos"),
             str(filters.get("clave") or "Todos"),
             bool(self.aleatorio_var.get()),
@@ -3376,6 +3475,7 @@ class LatexWordBridgeWindow(tk.Toplevel):
             subtema_id=filters.get("subtema_id"),
             autor=str(filters.get("autor") or ""),
             editorial=str(filters.get("editorial") or ""),
+            libro=filters.get("libro"),
             estado=str(filters.get("estado") or "Todos"),
             clave=str(filters.get("clave") or "Todos"),
         )
@@ -3391,6 +3491,7 @@ class LatexWordBridgeWindow(tk.Toplevel):
             subtema_id=filters.get("subtema_id"),
             autor=str(filters.get("autor") or ""),
             editorial=str(filters.get("editorial") or ""),
+            libro=filters.get("libro"),
             estado=str(filters.get("estado") or "Todos"),
             clave=str(filters.get("clave") or "Todos"),
             aleatorio=bool(self.aleatorio_var.get()),
@@ -3941,6 +4042,7 @@ class LatexWordBridgeWindow(tk.Toplevel):
                 "subtema_id": filters.get("subtema_id"),
                 "autor": str(filters.get("autor") or ""),
                 "editorial": str(filters.get("editorial") or ""),
+                "libro": str(filters.get("libro") or ""),
                 "estado": str(filters.get("estado") or "Todos"),
                 "clave": str(filters.get("clave") or "Todos"),
                 "aleatorio": bool(self.aleatorio_var.get()),
@@ -3994,14 +4096,17 @@ class LatexWordBridgeWindow(tk.Toplevel):
         self.combo_subtema["values"] = ["Todos"]
         self.combo_autor["values"] = ["Todos"]
         self.combo_editorial["values"] = ["Todos"]
+        self.combo_libro["values"] = ["Todos"]
         self.curso_var.set("Todos")
         self.tema_var.set("Todos")
         self.subtema_var.set("Todos")
         self.autor_var.set("Todos")
         self.editorial_var.set("Todos")
+        self.libro_var.set("Todos")
         self.clave_var.set("Todos")
         self._tema_label_to_id.clear()
         self._subtema_label_to_id.clear()
+        self._libro_label_to_id.clear()
         total = 0
         try:
             conn = self.db_manager.get_connection(db_name)
@@ -4843,6 +4948,7 @@ class LatexWordBridgeWindow(tk.Toplevel):
                 subtema_id=filters.get("subtema_id"),
                 autor=str(filters.get("autor") or ""),
                 editorial=str(filters.get("editorial") or ""),
+                libro=filters.get("libro"),
                 estado=str(filters.get("estado") or "Todos"),
                 clave=str(filters.get("clave") or "Todos"),
             )
@@ -4856,6 +4962,7 @@ class LatexWordBridgeWindow(tk.Toplevel):
                 subtema_id=filters.get("subtema_id"),
                 autor=str(filters.get("autor") or ""),
                 editorial=str(filters.get("editorial") or ""),
+                libro=filters.get("libro"),
                 estado=str(filters.get("estado") or "Todos"),
                 clave=str(filters.get("clave") or "Todos"),
                 aleatorio=bool(self.aleatorio_var.get()),
@@ -4880,6 +4987,7 @@ class LatexWordBridgeWindow(tk.Toplevel):
             f"Fuente BD -> .tex generado sin alterar estructura: {generated} | db={db} | problemas={len(problemas)} | "
             f"curso={curso or 'Todos'} | tema={tema_label or 'Todos'} | subtema={subtema_label or 'Todos'} | "
             f"autor={str(filters.get('autor') or 'Todos') or 'Todos'} | editorial={str(filters.get('editorial') or 'Todos') or 'Todos'} | "
+            f"libro={(self.libro_var.get() or 'Todos')} | "
             f"clave={str(filters.get('clave') or 'Todos') or 'Todos'} | "
             f"seleccion_manual={'si' if using_preview_selection else 'no'}"
         )

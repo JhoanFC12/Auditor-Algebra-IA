@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any, Callable
 
@@ -29,6 +30,10 @@ CLAVE_TAG_RE = re.compile(r"\[\[\s*clave\s*=\s*([^\]\r\n]+?)\s*\]\]", re.IGNOREC
 TEX_ITEM_BLOCK_RE = re.compile(
     r"(?is)(\\item\s*\[\s*\\textbf\{\s*(\d+)\.?\s*\}\s*\].*?)"
     r"(?=(?:\n\s*\\item\s*\[\s*\\textbf\{)|(?:\n\s*\\end\{enumerate\})|\Z)"
+)
+TRANSPARENT_PNG_1X1 = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+    "0000000a49444154789c636000000200015d0b2a0000000049454e44ae426082"
 )
 
 
@@ -113,17 +118,84 @@ class LatexWordService:
     def _list_sessions_from_library(self, db_name: str) -> dict[str, Any]:
         books: list[dict[str, Any]] = []
         rows = self.controller.listar_libros(db_name)
+        db_problem_counts = self._db_instance_problem_counts(db_name)
+        instances_by_book = self._library_instances_by_book(db_name)
         for book in rows:
             book_id = int(book.get("id") or 0)
             if book_id <= 0:
                 continue
             instances: list[dict[str, Any]] = []
-            for instance in self.controller.listar_instancias_libro(db_name, book_id):
+            source_instances = (
+                instances_by_book.get(book_id)
+                if instances_by_book is not None
+                else self.controller.listar_instancias_libro(db_name, book_id)
+            )
+            for instance in source_instances:
+                current_instance = dict(instance or {})
                 session_path = self._resolve_library_instance_session_path(book, instance)
-                instances.append(self._session_instance_payload(book, instance, session_path=session_path))
+                instances.append(
+                    self._session_instance_payload(
+                        book,
+                        current_instance,
+                        session_path=session_path,
+                        db_name=db_name,
+                        db_problem_counts=db_problem_counts,
+                    )
+                )
             if instances:
                 books.append(self._book_payload(book, instances))
         return self._catalog_payload(books, source="library", db_name=db_name, root="")
+
+    def _library_instances_by_book(self, db_name: str) -> dict[int, list[dict[str, Any]]] | None:
+        getter = getattr(self.controller, "listar_instancias_todos", None)
+        if not callable(getter):
+            return None
+        try:
+            raw = getter(str(db_name or "").strip()) or {}
+        except Exception as exc:
+            self.log(f"No se pudo precargar instancias de biblioteca: {exc}")
+            return None
+        result: dict[int, list[dict[str, Any]]] = {}
+        for book_id, rows in dict(raw).items():
+            try:
+                clean_id = int(book_id or 0)
+            except Exception:
+                continue
+            result[clean_id] = [dict(row or {}) for row in (rows or []) if isinstance(row, dict)]
+        return result
+
+    def _library_instance_stats_by_id(self, db_name: str, book_id: int) -> dict[Any, dict[str, Any]]:
+        getter = getattr(self.controller, "obtener_dashboard_libro", None)
+        if not callable(getter):
+            return {}
+        try:
+            dashboard = getter(db_name, int(book_id))
+        except Exception as exc:
+            self.log(f"No se pudo cargar avance BD de instancias libro={book_id}: {exc}")
+            return {}
+        raw_items = []
+        if isinstance(dashboard, dict):
+            raw_items = list(dashboard.get("instancias") or [])
+        elif hasattr(dashboard, "instancias"):
+            raw_items = list(getattr(dashboard, "instancias") or [])
+        result: dict[int, dict[str, Any]] = {}
+        for item in raw_items:
+            if hasattr(item, "__dataclass_fields__"):
+                from dataclasses import asdict
+
+                item = asdict(item)
+            if not isinstance(item, dict):
+                continue
+            instance_id = int(item.get("instancia_id") or item.get("id") or 0)
+            if instance_id > 0:
+                result[instance_id] = dict(item)
+            label = str(item.get("tipo") or item.get("codigo_instancia") or "").strip()
+            if label:
+                result[self._stats_label_key(label)] = dict(item)
+        return result
+
+    def _stats_label_key(self, value: str) -> str:
+        return "tipo:" + re.sub(r"\s+", " ", str(value or "").strip()).casefold()
 
     def _list_sessions_from_root(self, root: Path) -> dict[str, Any]:
         root = self._normalize_path(root)
@@ -175,6 +247,7 @@ class LatexWordService:
             "editorial": str(book.get("editorial") or "").strip(),
             "course": str(book.get("curso") or book.get("subject") or "").strip(),
             "status": str(book.get("estado") or book.get("status") or "").strip(),
+            "pdf_path": self._normalize_existing_text_path(str(book.get("pdf_path") or book.get("pdfPath") or "")),
             "workspace_dir": self._normalize_existing_text_path(str(book.get("workspace_dir") or "")),
             "cover_path": cover_path,
             "cover_url": cover_url,
@@ -192,22 +265,59 @@ class LatexWordService:
         instance: dict[str, Any],
         *,
         session_path: Path | None,
+        db_name: str = "",
+        db_problem_counts: dict[tuple[str, str], int] | None = None,
     ) -> dict[str, Any]:
         label = str(instance.get("tipo") or instance.get("name") or instance.get("label") or "").strip()
         if not label and session_path is not None:
             label = self._build_session_instance_label(session_path)
         session_exists = bool(session_path and session_path.exists())
-        word_path = self.session_word_path_for(session_path)
+        indicators = instance.get("indicators") if isinstance(instance.get("indicators"), dict) else {}
+        db_problem_count = int(
+            instance.get("subidos_bd")
+            or instance.get("problemas_bd")
+            or indicators.get("subidos_bd")
+            or indicators.get("total")
+            or 0
+        )
+        if db_problem_count <= 0:
+            book_code = str(book.get("codigo") or book.get("code") or "").strip()
+            count_key = self._db_instance_count_key(book_code, label)
+            if db_problem_counts is not None:
+                db_problem_count = int(db_problem_counts.get(count_key, 0) or 0)
+            else:
+                db_problem_count = self._count_db_instance_problems(
+                    db_name=db_name,
+                    libro_codigo=book_code,
+                    codigo_instancia=label,
+                )
+        exportable_info = (
+            {"exportable": False, "items": 0, "reason": "se usara BD"}
+            if db_problem_count > 0
+            else (self._session_exportable_info(session_path) if session_exists else {"exportable": False, "items": 0, "reason": "sin sesion"})
+        )
+        word_path = self.library_instance_word_path_for(book=book, instance=instance, label=label, session_path=session_path)
         word_exists = bool(word_path and word_path.exists())
         session_url = self.file_url_resolver(str(session_path)) if session_exists and self.file_url_resolver else ""
         word_url = self.file_url_resolver(str(word_path)) if word_exists and self.file_url_resolver else ""
         key = self._stable_key(str(book.get("codigo") or ""), label, str(session_path or ""))
         return {
             "instance_key": key,
+            "instance_ref": self._stable_key(str(db_name or ""), str(book.get("id") or ""), str(instance.get("id") or ""), str(book.get("codigo") or ""), label),
             "id": int(instance.get("id") or 0),
+            "book_id": int(book.get("id") or 0),
+            "book_code": str(book.get("codigo") or book.get("code") or "").strip(),
+            "instance_code": label,
+            "db_ref_available": bool(str(book.get("codigo") or book.get("code") or "").strip() and label),
             "title": label or f"instancia-{int(instance.get('id') or 0)}",
+            "practice_title": str(instance.get("titulo_practica") or instance.get("practice_title") or "").strip(),
             "session_path": str(session_path or ""),
             "session_exists": session_exists,
+            "session_exportable": bool(exportable_info.get("exportable")),
+            "exportable_items": int(exportable_info.get("items") or 0),
+            "exportable_reason": str(exportable_info.get("reason") or ""),
+            "db_exportable": db_problem_count > 0,
+            "db_problem_count": db_problem_count,
             "session_url": session_url,
             "word_path": str(word_path or ""),
             "word_exists": word_exists,
@@ -215,6 +325,56 @@ class LatexWordService:
             "expected_total": int(instance.get("total_esperado") or 0),
             "notes": str(instance.get("notas") or instance.get("notes") or "").strip(),
         }
+
+    def _count_db_instance_problems(self, *, db_name: str, libro_codigo: str, codigo_instancia: str) -> int:
+        if not str(db_name or "").strip() or not str(libro_codigo or "").strip() or not str(codigo_instancia or "").strip():
+            return 0
+        try:
+            controller = self._practice_controller()
+            counter = getattr(controller, "contar_problemas_por_instancia", None)
+            if callable(counter):
+                return int(
+                    counter(
+                        str(db_name or "").strip(),
+                        libro_codigo=str(libro_codigo or "").strip(),
+                        codigo_instancia=str(codigo_instancia or "").strip(),
+                    )
+                    or 0
+                )
+        except Exception as exc:
+            self.log(f"No se pudo contar problemas BD instancia {libro_codigo}/{codigo_instancia}: {exc}")
+        return 0
+
+    def _db_instance_problem_counts(self, db_name: str) -> dict[tuple[str, str], int] | None:
+        if not str(db_name or "").strip():
+            return None
+        try:
+            controller = self._practice_controller()
+            counter = getattr(controller, "contar_problemas_por_instancia_masivo", None)
+            if not callable(counter):
+                return None
+            raw_counts = counter(str(db_name or "").strip()) or {}
+            result: dict[tuple[str, str], int] = {}
+            for key, value in dict(raw_counts).items():
+                if not isinstance(key, tuple) or len(key) != 2:
+                    continue
+                result[(str(key[0] or "").strip(), str(key[1] or "").strip())] = int(value or 0)
+            return result
+        except Exception as exc:
+            self.log(f"No se pudo precargar conteos BD de instancias: {exc}")
+            return None
+
+    def _db_instance_count_key(self, libro_codigo: str, codigo_instancia: str) -> tuple[str, str]:
+        return (self._normalize_db_count_key(libro_codigo), self._normalize_db_count_key(codigo_instancia))
+
+    def _normalize_db_count_key(self, value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        text = unicodedata.normalize("NFKD", text)
+        text = "".join(ch for ch in text if not unicodedata.combining(ch))
+        text = re.sub(r"\s+", " ", text)
+        return text.casefold()
 
     def _catalog_payload(self, books: list[dict[str, Any]], *, source: str, db_name: str, root: str) -> dict[str, Any]:
         instances = [row for book in books for row in book.get("instances", [])]
@@ -277,6 +437,7 @@ class LatexWordService:
         subtema_id: Any | None = None,
         autor: str = "",
         editorial: str = "",
+        libro: Any | None = None,
         estado: str = "Todos",
         clave: str = "Todos",
         limit: int = 100,
@@ -297,6 +458,7 @@ class LatexWordService:
             "subtema_id": subtema_id,
             "autor": str(autor or "").strip(),
             "editorial": str(editorial or "").strip(),
+            "libro": libro,
             "estado": str(estado or "Todos").strip() or "Todos",
             "clave": str(clave or "Todos").strip() or "Todos",
         }
@@ -371,6 +533,166 @@ class LatexWordService:
             "word_url": self.file_url_resolver(str(produced)) if produced.exists() and self.file_url_resolver else "",
         }
 
+    def convert_db_instance(
+        self,
+        *,
+        db_name: str,
+        libro_codigo: str,
+        codigo_instancia: str,
+        session_path: str = "",
+        output_docx: str = "",
+        title: str = "",
+        repo: str = "",
+        python: str = "",
+        template: str = "",
+        style: str = "Estilo_plantilla",
+    ) -> dict[str, Any]:
+        controller = self._practice_controller()
+        db = str(db_name or "").strip()
+        if not db:
+            raise ValueError("db_name es requerido.")
+        book_code = str(libro_codigo or "").strip()
+        instance_code = str(codigo_instancia or "").strip()
+        if not book_code:
+            raise ValueError("libro_codigo es requerido.")
+        if not instance_code:
+            raise ValueError("codigo_instancia es requerido.")
+        fetch = getattr(controller, "obtener_problemas_por_instancia", None)
+        if not callable(fetch):
+            raise RuntimeError("El controlador de practicas no soporta consulta por instancia.")
+        problems = fetch(db, libro_codigo=book_code, codigo_instancia=instance_code)
+        if not problems:
+            raise RuntimeError(
+                "No se encontraron problemas en BD para esta instancia. "
+                "Verifica que la Fabrica haya subido la instancia a la base local."
+            )
+        output = self._normalize_output_docx_path(
+            output_docx
+            or self._default_instance_output_name(
+                title=title,
+                libro_codigo=book_code,
+                codigo_instancia=instance_code,
+                session_path=session_path,
+                source_pdf_path=self._source_pdf_path_from_problems(problems),
+            )
+        )
+        job = self._build_word_job(
+            output_docx=str(output),
+            repo=repo,
+            python=python,
+            template=template,
+            style=style,
+        )
+        source_title = title or f"{book_code} - {instance_code}"
+        source_text = self._build_scan_source_text_from_db(problems, title=source_title)
+        if not source_text:
+            raise RuntimeError("Los problemas de la instancia no tienen enunciado_latex utilizable.")
+        input_tex = self._write_scan_source_tex(output_docx=job.output_docx, suffix="__instance_source", source_text=source_text)
+        images_dir = self.prepare_images_dir_for_db(problems, output_docx=job.output_docx)
+        produced = self.run_tex_to_word(job=job, input_tex=input_tex, images_dir=images_dir)
+        return {
+            "schema_version": "latex_word_db_instance_conversion_v1",
+            "ok": True,
+            "db_name": db,
+            "libro_codigo": book_code,
+            "codigo_instancia": instance_code,
+            "count": len(problems),
+            "input_tex": str(input_tex),
+            "images_dir": str(images_dir or ""),
+            "output_docx": str(produced),
+            "word_path": str(produced),
+            "word_exists": produced.exists(),
+            "word_url": self.file_url_resolver(str(produced)) if produced.exists() and self.file_url_resolver else "",
+        }
+
+    def convert_db_instances_combined(
+        self,
+        *,
+        db_name: str,
+        instances: list[dict[str, Any]],
+        output_docx: str = "",
+        title: str = "",
+        repo: str = "",
+        python: str = "",
+        template: str = "",
+        style: str = "Estilo_plantilla",
+    ) -> dict[str, Any]:
+        controller = self._practice_controller()
+        db = str(db_name or "").strip()
+        if not db:
+            raise ValueError("db_name es requerido.")
+        clean_instances = self._normalize_combined_instance_specs(instances)
+        if not clean_instances:
+            raise ValueError("Selecciona al menos una instancia.")
+        fetch = getattr(controller, "obtener_problemas_por_instancia", None)
+        if not callable(fetch):
+            raise RuntimeError("El controlador de practicas no soporta consulta por instancia.")
+
+        sections: list[dict[str, Any]] = []
+        all_problems: list[dict[str, Any]] = []
+        first_pdf_path = ""
+        for spec in clean_instances:
+            problems = fetch(db, libro_codigo=spec["libro_codigo"], codigo_instancia=spec["codigo_instancia"])
+            if not problems:
+                sections.append({**spec, "count": 0, "skipped": True, "reason": "sin problemas en BD"})
+                continue
+            section_title = spec["title"] or spec["codigo_instancia"]
+            source_text = self._build_scan_source_text_from_db(problems)
+            if not source_text:
+                sections.append({**spec, "count": len(problems), "skipped": True, "reason": "sin enunciado_latex utilizable"})
+                continue
+            sections.append({**spec, "title": section_title, "count": len(problems), "source_text": source_text})
+            all_problems.extend(problems)
+            if not first_pdf_path:
+                first_pdf_path = self._source_pdf_path_from_problems(problems)
+
+        usable_sections = [row for row in sections if not row.get("skipped") and str(row.get("source_text") or "").strip()]
+        if not usable_sections:
+            raise RuntimeError("No hay instancias con problemas utilizables para crear el Word completo.")
+
+        output = self._normalize_output_docx_path(
+            output_docx
+            or self._default_combined_instances_output_name(
+                title=title,
+                libro_codigo=clean_instances[0]["libro_codigo"],
+                source_pdf_path=first_pdf_path,
+            )
+        )
+        job = self._build_word_job(
+            output_docx=str(output),
+            repo=repo,
+            python=python,
+            template=template,
+            style=style,
+        )
+        source_text = self._build_combined_instances_source_text(usable_sections, title=title)
+        input_tex = self._write_raw_scan_source_tex(output_docx=job.output_docx, suffix="__combined_instances_source", source_text=source_text)
+        images_dir = self.prepare_images_dir_for_db(all_problems, output_docx=job.output_docx)
+        produced = self.run_tex_to_word(job=job, input_tex=input_tex, images_dir=images_dir)
+        return {
+            "schema_version": "latex_word_db_instances_combined_conversion_v1",
+            "ok": True,
+            "db_name": db,
+            "count": sum(int(row.get("count") or 0) for row in usable_sections),
+            "instances": [
+                {
+                    "libro_codigo": row.get("libro_codigo", ""),
+                    "codigo_instancia": row.get("codigo_instancia", ""),
+                    "title": row.get("title", ""),
+                    "count": int(row.get("count") or 0),
+                    "skipped": bool(row.get("skipped")),
+                    "reason": str(row.get("reason") or ""),
+                }
+                for row in sections
+            ],
+            "input_tex": str(input_tex),
+            "images_dir": str(images_dir or ""),
+            "output_docx": str(produced),
+            "word_path": str(produced),
+            "word_exists": produced.exists(),
+            "word_url": self.file_url_resolver(str(produced)) if produced.exists() and self.file_url_resolver else "",
+        }
+
     def _practice_controller(self) -> Any:
         if self.practice_controller is None:
             from modulos.modulo6_practicas.controlador_practicas import PracticeBuilderController
@@ -394,11 +716,21 @@ class LatexWordService:
         tema_id = filters.get("tema_id")
         subtema_id = filters.get("subtema_id")
         autor = str(filters.get("autor") or "").strip()
+        editorial = str(filters.get("editorial") or "").strip()
+        libro = filters.get("libro")
         return {
             "cursos": safe_call("listar_cursos", db_name),
             "temas": safe_call("listar_temas", db_name, curso=curso),
             "subtemas": safe_call("listar_subtemas", db_name, tema_id=tema_id) if tema_id not in (None, "") else [],
-            "autores": safe_call("listar_autores", db_name, curso=curso, tema_id=tema_id, subtema_id=subtema_id),
+            "autores": safe_call(
+                "listar_autores",
+                db_name,
+                curso=curso,
+                tema_id=tema_id,
+                subtema_id=subtema_id,
+                editorial=editorial,
+                libro=libro,
+            ),
             "editoriales": safe_call(
                 "listar_editoriales",
                 db_name,
@@ -406,6 +738,16 @@ class LatexWordService:
                 tema_id=tema_id,
                 subtema_id=subtema_id,
                 autor=autor,
+                libro=libro,
+            ),
+            "libros": safe_call(
+                "listar_libros_problemas",
+                db_name,
+                curso=curso,
+                tema_id=tema_id,
+                subtema_id=subtema_id,
+                autor=autor,
+                editorial=editorial,
             ),
             "estados": ["Todos", "sin_revisar", "consistente", "inconsistente"],
             "claves": ["Todos", "A", "B", "C", "D", "E", "Sin clave"],
@@ -486,6 +828,58 @@ class LatexWordService:
         safe = self._safe_filename(base, fallback="practica_bd")
         return str((Path.cwd() / f"{safe}.docx").resolve())
 
+    def _default_instance_output_name(
+        self,
+        *,
+        title: str = "",
+        libro_codigo: str,
+        codigo_instancia: str,
+        session_path: str = "",
+        source_pdf_path: str = "",
+    ) -> str:
+        safe = self._safe_filename(f"{libro_codigo}__{codigo_instancia}", fallback="instancia")
+        pdf_dir = self._word_output_dir_for_pdf(source_pdf_path)
+        if pdf_dir is not None:
+            return str((pdf_dir / f"{safe}.docx").resolve())
+        if str(session_path or "").strip():
+            session = self._normalize_path(Path(str(session_path or "").strip()))
+            if session.parent.exists():
+                return str((session.parent / f"{safe}.docx").resolve())
+        return str((Path.cwd() / f"{safe}.docx").resolve())
+
+    def _default_combined_instances_output_name(self, *, title: str = "", libro_codigo: str = "", source_pdf_path: str = "") -> str:
+        base = str(title or "").strip() or f"{libro_codigo}__documento_completo"
+        safe = self._safe_filename(base, fallback="documento_completo")
+        pdf_dir = self._word_output_dir_for_pdf(source_pdf_path)
+        if pdf_dir is not None:
+            return str((pdf_dir / f"{safe}.docx").resolve())
+        return str((Path.cwd() / f"{safe}.docx").resolve())
+
+    def _word_output_dir_for_pdf(self, source_pdf_path: str = "") -> Path | None:
+        raw = str(source_pdf_path or "").strip()
+        if not raw:
+            return None
+        try:
+            pdf_path = self._normalize_path(Path(raw).expanduser())
+        except Exception:
+            return None
+        if pdf_path.suffix.lower() != ".pdf":
+            return None
+        parent = pdf_path.parent
+        if not parent:
+            return None
+        return parent / "Word"
+
+    def _source_pdf_path_from_problems(self, problems: list[dict[str, Any]]) -> str:
+        for problem in problems or []:
+            if not isinstance(problem, dict):
+                continue
+            for field in ("pdf_path", "archivo_origen"):
+                raw = str(problem.get(field) or "").strip()
+                if raw and raw.lower().endswith(".pdf"):
+                    return raw
+        return ""
+
     def _safe_filename(self, value: str, *, fallback: str = "archivo", limit: int = 120) -> str:
         clean = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "").strip()).strip("._-")
         return (clean[:limit].strip("._-") or fallback)
@@ -496,6 +890,53 @@ class LatexWordService:
         generated.parent.mkdir(parents=True, exist_ok=True)
         generated.write_text(self._ensure_enumerate_wrapper(str(source_text or "").strip()) + "\n", encoding="utf-8")
         return generated
+
+    def _write_raw_scan_source_tex(self, *, output_docx: Path, suffix: str, source_text: str) -> Path:
+        generated = output_docx.with_suffix(".tex")
+        generated = generated.with_name(f"{generated.stem}{suffix}.tex")
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        generated.write_text(str(source_text or "").strip() + "\n", encoding="utf-8")
+        return generated
+
+    def _normalize_combined_instance_specs(self, instances: list[dict[str, Any]]) -> list[dict[str, str]]:
+        result: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        if not isinstance(instances, list):
+            return result
+        for row in instances:
+            if not isinstance(row, dict):
+                continue
+            book_code = str(row.get("libro_codigo") or row.get("book_code") or "").strip()
+            instance_code = str(row.get("codigo_instancia") or row.get("instance_code") or row.get("title") or "").strip()
+            if not book_code or not instance_code:
+                continue
+            key = (book_code.casefold(), instance_code.casefold())
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(
+                {
+                    "libro_codigo": book_code,
+                    "codigo_instancia": instance_code,
+                    "session_path": str(row.get("session_path") or "").strip(),
+                    "title": str(row.get("title") or instance_code).strip(),
+                }
+            )
+        return result
+
+    def _build_combined_instances_source_text(self, sections: list[dict[str, Any]], *, title: str = "") -> str:
+        blocks: list[str] = []
+        main_title = str(title or "").strip()
+        if main_title:
+            blocks.append(rf"\section*{{{self._latex_escape_heading(main_title)}}}")
+        for section in sections:
+            section_title = str(section.get("title") or section.get("codigo_instancia") or "Instancia").strip()
+            source = str(section.get("source_text") or "").strip()
+            if not source:
+                continue
+            blocks.append(rf"\section*{{TITULO: {self._latex_escape_heading(section_title)}}}")
+            blocks.append(self._ensure_enumerate_wrapper(source))
+        return "\n\n".join(blocks).strip()
 
     def _build_scan_source_text_from_db(
         self,
@@ -608,16 +1049,27 @@ class LatexWordService:
         structured = self._resolve_db_structured_images(problem)
         if structured:
             return [marker for marker, _path in structured]
+        return [safe for safe, _raw in self._db_problem_marker_aliases(problem)]
+
+    def _db_problem_marker_aliases(self, problem: dict[str, Any]) -> list[tuple[str, str]]:
         raw = self._normalize_db_text_separators(str(problem.get("enunciado_latex") or "").strip())
-        markers: list[str] = []
+        markers: list[tuple[str, str]] = []
         seen: set[str] = set()
         for match in IMAGE_MARKER_RE.finditer(raw):
             marker = str(match.group(1) or "").strip()
             key = marker.lower()
             if marker and key not in seen:
                 seen.add(key)
-                markers.append(marker)
+                markers.append((self._safe_db_marker_name(problem, marker), marker))
         return markers
+
+    def _safe_db_marker_name(self, problem: dict[str, Any], marker: str) -> str:
+        clean = self._safe_filename(str(marker or "").strip(), fallback="img", limit=72)
+        original = str(marker or "").strip()
+        if clean == original and len(clean) <= 80:
+            return clean
+        digest = hashlib.sha1(original.encode("utf-8", errors="ignore")).hexdigest()[:10]
+        return self._safe_filename(f"{self._db_marker_prefix(problem)}_{clean}_{digest}", fallback=f"img_{digest}", limit=92)
 
     def _structured_db_image_paths(self, problem: dict[str, Any]) -> list[str]:
         raw_images = problem.get("imagenes", [])
@@ -652,10 +1104,16 @@ class LatexWordService:
 
     def _db_structured_marker_name(self, problem: dict[str, Any], raw_path: str, counts: dict[str, int]) -> str:
         raw_marker = Path(str(raw_path or "")).stem.strip() or "img"
-        base = self._safe_filename(f"{self._db_marker_prefix(problem)}_{raw_marker}", fallback="img")
+        raw_base = f"{self._db_marker_prefix(problem)}_{raw_marker}"
+        clean_base = self._safe_filename(raw_base, fallback="img", limit=92)
+        if clean_base == raw_base and len(clean_base) <= 80:
+            base = clean_base
+        else:
+            digest = hashlib.sha1(raw_base.encode("utf-8", errors="ignore")).hexdigest()[:10]
+            base = self._safe_filename(f"{raw_base}_{digest}", fallback="img", limit=92)
         key = base.lower()
         counts[key] = counts.get(key, 0) + 1
-        return self._safe_filename(f"{base}_{counts[key]}", fallback="img") if counts[key] > 1 else base
+        return self._safe_filename(f"{base}_{counts[key]}", fallback="img", limit=92) if counts[key] > 1 else base
 
     def _resolve_db_structured_images(self, problem: dict[str, Any]) -> list[tuple[str, Path]]:
         entries: list[tuple[str, Path]] = []
@@ -719,6 +1177,10 @@ class LatexWordService:
         marker = str(marker_name or "").strip()
         if not marker:
             return []
+        lookup_markers = [marker]
+        for safe_marker, raw_marker in self._db_problem_marker_aliases(problem):
+            if safe_marker.lower() == marker.lower() and raw_marker.lower() != marker.lower():
+                lookup_markers.append(raw_marker)
         for structured_marker, structured_path in self._resolve_db_structured_images(problem):
             if structured_marker.lower() == marker.lower():
                 return [structured_path]
@@ -732,14 +1194,15 @@ class LatexWordService:
             except Exception:
                 continue
             for suffix in suffixes:
-                candidate = directory / f"{marker}{suffix}"
-                key = str(candidate).lower()
-                try:
-                    if key not in seen and candidate.exists() and candidate.is_file():
-                        seen.add(key)
-                        matches.append(self._normalize_path(candidate))
-                except Exception:
-                    continue
+                for lookup_marker in lookup_markers:
+                    candidate = directory / f"{lookup_marker}{suffix}"
+                    key = str(candidate).lower()
+                    try:
+                        if key not in seen and candidate.exists() and candidate.is_file():
+                            seen.add(key)
+                            matches.append(self._normalize_path(candidate))
+                    except Exception:
+                        continue
             if matches:
                 return matches
         return matches
@@ -757,6 +1220,9 @@ class LatexWordService:
                 paths = self._resolve_db_marker_paths(marker, problem)
                 if not paths:
                     self.log(f"BD Word: no se resolvio imagen {marker} para problema {problem.get('id')}")
+                    placeholder = self._write_missing_db_image_placeholder(images_dir, marker)
+                    if placeholder is not None:
+                        copied += 1
                     continue
                 source = paths[0]
                 target = images_dir / f"{marker}{source.suffix or '.png'}"
@@ -770,6 +1236,21 @@ class LatexWordService:
         if copied > 0:
             self.log(f"BD Word: se materializaron {copied} imagen(es) en {images_dir}")
         return images_dir if any(images_dir.iterdir()) else None
+
+    def _write_missing_db_image_placeholder(self, images_dir: Path, marker: str) -> Path | None:
+        clean_marker = str(marker or "").strip()
+        if not clean_marker:
+            return None
+        target = images_dir / f"{clean_marker}.png"
+        if target.exists():
+            return target
+        try:
+            target.write_bytes(TRANSPARENT_PNG_1X1)
+            self.log(f"BD Word: placeholder creado para imagen faltante {clean_marker}: {target}")
+            return target
+        except OSError as exc:
+            self.log(f"BD Word: no se pudo crear placeholder para {clean_marker}: {exc}")
+            return None
 
     def _normalize_state_tag(self, value: str) -> str:
         state = str(value or "").strip().lower()
@@ -905,7 +1386,10 @@ class LatexWordService:
         payload = self._load_session_payload(session_path)
         source_text = self._build_scan_source_text_from_session(payload)
         if not source_text:
-            raise RuntimeError(f"La sesion no contiene items exportables: {session_path}")
+            raise ValueError(
+                "La instancia tiene sesion, pero todavia no tiene formato final exportable. "
+                "Primero termina Revision/BD final o guarda la salida LaTeX final."
+            )
         generated = output_docx.with_name(f"{output_docx.with_suffix('').name}__session_source.tex")
         generated.parent.mkdir(parents=True, exist_ok=True)
         generated.write_text(self._ensure_enumerate_wrapper(source_text) + "\n", encoding="utf-8")
@@ -938,21 +1422,55 @@ class LatexWordService:
             cmd.extend(["--template", str(job.template)])
         if images_dir and images_dir.exists():
             cmd.extend(["--images-dir", str(images_dir)])
-        proc = subprocess.run(
-            cmd,
-            cwd=str(job.repo),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=str(job.repo),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired as exc:
+            recovered = self._recover_pandoc_intermediate_docx(job.output_docx)
+            if recovered is not None:
+                self.log(f"Word recuperado desde Pandoc intermedio tras timeout: {recovered}")
+                return recovered
+            raise RuntimeError(f"No se pudo generar Word: timeout ejecutando latex_to_word.py ({exc.timeout}s)") from exc
         if proc.returncode != 0:
+            recovered = self._recover_pandoc_intermediate_docx(job.output_docx)
+            if recovered is not None:
+                detail = (proc.stderr or proc.stdout or f"exit={proc.returncode}").strip()
+                self.log(f"Word recuperado desde Pandoc intermedio tras fallo del postproceso: {recovered}. Detalle: {detail[:500]}")
+                return recovered
             detail = (proc.stderr or proc.stdout or f"exit={proc.returncode}").strip()
             raise RuntimeError(f"No se pudo generar Word: {detail}")
         produced = self._extract_generated_docx_from_stdout(proc.stdout) or job.output_docx
         if not produced.exists():
+            recovered = self._recover_pandoc_intermediate_docx(job.output_docx)
+            if recovered is not None:
+                self.log(f"Word recuperado desde Pandoc intermedio porque no aparecio salida final: {recovered}")
+                return recovered
             raise RuntimeError(f"La conversion termino sin crear el Word: {produced}")
         return produced
+
+    def _recover_pandoc_intermediate_docx(self, output_docx: Path) -> Path | None:
+        output = self._normalize_path(output_docx)
+        intermediate = output.with_name(f"{output.stem}__pandoc_intermedio.docx")
+        if not intermediate.exists():
+            return None
+        try:
+            if intermediate.stat().st_size <= 0:
+                return None
+        except OSError:
+            return None
+        output.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copyfile(intermediate, output)
+        except OSError:
+            return intermediate
+        return output if output.exists() else intermediate
 
     def resolve_python(self, repo: Path, preferred: str = "") -> tuple[str, list[str]]:
         errors: list[str] = []
@@ -1059,17 +1577,40 @@ class LatexWordService:
         if output_text:
             return output_text
         blocks: list[str] = []
-        items_data = payload.get("items", []) if isinstance(payload, dict) else []
-        if isinstance(items_data, list):
+        item_sources = []
+        if isinstance(payload, dict):
+            item_sources.extend(
+                row for row in (
+                    payload.get("items", []),
+                    payload.get("problems", []),
+                    payload.get("final_items", []),
+                    payload.get("latex_items", []),
+                )
+                if isinstance(row, list)
+            )
+        for items_data in item_sources:
             for row in items_data:
                 if not isinstance(row, dict):
                     continue
-                for key in ("item", "item_text", "text", "latex", "enunciado_latex"):
+                for key in ("item", "item_text", "final_text", "text", "latex", "enunciado_latex"):
                     candidate = str(row.get(key, "") or "").strip()
                     if candidate:
                         blocks.append(candidate)
                         break
         return "\n".join(blocks).strip()
+
+    def _session_exportable_info(self, session_path: Path | None) -> dict[str, Any]:
+        if session_path is None:
+            return {"exportable": False, "items": 0, "reason": "sin sesion"}
+        try:
+            payload = self._load_session_payload(session_path)
+        except Exception as exc:
+            return {"exportable": False, "items": 0, "reason": f"sesion ilegible: {exc}"}
+        text = self._build_scan_source_text_from_session(payload)
+        if not text:
+            return {"exportable": False, "items": 0, "reason": "sin formato final"}
+        count = len(re.findall(r"\\item\b", text)) or max(1, len([line for line in text.splitlines() if line.strip()]))
+        return {"exportable": True, "items": count, "reason": "lista para Word"}
 
     def _ensure_enumerate_wrapper(self, source_text: str) -> str:
         text = str(source_text or "").strip()
@@ -1100,6 +1641,61 @@ class LatexWordService:
 
     def session_word_path_for(self, session_path: Path | None) -> Path | None:
         candidates = self.session_word_candidates(session_path)
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return candidates[0] if candidates else None
+
+    def library_instance_word_candidates(
+        self,
+        *,
+        book: dict[str, Any],
+        instance: dict[str, Any],
+        label: str,
+        session_path: Path | None,
+    ) -> list[Path]:
+        candidates: list[Path] = []
+
+        def add(path: Path | None) -> None:
+            if path is None:
+                return
+            normalized = self._normalize_path(path)
+            if normalized not in candidates:
+                candidates.append(normalized)
+
+        book_code = str(book.get("codigo") or book.get("code") or "").strip()
+        instance_code = str(label or instance.get("tipo") or instance.get("name") or instance.get("label") or "").strip()
+        safe = self._safe_filename(f"{book_code}__{instance_code}", fallback="instancia")
+        for raw_pdf in (
+            str(book.get("pdf_path") or book.get("pdfPath") or "").strip(),
+            str(instance.get("pdf_path") or instance.get("pdfPath") or "").strip(),
+        ):
+            output_dir = self._word_output_dir_for_pdf(raw_pdf)
+            if output_dir is not None:
+                add(output_dir / f"{safe}.docx")
+                break
+
+        workspace_raw = str(book.get("workspace_dir") or "").strip()
+        if workspace_raw:
+            try:
+                workspace = self._normalize_path(Path(workspace_raw).expanduser())
+                add(workspace / "Word" / f"{safe}.docx")
+            except Exception:
+                pass
+
+        for candidate in self.session_word_candidates(session_path):
+            add(candidate)
+        return candidates
+
+    def library_instance_word_path_for(
+        self,
+        *,
+        book: dict[str, Any],
+        instance: dict[str, Any],
+        label: str,
+        session_path: Path | None,
+    ) -> Path | None:
+        candidates = self.library_instance_word_candidates(book=book, instance=instance, label=label, session_path=session_path)
         for candidate in candidates:
             if candidate.exists():
                 return candidate

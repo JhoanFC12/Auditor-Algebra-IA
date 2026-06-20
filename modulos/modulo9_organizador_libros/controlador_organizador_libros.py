@@ -65,6 +65,7 @@ class BookInstanceInput:
     libro_id: int
     tipo: str
     total_esperado: int = 0
+    titulo_practica: str = ""
     session_path: str = ""
     soluciones_dir: str = ""
     notas: str = ""
@@ -532,7 +533,7 @@ class BookProgressController:
             cur = conn.cursor()
             cur.execute(
                 f"""
-                SELECT id, libro_id, {instance_col} AS tipo, total_esperado, session_path,
+                SELECT id, libro_id, {instance_col} AS tipo, COALESCE(titulo_practica, '') AS titulo_practica, total_esperado, session_path,
                        soluciones_dir, activo, notas
                 FROM libro_instancias_escaneo
                 WHERE libro_id = %s
@@ -541,6 +542,28 @@ class BookProgressController:
                 (int(libro_id),),
             )
             return [self._hydrate_instance_row_paths(row) for row in self._fetchall_dicts(cur)]
+        finally:
+            conn.close()
+
+    def listar_instancias_todos(self, db_name: str) -> Dict[int, List[dict]]:
+        self._ensure_schema(db_name)
+        conn = self.db.get_connection(db_name)
+        try:
+            instance_col = self._instance_column_name(conn)
+            cur = conn.cursor()
+            cur.execute(
+                f"""
+                SELECT id, libro_id, {instance_col} AS tipo, COALESCE(titulo_practica, '') AS titulo_practica, total_esperado, session_path,
+                       soluciones_dir, activo, notas
+                FROM libro_instancias_escaneo
+                ORDER BY libro_id ASC, LOWER({instance_col}) ASC, id ASC
+                """
+            )
+            grouped: Dict[int, List[dict]] = {}
+            for row in self._fetchall_dicts(cur):
+                hydrated = self._hydrate_instance_row_paths(row)
+                grouped.setdefault(int(hydrated.get("libro_id") or 0), []).append(hydrated)
+            return grouped
         finally:
             conn.close()
 
@@ -553,7 +576,7 @@ class BookProgressController:
             cur = conn.cursor()
             cur.execute(
                 f"""
-                SELECT id, libro_id, {instance_col} AS tipo, total_esperado, session_path,
+                SELECT id, libro_id, {instance_col} AS tipo, COALESCE(titulo_practica, '') AS titulo_practica, total_esperado, session_path,
                        soluciones_dir, activo, notas
                 FROM libro_instancias_escaneo
                 WHERE libro_id = %s AND {instance_col} = %s
@@ -587,13 +610,14 @@ class BookProgressController:
             cur.execute(
                 f"""
                 INSERT INTO libro_instancias_escaneo
-                    (libro_id, {instance_col}, total_esperado, session_path, soluciones_dir, activo, notas)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    (libro_id, {instance_col}, titulo_practica, total_esperado, session_path, soluciones_dir, activo, notas)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
                 (
                     int(data.libro_id),
                     data.tipo,
+                    data.titulo_practica,
                     data.total_esperado,
                     session_path,
                     soluciones_dir,
@@ -656,6 +680,7 @@ class BookProgressController:
                 f"""
                 UPDATE libro_instancias_escaneo
                 SET {instance_col} = %s,
+                    titulo_practica = %s,
                     total_esperado = %s,
                     session_path = %s,
                     soluciones_dir = %s,
@@ -666,6 +691,7 @@ class BookProgressController:
                 """,
                 (
                     data.tipo,
+                    data.titulo_practica,
                     data.total_esperado,
                     next_session_path,
                     next_soluciones_dir,
@@ -935,6 +961,7 @@ class BookProgressController:
         return payload.__class__(
             libro_id=int(payload.libro_id),
             tipo=self._normalize_instance_type(payload.tipo),
+            titulo_practica=str(payload.titulo_practica or "").strip(),
             total_esperado=max(int(payload.total_esperado or 0), 0),
             session_path=self._normalize_resource_path_text(str(payload.session_path or "").strip(), prefer_existing=False),
             soluciones_dir=self._normalize_resource_path_text(str(payload.soluciones_dir or "").strip(), prefer_existing=False),
@@ -1034,6 +1061,7 @@ class BookProgressController:
                     id SERIAL PRIMARY KEY,
                     libro_id INT NOT NULL REFERENCES libros_escaneo(id) ON DELETE CASCADE,
                     codigo_instancia VARCHAR(80) NOT NULL,
+                    titulo_practica TEXT NOT NULL DEFAULT '',
                     total_esperado INT NOT NULL DEFAULT 0,
                     pdf_path TEXT NOT NULL DEFAULT '',
                     session_path TEXT NOT NULL DEFAULT '',
@@ -1047,6 +1075,7 @@ class BookProgressController:
                 """
             )
             cur.execute("ALTER TABLE libro_instancias_escaneo ADD COLUMN IF NOT EXISTS total_esperado INT NOT NULL DEFAULT 0;")
+            cur.execute("ALTER TABLE libro_instancias_escaneo ADD COLUMN IF NOT EXISTS titulo_practica TEXT NOT NULL DEFAULT '';")
             if self._pg_column_exists(conn, "libro_instancias_escaneo", "tipo") and not self._pg_column_exists(conn, "libro_instancias_escaneo", "codigo_instancia"):
                 cur.execute("ALTER TABLE libro_instancias_escaneo RENAME COLUMN tipo TO codigo_instancia;")
             if self._pg_column_exists(conn, "libro_instancias_escaneo", "codigo_instancia"):

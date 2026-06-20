@@ -207,6 +207,7 @@ class PracticeBuilderController:
         tema_id: Optional[object] = None,
         subtema_id: Optional[object] = None,
         editorial: str = "",
+        libro: object = "",
     ) -> List[str]:
         return self._list_problem_values(
             db_name,
@@ -215,6 +216,7 @@ class PracticeBuilderController:
             tema_id=tema_id,
             subtema_id=subtema_id,
             editorial=editorial,
+            libro=libro,
         )
 
     def listar_editoriales(
@@ -225,6 +227,7 @@ class PracticeBuilderController:
         tema_id: Optional[object] = None,
         subtema_id: Optional[object] = None,
         autor: str = "",
+        libro: object = "",
     ) -> List[str]:
         return self._list_problem_values(
             db_name,
@@ -233,7 +236,87 @@ class PracticeBuilderController:
             tema_id=tema_id,
             subtema_id=subtema_id,
             autor=autor,
+            libro=libro,
         )
+
+    def listar_libros_problemas(
+        self,
+        db_name: str,
+        *,
+        curso: str = "",
+        tema_id: Optional[object] = None,
+        subtema_id: Optional[object] = None,
+        autor: str = "",
+        editorial: str = "",
+    ) -> List[Dict[str, object]]:
+        schema = self._schema_info(db_name)
+        has_book_join = self._needs_book_join(schema)
+        book_code_column = str(schema.get("book_code_column") or "")
+        if not has_book_join and not book_code_column:
+            return []
+
+        join_sql, where_sql, params = self._build_filters(
+            schema,
+            curso=curso,
+            tema_id=tema_id,
+            subtema_id=subtema_id,
+            autor=autor,
+            editorial=editorial,
+            libro="",
+            estado="Todos",
+            clave="Todos",
+        )
+        if has_book_join:
+            rows = self._query_rows(
+                db_name,
+                f"""
+                SELECT DISTINCT
+                    COALESCE(l.id, 0)::int,
+                    COALESCE(l.codigo, ''),
+                    COALESCE(l.titulo, '')
+                FROM problemas p
+                {join_sql}
+                {where_sql}
+                {"AND" if where_sql else "WHERE"} (COALESCE(l.codigo,'') <> '' OR COALESCE(l.titulo,'') <> '')
+                ORDER BY COALESCE(l.titulo, ''), COALESCE(l.codigo, '');
+                """,
+                tuple(params),
+            )
+        else:
+            rows = self._query_rows(
+                db_name,
+                f"""
+                SELECT DISTINCT
+                    0,
+                    COALESCE(TRIM(CAST(p.{book_code_column} AS text)), ''),
+                    ''
+                FROM problemas p
+                {where_sql}
+                {"AND" if where_sql else "WHERE"} COALESCE(TRIM(CAST(p.{book_code_column} AS text)), '') <> ''
+                ORDER BY COALESCE(TRIM(CAST(p.{book_code_column} AS text)), '');
+                """,
+                tuple(params),
+            )
+
+        result: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for raw_id, raw_code, raw_title in rows:
+            code = str(raw_code or "").strip()
+            title = str(raw_title or "").strip()
+            label = f"{code} | {title}" if code and title else (title or code)
+            if not label:
+                continue
+            key = self._normalized_text_key(label)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                book_id = int(raw_id or 0)
+            except Exception:
+                book_id = 0
+            ref = self._catalog_ref("book", book_id, label) if book_id > 0 else self._direct_ref("book", label)
+            result.append({"id": ref, "codigo": code, "titulo": title, "label": label})
+        return result
 
     def contar_problemas(
         self,
@@ -244,6 +327,7 @@ class PracticeBuilderController:
         subtema_id: Optional[object] = None,
         autor: str = "",
         editorial: str = "",
+        libro: object = "",
         estado: str = "Todos",
         clave: str = "Todos",
     ) -> int:
@@ -255,6 +339,7 @@ class PracticeBuilderController:
             subtema_id=subtema_id,
             autor=autor,
             editorial=editorial,
+            libro=libro,
             estado=estado,
             clave=clave,
         )
@@ -275,6 +360,7 @@ class PracticeBuilderController:
         subtema_id: Optional[object] = None,
         autor: str = "",
         editorial: str = "",
+        libro: object = "",
         estado: str = "Todos",
         clave: str = "Todos",
         aleatorio: bool = True,
@@ -288,6 +374,7 @@ class PracticeBuilderController:
             subtema_id=subtema_id,
             autor=autor,
             editorial=editorial,
+            libro=libro,
             estado=estado,
             clave=clave,
         )
@@ -475,6 +562,123 @@ class PracticeBuilderController:
             )
         by_id = {int(item["id"]): item for item in items}
         return [by_id[pid] for pid in ordered_ids if pid in by_id]
+
+    def obtener_problemas_por_instancia(
+        self,
+        db_name: str,
+        *,
+        libro_codigo: str = "",
+        codigo_instancia: str = "",
+    ) -> List[Dict[str, object]]:
+        schema = self._schema_info(db_name)
+        problem_cols = set(str(x) for x in schema.get("problem_columns", []))
+        if "codigo_instancia" not in problem_cols:
+            return []
+        instance_key = self._normalized_text_key(codigo_instancia)
+        if not instance_key:
+            return []
+
+        join_sql, where_sql, params = self._build_filters(
+            schema,
+            curso="",
+            tema_id=None,
+            subtema_id=None,
+            autor="",
+            editorial="",
+            libro=str(libro_codigo or "").strip(),
+            estado="Todos",
+            clave="Todos",
+        )
+        clauses = [where_sql[6:].strip()] if where_sql.startswith("WHERE ") else []
+        clauses.append(f"{self._sql_normalized_text('p.codigo_instancia')} = %s")
+        params.append(instance_key)
+        final_where = "WHERE " + " AND ".join(f"({clause})" for clause in clauses if clause)
+        rows = self._query_rows(
+            db_name,
+            f"""
+            SELECT
+                {self._problem_select_columns_sql(schema)}
+            FROM problemas p
+            {join_sql}
+            {final_where}
+            {self._natural_problem_order_sql(schema)};
+            """,
+            tuple(params),
+        )
+        return [self._problem_row_to_dict(r) for r in rows]
+
+    def contar_problemas_por_instancia(
+        self,
+        db_name: str,
+        *,
+        libro_codigo: str = "",
+        codigo_instancia: str = "",
+    ) -> int:
+        schema = self._schema_info(db_name)
+        problem_cols = set(str(x) for x in schema.get("problem_columns", []))
+        if "codigo_instancia" not in problem_cols:
+            return 0
+        instance_key = self._normalized_text_key(codigo_instancia)
+        if not instance_key:
+            return 0
+        join_sql, where_sql, params = self._build_filters(
+            schema,
+            curso="",
+            tema_id=None,
+            subtema_id=None,
+            autor="",
+            editorial="",
+            libro=str(libro_codigo or "").strip(),
+            estado="Todos",
+            clave="Todos",
+        )
+        clauses = [where_sql[6:].strip()] if where_sql.startswith("WHERE ") else []
+        clauses.append(f"{self._sql_normalized_text('p.codigo_instancia')} = %s")
+        params.append(instance_key)
+        final_where = "WHERE " + " AND ".join(f"({clause})" for clause in clauses if clause)
+        rows = self._query_rows(
+            db_name,
+            f"SELECT COUNT(*)::int FROM problemas p {join_sql} {final_where};",
+            tuple(params),
+        )
+        return int(rows[0][0] or 0) if rows else 0
+
+    def contar_problemas_por_instancia_masivo(self, db_name: str) -> Dict[tuple[str, str], int]:
+        """Devuelve conteos por (libro_codigo_normalizado, codigo_instancia_normalizado).
+
+        Esta ruta evita consultar la tabla problemas una vez por instancia cuando
+        la Biblioteca Word arma el catalogo completo.
+        """
+        schema = self._schema_info(db_name)
+        problem_cols = set(str(x) for x in schema.get("problem_columns", []))
+        if "codigo_instancia" not in problem_cols:
+            return {}
+        book_expr = self._book_code_select_expr(schema)
+        instance_expr = "COALESCE(p.codigo_instancia,'')"
+        normalized_book_expr = self._sql_normalized_text(book_expr)
+        normalized_instance_expr = self._sql_normalized_text(instance_expr)
+        join_sql = self._book_join_sql(schema)
+        rows = self._query_rows(
+            db_name,
+            f"""
+            SELECT
+                {normalized_book_expr} AS libro_key,
+                {normalized_instance_expr} AS instancia_key,
+                COUNT(*)::int AS total
+            FROM problemas p
+            {join_sql}
+            WHERE COALESCE(TRIM(CAST(p.codigo_instancia AS text)), '') <> ''
+            GROUP BY {normalized_book_expr}, {normalized_instance_expr};
+            """,
+        )
+        result: Dict[tuple[str, str], int] = {}
+        for book_key, instance_key, total in rows:
+            clean_book = str(book_key or "").strip()
+            clean_instance = str(instance_key or "").strip()
+            if not clean_instance:
+                continue
+            result[(clean_book, clean_instance)] = int(total or 0)
+        return result
 
     def actualizar_problema_desde_editor(
         self,
@@ -769,6 +973,7 @@ class PracticeBuilderController:
             "subtema_id_column": "subtema_id" if "subtema_id" in problem_cols else None,
             "book_id_column": "libro_id" if "libro_id" in problem_cols else None,
             "book_code_column": "libro_codigo" if "libro_codigo" in problem_cols else None,
+            "book_title_column": "titulo" if "titulo" in book_cols else None,
             "source_file_column": "archivo_origen" if "archivo_origen" in problem_cols else None,
             "images_column": "imagenes" if "imagenes" in problem_cols else None,
             "folder_column": "ruta_carpeta" if "ruta_carpeta" in problem_cols else None,
@@ -908,6 +1113,7 @@ class PracticeBuilderController:
         subtema_id: Optional[object] = None,
         autor: str = "",
         editorial: str = "",
+        libro: object = "",
     ) -> List[str]:
         schema = self._schema_info(db_name)
         field_expr = self._filter_field_expr(schema, field_key)
@@ -920,6 +1126,7 @@ class PracticeBuilderController:
             subtema_id=subtema_id,
             autor=autor if field_key != "author_column" else "",
             editorial=editorial if field_key != "editorial_column" else "",
+            libro=libro,
             estado="Todos",
             clave="Todos",
         )
@@ -1005,6 +1212,8 @@ class PracticeBuilderController:
             LEFT JOIN LATERAL (
                 SELECT
                     le.id,
+                    COALESCE(le.codigo,'') AS codigo,
+                    COALESCE(le.titulo,'') AS titulo,
                     COALESCE(le.autor,'') AS autor,
                     COALESCE(le.editorial,'') AS editorial,
                     COALESCE(le.pdf_path,'') AS pdf_path
@@ -1075,10 +1284,20 @@ class PracticeBuilderController:
             {f"COALESCE(p.{images_column}, ARRAY[]::text[])" if images_column else "ARRAY[]::text[]"},
             {f"COALESCE(p.{math_consistency_column},'')" if math_consistency_column else "'Sin revisar'"},
             {"COALESCE(p.codigo_instancia,'')" if "codigo_instancia" in problem_cols else "''"},
-            {"COALESCE(p.libro_codigo,'')" if "libro_codigo" in problem_cols else "''"},
+            {self._book_code_select_expr(schema)},
             {f"COALESCE(p.{problem_type_column},'')" if problem_type_column else "''"},
             {exam_expr}
         """
+
+    def _book_code_select_expr(self, schema: Dict[str, object]) -> str:
+        problem_cols = set(str(x) for x in schema.get("problem_columns", []))
+        if "libro_codigo" in problem_cols and self._needs_book_join(schema):
+            return "COALESCE(NULLIF(TRIM(CAST(p.libro_codigo AS text)), ''), l.codigo, '')"
+        if "libro_codigo" in problem_cols:
+            return "COALESCE(p.libro_codigo,'')"
+        if self._needs_book_join(schema):
+            return "COALESCE(l.codigo,'')"
+        return "''"
 
     def _problem_row_to_dict(self, row: tuple[object, ...]) -> Dict[str, object]:
         raw_images = row[12] if len(row) > 12 else []
@@ -1143,8 +1362,9 @@ class PracticeBuilderController:
         subtema_id: Optional[object],
         autor: str,
         editorial: str,
-        estado: str,
-        clave: str,
+        libro: object = "",
+        estado: str = "Todos",
+        clave: str = "Todos",
     ) -> tuple[str, str, List[object]]:
         clauses: List[str] = []
         params: List[object] = []
@@ -1226,6 +1446,33 @@ class PracticeBuilderController:
         if (editorial or "").strip() and editorial_expr:
             clauses.append(f"{self._sql_normalized_text(editorial_expr)} = %s")
             params.append(self._normalized_text_key(editorial))
+        book_ref = self._parse_meta_ref(libro)
+        book_text = str(book_ref.get("text") or "").strip()
+        if book_ref.get("id") is not None and self._needs_book_join(schema):
+            clauses.append("l.id = %s")
+            params.append(int(book_ref["id"]))
+        elif book_text:
+            raw_values = [book_text]
+            if "|" in book_text:
+                raw_values.extend(part.strip() for part in book_text.split("|", 1) if part.strip())
+            normalized_values = list(dict.fromkeys(self._normalized_text_key(value) for value in raw_values if value.strip()))
+            book_clauses: list[str] = []
+            if self._needs_book_join(schema):
+                for expression in (
+                    "COALESCE(l.codigo,'')",
+                    "COALESCE(l.titulo,'')",
+                    "COALESCE(l.codigo,'') || ' | ' || COALESCE(l.titulo,'')",
+                ):
+                    for normalized in normalized_values:
+                        book_clauses.append(f"{self._sql_normalized_text(expression)} = %s")
+                        params.append(normalized)
+            elif schema.get("book_code_column"):
+                book_code_expr = f"p.{schema['book_code_column']}"
+                for normalized in normalized_values:
+                    book_clauses.append(f"{self._sql_normalized_text(book_code_expr)} = %s")
+                    params.append(normalized)
+            if book_clauses:
+                clauses.append("(" + " OR ".join(book_clauses) + ")")
 
         math_consistency_column = str(schema.get("math_consistency_column") or "")
         estado = (estado or "").strip()

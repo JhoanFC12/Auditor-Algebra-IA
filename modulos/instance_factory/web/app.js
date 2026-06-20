@@ -76,12 +76,14 @@ const state = {
       problemResult: null,
     },
     word: {
+      mode: "instances",
       loading: false,
       error: "",
       catalog: null,
       query: "",
       root: "",
       wordFilter: "all",
+      selectedBookKey: "",
       selectedKey: "",
       convertingKey: "",
       selectedKeys: new Set(),
@@ -107,6 +109,7 @@ const state = {
         result: null,
         selectedIds: new Set(),
         curso: "",
+        libro: "",
         estado: "Todos",
         clave: "Todos",
         temaId: "",
@@ -302,6 +305,9 @@ async function api(path, options = {}) {
   let payload = {};
   try { payload = text ? JSON.parse(text) : {}; } catch (_) { payload = { raw: text }; }
   if (!response.ok) {
+    if (response.status === 404 && String(path || "") === "/api/word/convert-instance") {
+      throw new Error("El servidor web activo no tiene cargada la conversion Word por instancia desde BD. Cierra y vuelve a abrir Biblioteca/Fabrica para cargar el backend Python nuevo.");
+    }
     throw new Error(payload.error || payload.raw || response.statusText);
   }
   return payload;
@@ -1772,44 +1778,66 @@ function renderLibraryWordStage() {
   const word = state.library.word || {};
   const catalog = word.catalog || {};
   const summary = catalog.summary || {};
+  const mode = word.mode === "selection" ? "selection" : "instances";
   const books = filteredWordBooks();
+  const selectedBook = mode === "instances" ? selectedWordBook() : null;
+  const bookRows = selectedBook ? filteredWordInstances(selectedBook) : [];
   pruneWordSelection();
   const visibleRows = visibleWordInstances();
   const selectedRows = selectedWordInstances();
-  const pendingVisible = visibleRows.filter(({ instance }) => instance.session_exists && !instance.word_exists);
+  const pendingVisible = visibleRows.filter(({ instance }) => wordInstanceConvertible(instance) && !instance.word_exists);
   const queueDisabled = word.loading || word.batchRunning || !catalog.schema_version;
   const settings = wordConversionSettings();
   return `
     <div class="stage-header library-header word-hero">
       <div>
         <span class="section-label">Modulo 7 web</span>
-        <h2>Sesiones LaTeX a Word</h2>
-        <p class="muted">Revisa sesiones exportables, confirma que instancias ya tienen Word y abre el documento desde la misma Biblioteca.</p>
+        <h2>LaTeX a Word</h2>
+        <p class="muted">Elige si vas a generar una practica desde filtros de BD o convertir instancias ya trabajadas.</p>
       </div>
       <div class="stage-actions">
-        <button id="refreshWordSessionsBtn" class="secondary" type="button" ${word.loading ? "disabled" : ""}>Actualizar sesiones</button>
+        ${mode === "instances" ? `<button id="refreshWordSessionsBtn" class="secondary" type="button" ${word.loading ? "disabled" : ""}>Actualizar sesiones</button>` : ""}
       </div>
     </div>
+    <section class="panel word-mode-panel">
+      <button class="word-mode-card ${mode === "selection" ? "active" : ""}" data-word-mode="selection" type="button">
+        <span>Modo seleccion</span>
+        <strong>Problemas por filtros</strong>
+        <small>Curso, tema, subtema, libro, autor y editorial desde la BD local.</small>
+      </button>
+      <button class="word-mode-card ${mode === "instances" ? "active" : ""}" data-word-mode="instances" type="button">
+        <span>Modo instancias</span>
+        <strong>Biblioteca por sesiones</strong>
+        <small>Libros e instancias ya trabajadas, con cola de conversion a Word.</small>
+      </button>
+    </section>
     <section class="panel word-toolbar">
-      <label>
-        <span class="muted">Buscar libro o instancia</span>
-        <input id="wordSearchInput" value="${escapeAttr(word.query || "")}" placeholder="Semana, libro, curso" />
-      </label>
-      <label>
-        <span class="muted">Raiz alternativa</span>
-        <input id="wordRootInput" value="${escapeAttr(word.root || "")}" placeholder="Vacio = Biblioteca" ${word.loading || word.batchRunning ? "disabled" : ""} />
-      </label>
-      <label>
-        <span class="muted">Estado Word</span>
-        <select id="wordStatusFilter">
-          ${[
-            ["all", "Todos"],
-            ["ready", "Exportadas"],
-            ["pending", "Pendientes"],
-            ["missing", "Sin sesion"],
-          ].map(([value, label]) => `<option value="${value}" ${word.wordFilter === value ? "selected" : ""}>${label}</option>`).join("")}
-        </select>
-      </label>
+      ${mode === "instances" ? `
+        <label>
+          <span class="muted">Buscar libro o instancia</span>
+          <input id="wordSearchInput" value="${escapeAttr(word.query || "")}" placeholder="Semana, libro, curso" />
+        </label>
+        <label>
+          <span class="muted">Raiz alternativa</span>
+          <input id="wordRootInput" value="${escapeAttr(word.root || "")}" placeholder="Vacio = Biblioteca" ${word.loading || word.batchRunning ? "disabled" : ""} />
+        </label>
+        <label>
+          <span class="muted">Estado Word</span>
+          <select id="wordStatusFilter">
+            ${[
+              ["all", "Todos"],
+              ["ready", "Exportadas"],
+              ["pending", "Pendientes"],
+              ["missing", "Sin sesion"],
+            ].map(([value, label]) => `<option value="${value}" ${word.wordFilter === value ? "selected" : ""}>${label}</option>`).join("")}
+          </select>
+        </label>
+      ` : `
+        <div>
+          <strong>Seleccion desde BD</strong>
+          <p class="muted">Carga problemas con filtros y genera un Word con la seleccion acumulada.</p>
+        </div>
+      `}
       <div class="word-summary-strip">
         <div><span>Origen</span><strong>${escapeHtml(catalog.source || "BD")}</strong></div>
         <div><span>Libros</span><strong>${Number(summary.books_total || 0)}</strong></div>
@@ -1845,44 +1873,64 @@ function renderLibraryWordStage() {
         </label>
       </div>
     </section>
-    ${renderManualWordSession()}
-    ${renderWordProblemSelection()}
-    <section class="panel word-queue-bar">
-      <div>
-        <strong>Cola Word</strong>
-        <p class="muted">${selectedRows.length} seleccionada(s), ${pendingVisible.length} pendiente(s) visibles.</p>
-      </div>
-      <div class="word-queue-actions">
-        <button id="selectVisibleWordBtn" type="button" ${queueDisabled || !visibleRows.length ? "disabled" : ""}>Seleccionar visibles</button>
-        <button id="clearWordSelectionBtn" type="button" ${queueDisabled || !selectedRows.length ? "disabled" : ""}>Limpiar</button>
-        <button id="convertSelectedWordBtn" class="primary" type="button" ${queueDisabled || !selectedRows.length ? "disabled" : ""}>Convertir seleccionadas</button>
-        <button id="convertPendingWordBtn" type="button" ${queueDisabled || !pendingVisible.length ? "disabled" : ""}>Convertir pendientes</button>
-      </div>
-      ${word.batchProgress ? `
-        <div class="word-batch-progress" role="status">
-          <span>${escapeHtml(word.batchProgress.label || "Convirtiendo")}</span>
-          <strong>${Number(word.batchProgress.current || 0)} / ${Number(word.batchProgress.total || 0)}</strong>
+    ${mode === "selection" ? renderWordProblemSelection() : `
+      ${renderManualWordSession()}
+      ${selectedBook ? `<section class="panel word-book-detail-head">
+        <button id="backToWordBooksBtn" class="secondary" type="button">Volver a libros</button>
+        <div>
+          <span class="section-label">${escapeHtml(selectedBook.code || "Libro")}</span>
+          <h3>${escapeHtml(selectedBook.title || "Libro")}</h3>
+          <p class="muted">${escapeHtml([selectedBook.author, selectedBook.editorial, selectedBook.course].filter(Boolean).join(" | "))}</p>
         </div>
-      ` : ""}
-    </section>
+        ${renderWordBookMetricStrip(selectedBook)}
+      </section>` : ""}
+      ${selectedBook ? `<section class="panel word-queue-bar">
+        <div>
+          <strong>Cola Word</strong>
+          <p class="muted">${selectedRows.length} seleccionada(s), ${pendingVisible.length} pendiente(s) visibles.</p>
+        </div>
+        <div class="word-queue-actions">
+          <button id="selectVisibleWordBtn" type="button" ${queueDisabled || !visibleRows.length ? "disabled" : ""}>Seleccionar visibles</button>
+          <button id="clearWordSelectionBtn" type="button" ${queueDisabled || !selectedRows.length ? "disabled" : ""}>Limpiar</button>
+          <button id="convertSelectedWordBtn" class="primary" type="button" ${queueDisabled || !selectedRows.length ? "disabled" : ""}>Convertir seleccionadas</button>
+          <button id="convertPendingWordBtn" type="button" ${queueDisabled || !pendingVisible.length ? "disabled" : ""}>Convertir pendientes</button>
+        </div>
+        ${word.batchProgress ? `
+          <div class="word-batch-progress" role="status">
+            <span>${escapeHtml(word.batchProgress.label || "Convirtiendo")}</span>
+            <strong>${Number(word.batchProgress.current || 0)} / ${Number(word.batchProgress.total || 0)}</strong>
+          </div>
+        ` : ""}
+      </section>` : ""}
+    `}
     ${word.error ? `<div class="library-notice error-notice">${escapeHtml(word.error)}</div>` : ""}
-    ${word.loading ? `<section class="panel muted">Cargando biblioteca de sesiones...</section>` : ""}
-    ${!catalog.schema_version && !word.loading ? `
+    ${mode === "instances" && word.loading ? `<section class="panel muted">Cargando biblioteca de sesiones...</section>` : ""}
+    ${mode === "instances" && !catalog.schema_version && !word.loading ? `
       <section class="panel word-empty">
-        <h3>Catalogo Word no cargado</h3>
-        <p class="muted">Usa Actualizar sesiones para leer Biblioteca y detectar documentos .docx ya exportados.</p>
-        <button id="loadWordSessionsBtn" class="primary" type="button">Cargar sesiones</button>
+        <h3>Preparando catalogo Word</h3>
+        <p class="muted">La Biblioteca carga las sesiones automaticamente al entrar. Usa Reintentar si tarda demasiado.</p>
+        <button id="loadWordSessionsBtn" class="primary" type="button">Reintentar carga</button>
       </section>
     ` : ""}
-    ${catalog.schema_version && !books.length ? `
+    ${mode === "instances" && catalog.schema_version && !selectedBook && !books.length ? `
       <section class="panel word-empty">
         <h3>No hay sesiones que coincidan</h3>
         <p class="muted">Ajusta la busqueda o el filtro de estado Word.</p>
       </section>
     ` : ""}
-    ${books.length ? `
-      <section class="word-books-grid" aria-label="Sesiones exportables a Word">
+    ${mode === "instances" && catalog.schema_version && !selectedBook && books.length ? `
+      <section class="word-books-grid word-books-overview" aria-label="Biblioteca de libros para Word">
         ${books.map(renderWordBookCard).join("")}
+      </section>
+    ` : ""}
+    ${mode === "instances" && selectedBook ? `
+      <section class="word-instance-list word-instance-detail-list" aria-label="Instancias exportables a Word">
+        ${bookRows.length ? bookRows.map((row) => renderWordInstanceRow(selectedBook, row)).join("") : `
+          <div class="panel word-empty">
+            <h3>No hay instancias visibles</h3>
+            <p class="muted">Ajusta la busqueda o el filtro de estado Word.</p>
+          </div>
+        `}
       </section>
     ` : ""}
   `;
@@ -1942,6 +1990,7 @@ function renderWordProblemSelection() {
   const subtemaOptions = [{ id: "", nombre: "Todos" }, ...(options.subtemas || [])];
   const autorOptions = ["", ...(options.autores || [])];
   const editorialOptions = ["", ...(options.editoriales || [])];
+  const libroOptions = [{ id: "", label: "Todos" }, ...(options.libros || [])];
   const estadoOptions = options.estados || ["Todos", "sin_revisar", "consistente", "inconsistente"];
   const claveOptions = options.claves || ["Todos", "A", "B", "C", "D", "E", "Sin clave"];
   return `
@@ -1985,6 +2034,12 @@ function renderWordProblemSelection() {
           <span class="muted">Editorial</span>
           <select id="wordProblemEditorial" ${disabled ? "disabled" : ""}>
             ${editorialOptions.map((value) => `<option value="${escapeAttr(value)}" ${String(ps.editorial || "") === String(value || "") ? "selected" : ""}>${escapeHtml(value || "Todos")}</option>`).join("")}
+          </select>
+        </label>
+        <label>
+          <span class="muted">Libro / obra</span>
+          <select id="wordProblemLibro" ${disabled ? "disabled" : ""}>
+            ${libroOptions.map((item) => renderWordProblemOption(item, ps.libro || "")).join("")}
           </select>
         </label>
         <label>
@@ -2159,10 +2214,14 @@ function wordProblemReadableLatex(value) {
 }
 
 function renderWordBookCard(book) {
-  const instances = filteredWordInstances(book);
-  const counts = book.counts || {};
+  const stats = wordBookStats(book);
+  const disabled = stats.scanned <= 0;
+  const convertibleCount = wordBookConvertibleInstances(book).length;
+  const statusLabel = stats.scanned <= 0
+    ? "Sin escaneos"
+    : (stats.pending <= 0 ? "Completo" : (stats.ready > 0 ? "En proceso" : "Pendiente"));
   return `
-    <article class="word-book-card">
+    <article class="word-book-card ${disabled ? "disabled" : ""}">
       <div class="word-book-cover ${book.cover_url ? "has-cover" : ""}">
         ${book.cover_url ? `<img src="${escapeAttr(book.cover_url)}" alt="" loading="lazy" decoding="async" />` : `<span>${escapeHtml(bookCoverLabel(book))}</span>`}
       </div>
@@ -2173,39 +2232,75 @@ function renderWordBookCard(book) {
             <h3>${escapeHtml(book.title || "Sin titulo")}</h3>
             <p class="muted">${escapeHtml([book.author, book.editorial, book.course].filter(Boolean).join(" | "))}</p>
           </div>
-          <div class="word-book-counts">
-            <span>${Number(counts.instances || instances.length)} inst.</span>
-            <strong>${Number(counts.word_ready || 0)} Word</strong>
-          </div>
         </div>
-        <div class="word-instance-list">
-          ${instances.map((row) => renderWordInstanceRow(book, row)).join("")}
+        ${renderWordBookMetricStrip(book)}
+        <div class="word-book-actions">
+          <span class="status-pill ${disabled ? "muted-pill" : (stats.pending <= 0 ? "success-pill" : "warning-pill")}">${escapeHtml(statusLabel)}</span>
+          <button type="button" data-word-book-complete="${escapeAttr(String(book.book_key || ""))}" ${!convertibleCount ? "disabled" : ""}>Word completo</button>
+          <button type="button" data-word-book-open="${escapeAttr(String(book.book_key || ""))}" ${disabled ? "disabled" : ""}>Ver instancias</button>
         </div>
       </div>
     </article>
   `;
 }
 
+function renderWordBookMetricStrip(book) {
+  const stats = wordBookStats(book);
+  return `
+    <div class="word-book-metrics">
+      <div><strong>${Number(stats.total || 0)}</strong><span>Inst.</span></div>
+      <div><strong>${Number(stats.scanned || 0)}</strong><span>Trab.</span></div>
+      <div><strong>${Number(stats.ready || 0)}</strong><span>Word</span></div>
+      <div><strong>${Number(stats.pending || 0)}</strong><span>Faltan</span></div>
+    </div>
+  `;
+}
+
+function wordBookStats(book) {
+  const instances = Array.isArray(book?.instances) ? book.instances : [];
+  const scanned = instances.filter((row) => wordInstanceHasWork(row)).length;
+  const ready = instances.filter((row) => Boolean(row.word_exists)).length;
+  return {
+    total: instances.length,
+    scanned,
+    ready,
+    pending: Math.max(0, scanned - ready),
+  };
+}
+
 function renderWordInstanceRow(book, row) {
   const key = String(row.instance_key || "");
+  const practiceTitle = String(row.practice_title || row.titulo_practica || "").trim();
+  const displayTitle = practiceTitle || row.title || "Instancia";
   const ready = Boolean(row.word_exists);
   const missing = !row.session_exists;
+  const exportable = Boolean(row.session_exportable);
+  const dbExportable = Boolean(row.db_exportable || Number(row.db_problem_count || 0) > 0);
+  const dbRefAvailable = wordInstanceDbRefAvailable(row);
   const converting = state.library.word?.convertingKey === key;
   const selected = state.library.word?.selectedKey === key;
   const queued = wordSelectionKeys().has(key);
-  const status = missing ? "Sin sesion" : (ready ? "Word exportado" : "Pendiente");
+  const status = ready
+    ? "Word exportado"
+    : (dbExportable
+      ? `Desde BD (${Number(row.db_problem_count || 0)} problemas)`
+      : (dbRefAvailable ? "BD lista para convertir" : (missing ? "Sin sesion" : (!exportable ? "Sin formato final" : "Pendiente"))));
+  const disabled = !wordInstanceConvertible(row);
+  const reason = String(row.exportable_reason || "").trim();
   return `
-    <div class="word-instance-row ${ready ? "ready" : ""} ${missing ? "missing" : ""} ${selected ? "selected" : ""} ${queued ? "queued" : ""}" data-word-row="${escapeAttr(key)}" title="Doble click abre el Word si ya existe">
+    <div class="word-instance-row ${ready ? "ready" : ""} ${disabled ? "missing" : ""} ${selected ? "selected" : ""} ${queued ? "queued" : ""}" data-word-row="${escapeAttr(key)}" title="Doble click abre el Word si ya existe">
       <label class="word-row-check" title="Agregar a cola">
-        <input type="checkbox" data-word-select="${escapeAttr(key)}" ${queued ? "checked" : ""} ${missing || state.library.word?.batchRunning ? "disabled" : ""} />
+        <input type="checkbox" data-word-select="${escapeAttr(key)}" ${queued ? "checked" : ""} ${disabled || state.library.word?.batchRunning ? "disabled" : ""} />
       </label>
       <div>
-        <strong>${escapeHtml(row.title || "Instancia")}</strong>
-        <span class="muted">${escapeHtml(status)}</span>
+        <strong>${escapeHtml(displayTitle)}</strong>
+        ${practiceTitle && row.title && practiceTitle !== row.title ? `<small>Instancia: ${escapeHtml(row.title)}</small>` : ""}
+        <span class="muted">${escapeHtml(status)}${!dbExportable && row.exportable_items ? ` | ${Number(row.exportable_items)} item(s)` : ""}</span>
         <small>${escapeHtml(compactText(row.session_path || "", 100))}</small>
+        ${reason && !exportable && !dbExportable ? `<small class="word-instance-reason">${escapeHtml(reason)}</small>` : ""}
       </div>
       <div class="word-instance-actions">
-        <button type="button" data-convert-word="${escapeAttr(key)}" ${missing || converting ? "disabled" : ""}>
+        <button type="button" data-convert-word="${escapeAttr(key)}" ${disabled || converting ? "disabled" : ""}>
           ${converting ? "Convirtiendo..." : (ready ? "Reconvertir" : "Convertir")}
         </button>
         <button type="button" data-open-word="${escapeAttr(key)}" ${ready ? "" : "disabled"}>Abrir Word</button>
@@ -2304,6 +2399,7 @@ function renderInstanceForm(book, instance = null) {
   const editing = Boolean(instance?.id);
   const defaultName = book ? `${book.code} - instancia ${(book.instances || []).length + 1}` : "";
   const name = instance?.title || instance?.name || instance?.tipo || instance?.instance_type || defaultName;
+  const practiceTitle = instance?.practice_title || instance?.titulo_practica || "";
   const expected = instance?.total_esperado || instance?.expected_total || instance?.summary?.total_esperado || "";
   const notes = instance?.notes || instance?.notas || "";
   const active = instance?.active ?? instance?.activo ?? true;
@@ -2314,6 +2410,7 @@ function renderInstanceForm(book, instance = null) {
         <span class="muted">${editing ? "Cambia el nombre visible de la instancia sin tocar los problemas ya guardados." : "Crea un tramo de trabajo para este libro."}</span>
       </div>
       ${field("instanceName", "Nombre", name)}
+      ${field("instancePracticeTitle", "Nombre para practicas", practiceTitle)}
       ${field("instanceExpected", "Meta opcional", expected)}
       <label class="check-field"><input id="instanceActive" type="checkbox" ${active ? "checked" : ""} /><span>Activa</span></label>
       <label class="wide"><span class="muted">Notas</span><textarea id="instanceNotes" rows="3">${escapeHtml(notes)}</textarea></label>
@@ -3057,12 +3154,14 @@ function instanceCardHtml(instance) {
   const info = instanceWorkflowInfo(instance);
   const timeline = instanceTimelineInfo(instance);
   const isActive = instance.id === state.library.selectedInstanceId;
+  const practiceTitle = String(instance.practice_title || instance.titulo_practica || "").trim();
   return `
     <article class="instance-card instance-state-${status} ${isActive ? "active" : ""}" data-instance="${instance.id}">
       <button class="instance-select" data-instance-select="${instance.id}" type="button">
         <span>
           <strong>${escapeHtml(instance.title)}</strong>
           <small>${escapeHtml(instance.pages || instance.page_range || instance.range || "Paginas por definir")}</small>
+          ${practiceTitle ? `<small class="instance-practice-title">Practica: ${escapeHtml(practiceTitle)}</small>` : ""}
         </span>
         <span class="status-pill status-${status}">${displayStatus(status)}</span>
       </button>
@@ -3237,8 +3336,8 @@ function bindLibrarySidebarEvents() {
           loadConceptCatalog({ silent: true }).catch((err) => setStatus(`Error de conceptos: ${err.message}`));
         }
       }
-      if (state.library.screen === "word" && !state.library.word.catalog) {
-        loadWordSessions({ silent: true }).catch((err) => setStatus(`Error Word: ${err.message}`));
+      if (state.library.screen === "word" && !state.library.word.catalog && !state.library.word.loading) {
+        loadWordSessions().catch((err) => setStatus(`Error Word: ${err.message}`));
       }
     };
   });
@@ -3383,6 +3482,18 @@ function bindLibraryContentEvents() {
 }
 
 function bindWordEvents() {
+  document.querySelectorAll("[data-word-mode]").forEach((btn) => {
+    btn.onclick = () => {
+      const mode = String(btn.dataset.wordMode || "instances");
+      state.library.word.mode = mode === "selection" ? "selection" : "instances";
+      if (state.library.word.mode !== "instances") {
+        state.library.word.selectedBookKey = "";
+        wordSelectionKeys().clear();
+      }
+      renderLibraryContent();
+      setStatus(state.library.word.mode === "selection" ? "Modo Word: seleccion por filtros." : "Modo Word: instancias.");
+    };
+  });
   const wordSearch = $("wordSearchInput");
   if (wordSearch) {
     wordSearch.oninput = (event) => {
@@ -3435,6 +3546,35 @@ function bindWordEvents() {
   if (refreshBtn) {
     refreshBtn.onclick = () => loadWordSessions().catch((err) => setStatus(`Error Word: ${err.message}`));
   }
+  const backToWordBooksBtn = $("backToWordBooksBtn");
+  if (backToWordBooksBtn) {
+    backToWordBooksBtn.onclick = () => {
+      state.library.word.selectedBookKey = "";
+      state.library.word.selectedKey = "";
+      wordSelectionKeys().clear();
+      renderLibraryContent();
+      setStatus("Biblioteca Word: selecciona un libro.");
+    };
+  }
+  document.querySelectorAll("[data-word-book-open]").forEach((btn) => {
+    btn.onclick = () => {
+      const key = String(btn.dataset.wordBookOpen || "");
+      const book = (state.library.word?.catalog?.books || []).find((item) => String(item.book_key || "") === key);
+      if (!book || wordBookStats(book).scanned <= 0) return setStatus("Este libro no tiene instancias trabajadas para convertir a Word.");
+      state.library.word.selectedBookKey = key;
+      state.library.word.selectedKey = "";
+      wordSelectionKeys().clear();
+      renderLibraryContent();
+      setStatus(`Instancias Word: ${book.title || book.code || "libro"}.`);
+    };
+  });
+  document.querySelectorAll("[data-word-book-complete]").forEach((btn) => {
+    btn.onclick = () => {
+      const key = String(btn.dataset.wordBookComplete || "");
+      const book = (state.library.word?.catalog?.books || []).find((item) => String(item.book_key || "") === key);
+      return convertWordCombined(wordBookConvertibleInstances(book)).catch((err) => setStatus(`Error Word completo: ${err.message}`));
+    };
+  });
   bindManualWordSessionEvents();
   bindWordProblemEvents();
   const selectVisibleBtn = $("selectVisibleWordBtn");
@@ -3442,7 +3582,7 @@ function bindWordEvents() {
     selectVisibleBtn.onclick = () => {
       const selected = wordSelectionKeys();
       visibleWordInstances().forEach(({ instance }) => {
-        if (instance.session_exists) selected.add(String(instance.instance_key || ""));
+        if (wordInstanceConvertible(instance)) selected.add(String(instance.instance_key || ""));
       });
       renderLibraryContent();
     };
@@ -3461,7 +3601,7 @@ function bindWordEvents() {
   const convertPendingBtn = $("convertPendingWordBtn");
   if (convertPendingBtn) {
     convertPendingBtn.onclick = () => {
-      const pending = visibleWordInstances().filter(({ instance }) => instance.session_exists && !instance.word_exists);
+      const pending = visibleWordInstances().filter(({ instance }) => wordInstanceConvertible(instance) && !instance.word_exists);
       return convertWordBatch(pending, "pendientes").catch((err) => setStatus(`Error Word: ${err.message}`));
     };
   }
@@ -3544,20 +3684,26 @@ function bindWordProblemEvents() {
     ["wordProblemSubtema", "subtemaId"],
     ["wordProblemAutor", "autor"],
     ["wordProblemEditorial", "editorial"],
+    ["wordProblemLibro", "libro"],
     ["wordProblemEstado", "estado"],
     ["wordProblemClave", "clave"],
   ].forEach(([id, key]) => {
     const el = $(id);
     if (!el) return;
     el.onchange = (event) => {
-      const emptyKeys = new Set(["curso", "temaId", "subtemaId", "autor", "editorial"]);
+      const emptyKeys = new Set(["curso", "temaId", "subtemaId", "autor", "editorial", "libro"]);
       ps[key] = event.target.value || (emptyKeys.has(key) ? "" : "Todos");
       if (key === "curso") {
         ps.temaId = "";
         ps.subtemaId = "";
+        ps.libro = "";
       }
       if (key === "temaId") {
         ps.subtemaId = "";
+        ps.libro = "";
+      }
+      if (["subtemaId", "autor", "editorial"].includes(key)) {
+        ps.libro = "";
       }
     };
   });
@@ -4711,6 +4857,8 @@ function instanceFormPayload(book) {
     book_id: Number(book?.id || 0),
     tipo: $("instanceName").value.trim(),
     name: $("instanceName").value.trim(),
+    titulo_practica: $("instancePracticeTitle")?.value.trim() || "",
+    practice_title: $("instancePracticeTitle")?.value.trim() || "",
     total_esperado: Number.isFinite(expected) && expected > 0 ? expected : 0,
     notas: $("instanceNotes")?.value.trim() || "",
     notes: $("instanceNotes")?.value.trim() || "",
@@ -10458,6 +10606,7 @@ function wordProblemSelectionState() {
   if (ps.subtemaId === undefined || ps.subtemaId === null) ps.subtemaId = "";
   if (ps.autor === undefined || ps.autor === null) ps.autor = "";
   if (ps.editorial === undefined || ps.editorial === null) ps.editorial = "";
+  if (ps.libro === undefined || ps.libro === null) ps.libro = "";
   if (ps.previewProblemId === undefined || ps.previewProblemId === null) ps.previewProblemId = "";
   if (!ps.limit) ps.limit = 100;
   return ps;
@@ -10500,6 +10649,7 @@ async function loadWordProblems({ silent = false } = {}) {
     if (String(ps.subtemaId || "").trim()) params.set("subtema_id", String(ps.subtemaId || "").trim());
     if (String(ps.autor || "").trim()) params.set("autor", String(ps.autor || "").trim());
     if (String(ps.editorial || "").trim()) params.set("editorial", String(ps.editorial || "").trim());
+    if (String(ps.libro || "").trim()) params.set("libro", String(ps.libro || "").trim());
     if (String(ps.estado || "Todos").trim()) params.set("estado", String(ps.estado || "Todos").trim());
     if (String(ps.clave || "Todos").trim()) params.set("clave", String(ps.clave || "Todos").trim());
     params.set("limit", String(Math.max(1, Math.min(500, Number(ps.limit || 100)))));
@@ -10598,7 +10748,9 @@ function pruneWordSelection() {
 
 function visibleWordInstances() {
   const rows = [];
-  for (const book of filteredWordBooks()) {
+  const selectedBook = selectedWordBook();
+  const sourceBooks = selectedBook ? [selectedBook] : filteredWordBooks();
+  for (const book of sourceBooks) {
     for (const instance of filteredWordInstances(book)) {
       rows.push({ book, instance });
     }
@@ -10612,15 +10764,65 @@ function selectedWordInstances() {
   return wordAllInstances().filter(({ instance }) => selected.has(String(instance.instance_key || "")));
 }
 
+function wordBookConvertibleInstances(book) {
+  if (!book || typeof book !== "object") return [];
+  return (book.instances || [])
+    .filter((instance) => wordInstanceConvertible(instance))
+    .map((instance) => ({ book, instance }));
+}
+
 function findWordInstance(instanceKey) {
   const key = String(instanceKey || "");
   return wordAllInstances().find(({ instance }) => String(instance.instance_key || "") === key) || null;
 }
 
+function selectedWordBook() {
+  const key = String(state.library.word?.selectedBookKey || "");
+  if (!key) return null;
+  return (state.library.word?.catalog?.books || []).find((book) => String(book.book_key || "") === key) || null;
+}
+
+function wordInstanceConvertible(row) {
+  if (!row || typeof row !== "object") return false;
+  if (row.db_exportable || Number(row.db_problem_count || 0) > 0) return true;
+  if (wordInstanceDbRefAvailable(row) && !wordInstanceHasKnownDbCount(row)) return true;
+  return Boolean(row.session_exists && row.session_exportable);
+}
+
+function wordInstanceHasKnownDbCount(row) {
+  if (!row || typeof row !== "object") return false;
+  return Object.prototype.hasOwnProperty.call(row, "db_problem_count") || Object.prototype.hasOwnProperty.call(row, "db_exportable");
+}
+
+function wordInstanceHasWork(row) {
+  if (!row || typeof row !== "object") return false;
+  return Boolean(
+    row.word_exists ||
+    row.db_exportable ||
+    Number(row.db_problem_count || 0) > 0 ||
+    (row.session_exists && (row.session_exportable || Number(row.exportable_items || 0) > 0))
+  );
+}
+
+function wordInstanceDbRefAvailable(row) {
+  if (!row || typeof row !== "object") return false;
+  return Boolean(row.db_ref_available || (String(row.book_code || "").trim() && String(row.instance_code || row.title || "").trim()));
+}
+
 function filteredWordBooks() {
   const word = state.library.word || {};
   const query = normalizeLibrarySearchText(word.query || "");
-  return (word.catalog?.books || []).filter((book) => filteredWordInstances(book, query).length > 0);
+  return (word.catalog?.books || []).filter((book) => {
+    if (!query) return true;
+    const bookHaystack = normalizeLibrarySearchText([
+      book.title,
+      book.code,
+      book.author,
+      book.editorial,
+      book.course,
+    ].filter(Boolean).join(" "));
+    return bookHaystack.includes(query) || filteredWordInstances(book, query).length > 0;
+  });
 }
 
 function filteredWordInstances(book, forcedQuery = null) {
@@ -10629,7 +10831,7 @@ function filteredWordInstances(book, forcedQuery = null) {
   const filter = String(word.wordFilter || "all");
   return (book.instances || []).filter((row) => {
     if (filter === "ready" && !row.word_exists) return false;
-    if (filter === "pending" && (!row.session_exists || row.word_exists)) return false;
+    if (filter === "pending" && (!wordInstanceConvertible(row) || row.word_exists)) return false;
     if (filter === "missing" && row.session_exists) return false;
     if (!query) return true;
     const haystack = normalizeLibrarySearchText([
@@ -10639,6 +10841,8 @@ function filteredWordInstances(book, forcedQuery = null) {
       book.editorial,
       book.course,
       row.title,
+      row.practice_title,
+      row.titulo_practica,
       row.session_path,
       row.word_path,
     ].filter(Boolean).join(" "));
@@ -10686,6 +10890,7 @@ function syncWordSettingsFromCatalog({ force = false } = {}) {
 }
 
 async function loadWordSessions({ silent = false } = {}) {
+  if (state.library.word.loading) return state.library.word.catalog || null;
   state.library.word.loading = true;
   state.library.word.error = "";
   if (!silent && state.view === "library" && state.library.screen === "word") renderLibraryContent();
@@ -10694,7 +10899,14 @@ async function loadWordSessions({ silent = false } = {}) {
     if (state.library.selectedDb) params.set("db_name", state.library.selectedDb);
     if (String(state.library.word.root || "").trim()) params.set("root", String(state.library.word.root || "").trim());
     const payload = await api(`/api/word/sessions?${params.toString()}`);
+    enrichWordCatalogForDbRefs(payload);
     state.library.word.catalog = payload;
+    const selectedBook = selectedWordBook();
+    if (!selectedBook || wordBookStats(selectedBook).scanned <= 0) {
+      state.library.word.selectedBookKey = "";
+      state.library.word.selectedKey = "";
+      wordSelectionKeys().clear();
+    }
     state.library.word.error = "";
     syncWordSettingsFromCatalog();
     pruneWordSelection();
@@ -10708,16 +10920,37 @@ async function loadWordSessions({ silent = false } = {}) {
   }
 }
 
+function enrichWordCatalogForDbRefs(catalog) {
+  if (!catalog || typeof catalog !== "object") return catalog;
+  const dbName = String(catalog.db_name || state.library.selectedDb || "").trim();
+  (catalog.books || []).forEach((book) => {
+    const bookCode = String(book.code || book.codigo || "").trim();
+    const bookId = Number(book.id || 0);
+    (book.instances || []).forEach((row) => {
+      if (!row || typeof row !== "object") return;
+      const instanceCode = String(row.instance_code || row.codigo_instancia || row.title || "").trim();
+      if (!row.book_code) row.book_code = bookCode;
+      if (!row.book_id && bookId > 0) row.book_id = bookId;
+      if (!row.instance_code) row.instance_code = instanceCode;
+      if (!row.instance_ref && (dbName || bookCode || instanceCode)) {
+        row.instance_ref = [dbName, bookId || "", bookCode, Number(row.id || 0) || "", instanceCode].join("::");
+      }
+      if (bookCode && instanceCode) row.db_ref_available = true;
+    });
+  });
+  return catalog;
+}
+
 async function convertWordSession(instanceKey) {
   const found = findWordInstance(instanceKey);
   if (!found) return setStatus("No encontre la sesion seleccionada.");
   const row = found.instance || {};
-  if (!row.session_exists) return setStatus("Esta instancia no tiene archivo de sesion resoluble.");
+  if (!wordInstanceConvertible(row)) return setStatus(row.exportable_reason || "Esta instancia no tiene problemas en BD ni formato final exportable.");
   state.library.word.selectedKey = String(row.instance_key || "");
   state.library.word.convertingKey = String(row.instance_key || "");
   renderLibraryContent();
   try {
-    await convertWordInstanceRow(row);
+    await convertWordInstanceRow(row, found.book || {});
     setStatus(`Word generado: ${row.word_path || row.title}`);
     await loadWordSessions({ silent: true });
   } catch (err) {
@@ -10775,18 +11008,37 @@ function openManualWordSession() {
   setStatus(`Abriendo Word manual: ${result.word_path || result.output_docx || ""}`);
 }
 
-async function convertWordInstanceRow(row) {
+async function convertWordInstanceRow(row, book = {}) {
   const settings = wordConversionSettings();
-  const result = await api("/api/word/convert", {
+  const useDb = wordInstanceDbRefAvailable(row);
+  const endpoint = useDb ? "/api/word/convert-instance" : "/api/word/convert";
+  const practiceTitle = String(row.practice_title || row.titulo_practica || "").trim();
+  const instanceTitle = practiceTitle || row.title || row.instance_code || "";
+  const body = useDb ? {
+    db_name: state.library.selectedDb || state.library.word?.catalog?.db_name || "",
+    libro_codigo: row.book_code || book.code || "",
+    codigo_instancia: row.instance_code || row.title || "",
+    session_path: row.session_path || "",
+    output_docx: "",
+    title: [book.title || book.code || row.book_code || "", instanceTitle].filter(Boolean).join(" - "),
+    repo: settings.repo || "",
+    python: settings.python || "",
+    template: settings.template || "",
+    style: settings.style || "Estilo_plantilla",
+  } : {
+    session_path: row.session_path,
+    output_docx: row.word_path || "",
+    repo: settings.repo || "",
+    python: settings.python || "",
+    template: settings.template || "",
+    style: settings.style || "Estilo_plantilla",
+  };
+  if (useDb && (!String(body.libro_codigo || "").trim() || !String(body.codigo_instancia || "").trim())) {
+    throw new Error("Falta vinculo BD de libro o instancia. Actualiza sesiones Word y vuelve a intentar.");
+  }
+  const result = await api(endpoint, {
     method: "POST",
-    body: {
-      session_path: row.session_path,
-      output_docx: row.word_path || "",
-      repo: settings.repo || "",
-      python: settings.python || "",
-      template: settings.template || "",
-      style: settings.style || "Estilo_plantilla",
-    },
+    body,
   });
   row.word_exists = Boolean(result.word_exists);
   row.word_path = result.word_path || result.output_docx || row.word_path || "";
@@ -10796,8 +11048,8 @@ async function convertWordInstanceRow(row) {
 
 async function convertWordBatch(rows, label = "seleccionadas") {
   const queue = (rows || [])
-    .map((item) => item?.instance || item)
-    .filter((row) => row?.session_exists);
+    .map((item) => (item?.instance ? item : { instance: item, book: {} }))
+    .filter((item) => wordInstanceConvertible(item?.instance));
   if (!queue.length) return setStatus("No hay sesiones validas para convertir.");
   if (state.library.word.batchRunning) return setStatus("Ya hay una cola Word en ejecucion.");
   state.library.word.batchRunning = true;
@@ -10807,7 +11059,8 @@ async function convertWordBatch(rows, label = "seleccionadas") {
   let failed = 0;
   try {
     for (let index = 0; index < queue.length; index += 1) {
-      const row = queue[index];
+      const item = queue[index];
+      const row = item.instance || {};
       state.library.word.selectedKey = String(row.instance_key || "");
       state.library.word.convertingKey = String(row.instance_key || "");
       state.library.word.batchProgress = {
@@ -10817,7 +11070,7 @@ async function convertWordBatch(rows, label = "seleccionadas") {
       };
       renderLibraryContent();
       try {
-        await convertWordInstanceRow(row);
+        await convertWordInstanceRow(row, item.book || {});
         wordSelectionKeys().delete(String(row.instance_key || ""));
         ok += 1;
       } catch (err) {
@@ -10832,6 +11085,58 @@ async function convertWordBatch(rows, label = "seleccionadas") {
     }
     await loadWordSessions({ silent: true });
     setStatus(`Cola Word terminada: ${ok} convertido(s), ${failed} error(es).`);
+  } finally {
+    state.library.word.batchRunning = false;
+    state.library.word.convertingKey = "";
+    state.library.word.batchProgress = null;
+    if (state.view === "library" && state.library.screen === "word") renderLibraryContent();
+  }
+}
+
+async function convertWordCombined(rows) {
+  const queue = (rows || [])
+    .map((item) => (item?.instance ? item : { instance: item, book: {} }))
+    .filter((item) => wordInstanceConvertible(item?.instance));
+  if (!queue.length) return setStatus("Selecciona instancias validas para crear el Word completo.");
+  if (state.library.word.batchRunning) return setStatus("Ya hay una cola Word en ejecucion.");
+  const firstBook = queue[0]?.book || selectedWordBook() || {};
+  const title = `${firstBook.title || firstBook.code || "Documento"} - completo`;
+  state.library.word.batchRunning = true;
+  state.library.word.batchProgress = { label: "Preparando Word completo", current: 0, total: queue.length };
+  renderLibraryContent();
+  try {
+    const settings = wordConversionSettings();
+    const result = await api("/api/word/convert-instances", {
+      method: "POST",
+      body: {
+        db_name: state.library.selectedDb || state.library.word?.catalog?.db_name || "",
+        title,
+        instances: queue.map(({ instance, book }) => ({
+          libro_codigo: instance.book_code || book.code || "",
+          codigo_instancia: instance.instance_code || instance.title || "",
+          session_path: instance.session_path || "",
+          title: instance.practice_title || instance.titulo_practica || instance.title || instance.instance_code || "",
+        })),
+        repo: settings.repo || "",
+        python: settings.python || "",
+        template: settings.template || "",
+        style: settings.style || "Estilo_plantilla",
+      },
+    });
+    state.library.word.manualSession = {
+      ...manualWordSessionState(),
+      result,
+      outputDocx: result.word_path || result.output_docx || "",
+      error: "",
+    };
+    wordSelectionKeys().clear();
+    await loadWordSessions({ silent: true });
+    const included = (result.instances || []).filter((row) => !row.skipped).length;
+    const skipped = (result.instances || []).filter((row) => row.skipped).length;
+    const detail = skipped ? ` Incluidas: ${included}; omitidas: ${skipped}.` : ` Incluidas: ${included}.`;
+    setStatus(`Word completo generado: ${result.word_path || result.output_docx || ""}.${detail}`);
+  } catch (err) {
+    setStatus(`Error Word completo: ${err.message || String(err)}`);
   } finally {
     state.library.word.batchRunning = false;
     state.library.word.convertingKey = "";
