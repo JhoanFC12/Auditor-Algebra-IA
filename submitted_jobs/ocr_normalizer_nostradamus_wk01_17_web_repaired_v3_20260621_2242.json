@@ -1,0 +1,21 @@
+{
+  "schema_version": "hf_ocr_normalizer_job_submission_v3",
+  "submitted_at": "2026-06-21T22:43:07",
+  "job_id": "6a38af31953ed90bfb947b8b",
+  "job_url": "https://huggingface.co/jobs/Jhoan12/6a38af31953ed90bfb947b8b",
+  "dataset_repo_id": "Jhoan12/math-ocr-normalizer-nostradamus-wk01-17-web-repaired-v3-dataset",
+  "dataset_url": "https://huggingface.co/datasets/Jhoan12/math-ocr-normalizer-nostradamus-wk01-17-web-repaired-v3-dataset",
+  "model_repo_id": "Jhoan12/math-ocr-normalizer-qwen2.5-0.5b-nostradamus-wk01-17-lora-v3",
+  "model_url": "https://huggingface.co/Jhoan12/math-ocr-normalizer-qwen2.5-0.5b-nostradamus-wk01-17-lora-v3",
+  "base_model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "epochs": 8,
+  "learning_rate": 0.0002,
+  "batch": 2,
+  "grad_accum": 4,
+  "max_length": 2048,
+  "flavor": "t4-small",
+  "timeout": "3h",
+  "run_name": "normalizer-nostradamus-wk01-17-web-repaired-v3",
+  "dataset_dir": "E:\\Github\\Auditor-IA\\.cache\\transcriptor_runs\\datasets\\normalizer_nostradamus_wk01_17_web_repaired_v3",
+  "audit_dir": "E:\\Github\\Auditor-IA\\.cache\\transcriptor_runs\\audits\\normalizer_nostradamus_wk01_17_web_repaired_v3_final_after_auditor_fix"
+}

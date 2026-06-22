@@ -1,0 +1,21 @@
+{
+  "schema_version": "hf_ocr_normalizer_job_submission_v3_retry1",
+  "submitted_at": "2026-06-21T22:47:32",
+  "previous_failed_job_id": "6a38af31953ed90bfb947b8b",
+  "job_id": "6a38b0543093dba73ce2bb47",
+  "job_url": "https://huggingface.co/jobs/Jhoan12/6a38b0543093dba73ce2bb47",
+  "dataset_repo_id": "Jhoan12/math-ocr-normalizer-nostradamus-wk01-17-web-repaired-v3-dataset",
+  "model_repo_id": "Jhoan12/math-ocr-normalizer-qwen2.5-0.5b-nostradamus-wk01-17-lora-v3",
+  "base_model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "epochs": 8,
+  "learning_rate": 0.0002,
+  "batch": 2,
+  "grad_accum": 4,
+  "max_length": 2048,
+  "trackio_project": "auditor-ia-normalizer",
+  "run_name": "normalizer-nostradamus-wk01-17-web-repaired-v3-retry1",
+  "flavor": "t4-small",
+  "timeout_seconds": 10800,
+  "image": "pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime",
+  "failure_fix": "repo_created_locally_and_remote_create_repo_call_removed"
+}

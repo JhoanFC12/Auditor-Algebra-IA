@@ -270,7 +270,39 @@ def _figure_count(row: dict[str, Any]) -> int:
     images = row.get("images")
     if isinstance(images, list) and images:
         return len(images)
+    for payload in _embedded_normalizer_inputs(row):
+        nested_count = _figure_count(payload)
+        if nested_count > 0:
+            return nested_count
     return 0
+
+
+def _embedded_normalizer_inputs(row: dict[str, Any]) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    candidates: list[Any] = [row.get("normalizer_input"), row.get("input")]
+    for key in ("prompt", "messages"):
+        value = row.get(key)
+        if isinstance(value, list):
+            candidates.extend(
+                item.get("content")
+                for item in value
+                if isinstance(item, dict) and str(item.get("role") or "").lower() == "user"
+            )
+        else:
+            candidates.append(value)
+    for value in candidates:
+        if isinstance(value, dict):
+            payloads.append(value)
+            continue
+        if not isinstance(value, str) or not value.strip().startswith("{"):
+            continue
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            payloads.append(parsed)
+    return payloads
 
 
 def _metric_hallucination_risk(text: str, row: dict[str, Any], *, target: str) -> RuleMetric:

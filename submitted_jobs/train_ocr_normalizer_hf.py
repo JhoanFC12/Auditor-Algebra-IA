@@ -20,6 +20,8 @@ def main() -> int:
     parser.add_argument("--batch", type=int, default=2)
     parser.add_argument("--grad-accum", type=int, default=4)
     parser.add_argument("--max-length", type=int, default=2048)
+    parser.add_argument("--trackio-project", default="auditor-ia-normalizer")
+    parser.add_argument("--run-name", default="normalizer-qwen25-05b-lora")
     args = parser.parse_args()
 
     token = os.environ["HF_TOKEN"]
@@ -53,8 +55,8 @@ def main() -> int:
         fp16=torch.cuda.is_available(),
         bf16=False,
         report_to=["trackio"],
-        project="auditor-ia-normalizer",
-        run_name="normalizer-v1-300-qwen25-05b-lora",
+        project=args.trackio_project,
+        run_name=args.run_name,
         push_to_hub=True,
         hub_model_id=args.model_repo_id,
         hub_private_repo=True,
@@ -68,7 +70,7 @@ def main() -> int:
         peft_config=peft_config,
     )
     trainer.train()
-    trainer.push_to_hub(commit_message="Upload OCR normalizer LoRA v1")
+    trainer.push_to_hub(commit_message=f"Upload OCR normalizer LoRA {args.run_name}")
     print(f"[OK] Modelo subido: https://huggingface.co/{args.model_repo_id}")
     return 0
 
