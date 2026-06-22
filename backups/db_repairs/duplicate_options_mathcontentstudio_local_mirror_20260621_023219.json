@@ -1,0 +1,150 @@
+{
+  "db": "mathcontentstudio_local_mirror",
+  "created_at": "2026-06-21T02:32:19",
+  "affected": [
+    {
+      "id": 8910,
+      "before": "\\item[\\textbf{8.}] Indique el valor de verdad de las siguientes proposiciones: I. El postulado de la medida de un ángulo tiene demostración matemática. II. El complemento y el suplemento de un ángulo forman un par lineal. III. El postulado de la construcción de un ángulo está relacionado con un transportador. IV. El postulado de la adición de ángulos tiene demostración matemática. £A)FVVFæB)FFVFæC)FFFF£D)FVFVææE)FFVF£ A) FVVF B) FFVF C) FFFF D) FVFV E) FFVF",
+      "after": "\\item[\\textbf{8.}] Indique el valor de verdad de las siguientes proposiciones: I. El postulado de la medida de un ángulo tiene demostración matemática. II. El complemento y el suplemento de un ángulo forman un par lineal. III. El postulado de la construcción de un ángulo está relacionado con un transportador. IV. El postulado de la adición de ángulos tiene demostración matemática. £A)FVVFæB)FFVFæC)FFFF£D)FVFVææE)FFVF£",
+      "reason": "duplicate_trailing_options"
+    },
+    {
+      "id": 8922,
+      "before": "\\item[\\textbf{20.}] Dadas las siguientes proposiciones, ¿cuáles son verdaderas? I. Si al círculo se le extrae un punto cualquiera, entonces queda un conjunto no convexo. II. Una región triangular cuyos vértices se han omitido es un conjunto convexo. III. El exterior de un plano es un conjunto convexo. £A)FVFæB)FFFæC)FVV£D)VVFææE)FFV£ A) FVF B) FFF C) FVV D) VVF E) FFV",
+      "after": "\\item[\\textbf{20.}] Dadas las siguientes proposiciones, ¿cuáles son verdaderas? I. Si al círculo se le extrae un punto cualquiera, entonces queda un conjunto no convexo. II. Una región triangular cuyos vértices se han omitido es un conjunto convexo. III. El exterior de un plano es un conjunto convexo. £A)FVFæB)FFFæC)FVV£D)VVFææE)FFV£",
+      "reason": "duplicate_trailing_options"
+    },
+    {
+      "id": 8926,
+      "before": "\\item[\\textbf{24.}] Indique el valor de verdad de las siguientes proposiciones: I. El semiplano es un conjunto convexo. II. El plano sin la recta que determina sus dos semiplanos es un conjunto convexo. III. Tres rectas en un plano, dos de ellas paralelas determinan cuatro conjuntos convexos y dos conjuntos no convexos en el plano disjunto. IV. Una recta y una región triangular disjuntas, contenidos en un plano, determinan únicamente una partición de $5$ elementos de este plano. £A)FFFVæB)VFVFæC)FVFF£D)VFFVææE)VFFF£ A) FFFV B) VFVF C) FVFF D) VFFV E) VFFF",
+      "after": "\\item[\\textbf{24.}] Indique el valor de verdad de las siguientes proposiciones: I. El semiplano es un conjunto convexo. II. El plano sin la recta que determina sus dos semiplanos es un conjunto convexo. III. Tres rectas en un plano, dos de ellas paralelas determinan cuatro conjuntos convexos y dos conjuntos no convexos en el plano disjunto. IV. Una recta y una región triangular disjuntas, contenidos en un plano, determinan únicamente una partición de $5$ elementos de este plano. £A)FFFVæB)VFVFæC)FVFF£D)VFFVææE)VFFF£",
+      "reason": "duplicate_trailing_options"
+    },
+    {
+      "id": 8938,
+      "before": "\\item[\\textbf{6.}] Las medidas de los ángulos de un triángulo obtusángulo están en progresión aritmética de razón $r$. Calcular el menor valor entero de la razón. £A)$59$æB)$44$æC)$29$£D)$31$ææE)$61$£ A) $59$ B) $44$ C) $29$ D) $31$ E) $61$",
+      "after": "\\item[\\textbf{6.}] Las medidas de los ángulos de un triángulo obtusángulo están en progresión aritmética de razón $r$. Calcular el menor valor entero de la razón. £A)$59$æB)$44$æC)$29$£D)$31$ææE)$61$£",
+      "reason": "duplicate_trailing_options"
+    },
+    {
+      "id": 8949,
+      "before": "\\item[\\textbf{17.}] En un triángulo $ABC$, en $\\overline{AC}$ y $\\overline{BC}$ se ubican los puntos $P$ y $Q$, respectivamente. Si $AB=AP=PQ$ y $\\dfrac{m\\sphericalangle B}{11}=\\dfrac{m\\sphericalangle QAP}{2}=\\dfrac{m\\sphericalangle BQA}{3}$, calcule $m\\sphericalangle C$. £A)$5^\\circ$æB)$8^\\circ$æC)$9^\\circ$£D)$10^\\circ$ææE)$12^\\circ$£ A) $5^\\circ$ B) $8^\\circ$ C) $9^\\circ$ D) $10^\\circ$ E) $12^\\circ$",
+      "after": "\\item[\\textbf{17.}] En un triángulo $ABC$, en $\\overline{AC}$ y $\\overline{BC}$ se ubican los puntos $P$ y $Q$, respectivamente. Si $AB=AP=PQ$ y $\\dfrac{m\\sphericalangle B}{11}=\\dfrac{m\\sphericalangle QAP}{2}=\\dfrac{m\\sphericalangle BQA}{3}$, calcule $m\\sphericalangle C$. £A)$5^\\circ$æB)$8^\\circ$æC)$9^\\circ$£D)$10^\\circ$ææE)$12^\\circ$£",
+      "reason": "duplicate_trailing_options"
+    },
+    {
+      "id": 9066,
+      "before": "\\item[\\textbf{14.}] El polígono $MNPQRS$ es un hexágono equiángulo, en el cual la longitud de $3$ de sus lados no consecutivos es $K$, la longitud de cada uno de los otros tres lados es la tercera parte de sus opuestos y sus prolongaciones determinan un triángulo. Halle el perímetro de dicho triángulo. £A)$2K$æB)$\\dfrac{4K}{3}$æC)$\\dfrac{5K}{3}$£D)$\\dfrac{K}{3}$ææE)$\\dfrac{2K}{3}$£ A) $2K$ B) $\\dfrac{4K}{3}$ C) $\\dfrac{5K}{3}$ D) $\\dfrac{K}{3}$ E) $\\dfrac{2K}{3}$",
+      "after": "\\item[\\textbf{14.}] El polígono $MNPQRS$ es un hexágono equiángulo, en el cual la longitud de $3$ de sus lados no consecutivos es $K$, la longitud de cada uno de los otros tres lados es la tercera parte de sus opuestos y sus prolongaciones determinan un triángulo. Halle el perímetro de dicho triángulo. £A)$2K$æB)$\\dfrac{4K}{3}$æC)$\\dfrac{5K}{3}$£D)$\\dfrac{K}{3}$ææE)$\\dfrac{2K}{3}$£",
+      "reason": "duplicate_trailing_options"
+    },
+    {
+      "id": 9071,
+      "before": "\\item[\\textbf{19.}] Si la medida de un ángulo interior y exterior de un polígono regular están en la relación de $7$ a $2$. Halle el número de diagonales que tiene el polígono. £A)$24$æB)$25$æC)$26$£D)$27$ææE)$28$£ A) $24$ B) $25$ C) $26$ D) $27$ E) $28$",
+      "after": "\\item[\\textbf{19.}] Si la medida de un ángulo interior y exterior de un polígono regular están en la relación de $7$ a $2$. Halle el número de diagonales que tiene el polígono. £A)$24$æB)$25$æC)$26$£D)$27$ææE)$28$£",
+      "reason": "duplicate_trailing_options"
+    },
+    {
+      "id": 9076,
+      "before": "\\item[\\textbf{24.}] $ABCDE\\ldots$ es un polígono regular de $n$ lados. Si $\\overline{AC}$ y $\\overline{BD}$ se intersecan en $M$, entonces $m\\sphericalangle AMD$ es: £A)$180^\\circ-\\dfrac{360^\\circ}{n}$æB)$180^\\circ-\\dfrac{90^\\circ}{n}$æC)$180^\\circ-\\dfrac{95^\\circ}{n}$£D)$180^\\circ-\\dfrac{180^\\circ}{n}$ææE)$180^\\circ-\\dfrac{30^\\circ}{n}$£ A) $180^\\circ-\\dfrac{360^\\circ}{n}$ B) $180^\\circ-\\dfrac{90^\\circ}{n}$ C) $180^\\circ-\\dfrac{95^\\circ}{n}$ D) $180^\\circ-\\dfrac{180^\\circ}{n}$ E) $180^\\circ-\\dfrac{30^\\circ}{n}$",
+      "after": "\\item[\\textbf{24.}] $ABCDE\\ldots$ es un polígono regular de $n$ lados. Si $\\overline{AC}$ y $\\overline{BD}$ se intersecan en $M$, entonces $m\\sphericalangle AMD$ es: £A)$180^\\circ-\\dfrac{360^\\circ}{n}$æB)$180^\\circ-\\dfrac{90^\\circ}{n}$æC)$180^\\circ-\\dfrac{95^\\circ}{n}$£D)$180^\\circ-\\dfrac{180^\\circ}{n}$ææE)$180^\\circ-\\dfrac{30^\\circ}{n}$£",
+      "reason": "duplicate_trailing_options"
+    },
+    {
+      "id": 9109,
+      "before": "\\item[\\textbf{27.}] $ABCD$ es un rombo, $m\\sphericalangle ABC=120^\\circ$, $M$ es punto medio de $\\overline{BC}$ y $N$ es punto de intersección de $\\overline{AM}$ y $\\overline{BD}$. Si $AB=8$, entonces $\\overline{NB}$ mide: £A)$3$æB)$\\dfrac{8}{3}$æC)$\\dfrac{7}{3}$£D)$\\dfrac{5}{2}$ææE)$2$£ A) $3$ B) $\\dfrac{8}{3}$ C) $\\dfrac{7}{3}$ D) $\\dfrac{5}{2}$ E) $2$",
+      "after": "\\item[\\textbf{27.}] $ABCD$ es un rombo, $m\\sphericalangle ABC=120^\\circ$, $M$ es punto medio de $\\overline{BC}$ y $N$ es punto de intersección de $\\overline{AM}$ y $\\overline{BD}$. Si $AB=8$, entonces $\\overline{NB}$ mide: £A)$3$æB)$\\dfrac{8}{3}$æC)$\\dfrac{7}{3}$£D)$\\dfrac{5}{2}$ææE)$2$£",
+      "reason": "duplicate_trailing_options"
+    },
+    {
+      "id": 9160,
+      "before": "\\item[\\textbf{18.}] Se tienen tres circunferencias $\\mathcal{C}_1$, $\\mathcal{C}_2$ y $\\mathcal{C}_3$ secantes dos a dos que se interceptan en $A$ y $B$, $A$ y $C$, $A$ y $D$. La prolongación de $\\overline{BC}$ intercepta a $\\mathcal{C}_2$ y $\\mathcal{C}_3$ en $E$ y $F$, y la prolongación de $\\overline{DE}$ intercepta a $\\mathcal{C}_3$ en $Q$. Si $m\\overparen{BC}=48^\\circ$, halle $m\\overparen{QF}$. £A)$48^\\circ$æB)$56^\\circ$æC)$66^\\circ$£D)$76^\\circ$ææE)$86^\\circ$£ A) $48^\\circ$ B) $56^\\circ$ C) $66^\\circ$ D) $76^\\circ$ E) $86^\\circ$",
+      "after": "\\item[\\textbf{18.}] Se tienen tres circunferencias $\\mathcal{C}_1$, $\\mathcal{C}_2$ y $\\mathcal{C}_3$ secantes dos a dos que se interceptan en $A$ y $B$, $A$ y $C$, $A$ y $D$. La prolongación de $\\overline{BC}$ intercepta a $\\mathcal{C}_2$ y $\\mathcal{C}_3$ en $E$ y $F$, y la prolongación de $\\overline{DE}$ intercepta a $\\mathcal{C}_3$ en $Q$. Si $m\\overparen{BC}=48^\\circ$, halle $m\\overparen{QF}$. £A)$48^\\circ$æB)$56^\\circ$æC)$66^\\circ$£D)$76^\\circ$ææE)$86^\\circ$£",
+      "reason": "duplicate_trailing_options"
+    },
+    {
+      "id": 9185,
+      "before": "\\item[\\textbf{13.}] En una circunferencia se trazan las cuerdas perpendiculares $\\overline{AC}$ y $\\overline{BD}$, además, $AB=6$. Halle $BH$ si $H$ es el ortocentro del triángulo $BCD$. £A)$4$æB)$5$æC)$6$£D)$7$ææE)$8$£ A) $4$ B) $5$ C) $6$ D) $7$ E) $8$",
+      "after": "\\item[\\textbf{13.}] En una circunferencia se trazan las cuerdas perpendiculares $\\overline{AC}$ y $\\overline{BD}$, además, $AB=6$. Halle $BH$ si $H$ es el ortocentro del triángulo $BCD$. £A)$4$æB)$5$æC)$6$£D)$7$ææE)$8$£",
+      "reason": "duplicate_trailing_options"
+    },
+    {
+      "id": 9199,
+      "before": "\\item[\\textbf{27.}] Se tiene un cuadrilátero $ABCD$, $m\\sphericalangle ABC=m\\sphericalangle DAC=90^\\circ$, $m\\sphericalangle ACB=\\dfrac{45^\\circ}{2}$ y $m\\sphericalangle ACD=\\dfrac{53^\\circ}{2}$. Halle $\\dfrac{AC}{G_1G_2}$, siendo $G_1$ y $G_2$ baricentros de las regiones $ABC$ y $DAC$. £A)$\\dfrac{\\sqrt{2}}{3}$æB)$\\dfrac{\\sqrt{3}}{2}$æC)$\\sqrt{3}$£D)$2\\sqrt{3}$ææE)$\\dfrac{3\\sqrt{3}}{2}$£ A) $\\dfrac{\\sqrt{2}}{3}$ B) $\\dfrac{\\sqrt{3}}{2}$ C) $\\sqrt{3}$ D) $2\\sqrt{3}$ E) $\\dfrac{3\\sqrt{3}}{2}$",
+      "after": "\\item[\\textbf{27.}] Se tiene un cuadrilátero $ABCD$, $m\\sphericalangle ABC=m\\sphericalangle DAC=90^\\circ$, $m\\sphericalangle ACB=\\dfrac{45^\\circ}{2}$ y $m\\sphericalangle ACD=\\dfrac{53^\\circ}{2}$. Halle $\\dfrac{AC}{G_1G_2}$, siendo $G_1$ y $G_2$ baricentros de las regiones $ABC$ y $DAC$. £A)$\\dfrac{\\sqrt{2}}{3}$æB)$\\dfrac{\\sqrt{3}}{2}$æC)$\\sqrt{3}$£D)$2\\sqrt{3}$ææE)$\\dfrac{3\\sqrt{3}}{2}$£",
+      "reason": "duplicate_trailing_options"
+    },
+    {
+      "id": 9216,
+      "before": "\\item[\\textbf{14.}] Se tiene un triángulo rectángulo $ABC$ recto en $C$, en el cual se traza la bisectriz interior $\\overline{CD}$. Si $r$ es el inradio de dicho triángulo y $2(AC)=3(AD)$, calcule $\\dfrac{r}{AB}$. £A)$0,45$æB)$10,1$æC)$0,25$£D)$0,5$ææE)$0,15$£ A) $0,45$ B) $10,1$ C) $0,25$ D) $0,5$ E) $0,15$",
+      "after": "\\item[\\textbf{14.}] Se tiene un triángulo rectángulo $ABC$ recto en $C$, en el cual se traza la bisectriz interior $\\overline{CD}$. Si $r$ es el inradio de dicho triángulo y $2(AC)=3(AD)$, calcule $\\dfrac{r}{AB}$. £A)$0,45$æB)$10,1$æC)$0,25$£D)$0,5$ææE)$0,15$£",
+      "reason": "duplicate_trailing_options"
+    },
+    {
+      "id": 9221,
+      "before": "\\item[\\textbf{19.}] En un triángulo $ABC$, se ubican los puntos $M$ y $N$ en $\\overline{AB}$ y $\\overline{BC}$, de modo que $\\overline{MN}$ interseca a la prolongación de $\\overline{AC}$ en $Q$; además, $AM=3(MB)$ y $BN=3(NC)$. Calcule $\\dfrac{MN}{NQ}$. £A)$2$æB)$\\dfrac{3}{2}$æC)$3$£D)$\\dfrac{5}{2}$ææE)$4$£ A) $2$ B) $\\dfrac{3}{2}$ C) $3$ D) $\\dfrac{5}{2}$ E) $4$",
+      "after": "\\item[\\textbf{19.}] En un triángulo $ABC$, se ubican los puntos $M$ y $N$ en $\\overline{AB}$ y $\\overline{BC}$, de modo que $\\overline{MN}$ interseca a la prolongación de $\\overline{AC}$ en $Q$; además, $AM=3(MB)$ y $BN=3(NC)$. Calcule $\\dfrac{MN}{NQ}$. £A)$2$æB)$\\dfrac{3}{2}$æC)$3$£D)$\\dfrac{5}{2}$ææE)$4$£",
+      "reason": "duplicate_trailing_options"
+    },
+    {
+      "id": 9306,
+      "before": "\\item[\\textbf{8.}] En un pentágono regular $ABCDE$ se traza la diagonal $\\overline{BE}$; además, $F$ es el punto medio de $\\overline{CD}$ y $M$ el punto de intersección de $\\overline{BE}$ y $\\overline{AF}$. Si $\\dfrac{1}{AM}+\\dfrac{1}{AF}=1$, halle la longitud del lado del pentágono regular. £A)$\\sqrt{10-2\\sqrt{3}}$æB)$\\sqrt{5+2\\sqrt{5}}$æC)$\\sqrt{5-2\\sqrt{5}}$£D)$\\sqrt{10-2\\sqrt{5}}$ææE)$\\sqrt{10+2\\sqrt{5}}$£ A) $\\sqrt{10-2\\sqrt{3}}$ B) $\\sqrt{5+2\\sqrt{5}}$ C) $\\sqrt{5-2\\sqrt{5}}$ D) $\\sqrt{10-2\\sqrt{5}}$ E) $\\sqrt{10+2\\sqrt{5}}$",
+      "after": "\\item[\\textbf{8.}] En un pentágono regular $ABCDE$ se traza la diagonal $\\overline{BE}$; además, $F$ es el punto medio de $\\overline{CD}$ y $M$ el punto de intersección de $\\overline{BE}$ y $\\overline{AF}$. Si $\\dfrac{1}{AM}+\\dfrac{1}{AF}=1$, halle la longitud del lado del pentágono regular. £A)$\\sqrt{10-2\\sqrt{3}}$æB)$\\sqrt{5+2\\sqrt{5}}$æC)$\\sqrt{5-2\\sqrt{5}}$£D)$\\sqrt{10-2\\sqrt{5}}$ææE)$\\sqrt{10+2\\sqrt{5}}$£",
+      "reason": "duplicate_trailing_options"
+    },
+    {
+      "id": 9310,
+      "before": "\\item[\\textbf{12.}] En un pentágono regular $ABCDE$ cuyo lado mide $\\ell$. Con centros en $C$ y $E$ se trazan dos arcos cuyos radios miden $\\ell$, interceptándose en $F$. Halle la suma de las longitudes de los arcos que se forman entre $D$ y $F$. £A)$\\dfrac{\\pi\\ell}{5}$æB)$\\dfrac{3\\pi\\ell}{5}$æC)$\\dfrac{4\\pi\\ell}{5}$£D)$\\dfrac{7\\pi\\ell}{3}$ææE)$\\pi\\ell$£ A) $\\dfrac{\\pi\\ell}{5}$ B) $\\dfrac{3\\pi\\ell}{5}$ C) $\\dfrac{4\\pi\\ell}{5}$ D) $\\dfrac{7\\pi\\ell}{3}$ E) $\\pi\\ell$",
+      "after": "\\item[\\textbf{12.}] En un pentágono regular $ABCDE$ cuyo lado mide $\\ell$. Con centros en $C$ y $E$ se trazan dos arcos cuyos radios miden $\\ell$, interceptándose en $F$. Halle la suma de las longitudes de los arcos que se forman entre $D$ y $F$. £A)$\\dfrac{\\pi\\ell}{5}$æB)$\\dfrac{3\\pi\\ell}{5}$æC)$\\dfrac{4\\pi\\ell}{5}$£D)$\\dfrac{7\\pi\\ell}{3}$ææE)$\\pi\\ell$£",
+      "reason": "duplicate_trailing_options"
+    },
+    {
+      "id": 9341,
+      "before": "\\item[\\textbf{13.}] Sea $ACB$ un triángulo rectángulo recto en $C$, cuya hipotenusa mide $d$. Se divide la hipotenusa en segmentos de igual longitud por los puntos $M$ y $N$. Entonces, la suma de los cuadrados de los lados del triángulo $CMN$ es igual a: £A)$\\dfrac{d^2}{3}$æB)$\\dfrac{2}{3}d^2$æC)$\\dfrac{4}{3}d^2$£D)$\\dfrac{5}{3}d^2$ææE)$\\dfrac{7}{3}d^2$£ A) $\\dfrac{d^2}{3}$ B) $\\dfrac{2}{3}d^2$ C) $\\dfrac{4}{3}d^2$ D) $\\dfrac{5}{3}d^2$ E) $\\dfrac{7}{3}d^2$",
+      "after": "\\item[\\textbf{13.}] Sea $ACB$ un triángulo rectángulo recto en $C$, cuya hipotenusa mide $d$. Se divide la hipotenusa en segmentos de igual longitud por los puntos $M$ y $N$. Entonces, la suma de los cuadrados de los lados del triángulo $CMN$ es igual a: £A)$\\dfrac{d^2}{3}$æB)$\\dfrac{2}{3}d^2$æC)$\\dfrac{4}{3}d^2$£D)$\\dfrac{5}{3}d^2$ææE)$\\dfrac{7}{3}d^2$£",
+      "reason": "duplicate_trailing_options"
+    },
+    {
+      "id": 9346,
+      "before": "\\item[\\textbf{18.}] Las bases de un trapecio isósceles inscrito en una circunferencia miden $21$ y $9$, y una de sus diagonales mide $17$. Calcule el radio de la circunferencia circunscrita. £A)$\\dfrac{75}{8}$æB)$\\dfrac{55}{8}$æC)$\\dfrac{65}{8}$£D)$10$ææE)$\\dfrac{85}{8}$£ A) $\\dfrac{75}{8}$ B) $\\dfrac{55}{8}$ C) $\\dfrac{65}{8}$ D) $10$ E) $\\dfrac{85}{8}$",
+      "after": "\\item[\\textbf{18.}] Las bases de un trapecio isósceles inscrito en una circunferencia miden $21$ y $9$, y una de sus diagonales mide $17$. Calcule el radio de la circunferencia circunscrita. £A)$\\dfrac{75}{8}$æB)$\\dfrac{55}{8}$æC)$\\dfrac{65}{8}$£D)$10$ææE)$\\dfrac{85}{8}$£",
+      "reason": "duplicate_trailing_options"
+    },
+    {
+      "id": 9351,
+      "before": "\\item[\\textbf{23.}] En un trapecio $ABCD$ ($AB\\parallel CD$) se verifica que $(AC)^2+(BD)^2=289\\,u^2$ y $AB+CD=16\\,u$. Entonces, la longitud del segmento que une los puntos medios de las bases del trapecio es: £A)$\\sqrt{33}\\,u$æB)$\\sqrt{\\dfrac{161}{2}}\\,u$æC)$\\sqrt{\\dfrac{31}{2}}\\,u$£D)$\\sqrt{29}\\,u$ææE)$\\sqrt{\\dfrac{29}{2}}\\,u$£ A) $\\sqrt{33}\\,u$ B) $\\sqrt{\\dfrac{161}{2}}\\,u$ C) $\\sqrt{\\dfrac{31}{2}}\\,u$ D) $\\sqrt{29}\\,u$ E) $\\sqrt{\\dfrac{29}{2}}\\,u$",
+      "after": "\\item[\\textbf{23.}] En un trapecio $ABCD$ ($AB\\parallel CD$) se verifica que $(AC)^2+(BD)^2=289\\,u^2$ y $AB+CD=16\\,u$. Entonces, la longitud del segmento que une los puntos medios de las bases del trapecio es: £A)$\\sqrt{33}\\,u$æB)$\\sqrt{\\dfrac{161}{2}}\\,u$æC)$\\sqrt{\\dfrac{31}{2}}\\,u$£D)$\\sqrt{29}\\,u$ææE)$\\sqrt{\\dfrac{29}{2}}\\,u$£",
+      "reason": "duplicate_trailing_options"
+    },
+    {
+      "id": 9362,
+      "before": "\\item[\\textbf{4.}] En una región cuadrangular $ABCD$, se ubican los puntos $P$, $R$, $Q$ y $S$, puntos medios de los lados $\\overline{AB}$, $\\overline{BC}$, $\\overline{CD}$ y $\\overline{AD}$, respectivamente. Si $\\overline{PQ}\\cap\\overline{RS}={O}$ y el área de la región cuadrangular $ABCD$ es $32\\,u^2$, entonces la suma de las áreas en $u^2$ de las regiones cuadrangulares $PBRO$ y $OQRS$ es: £A)$8$æB)$12$æC)$16$£D)$18$ææE)$20$£ A) $8$ B) $12$ C) $16$ D) $18$ E) $20$",
+      "after": "\\item[\\textbf{4.}] En una región cuadrangular $ABCD$, se ubican los puntos $P$, $R$, $Q$ y $S$, puntos medios de los lados $\\overline{AB}$, $\\overline{BC}$, $\\overline{CD}$ y $\\overline{AD}$, respectivamente. Si $\\overline{PQ}\\cap\\overline{RS}={O}$ y el área de la región cuadrangular $ABCD$ es $32\\,u^2$, entonces la suma de las áreas en $u^2$ de las regiones cuadrangulares $PBRO$ y $OQRS$ es: £A)$8$æB)$12$æC)$16$£D)$18$ææE)$20$£",
+      "reason": "duplicate_trailing_options"
+    },
+    {
+      "id": 9367,
+      "before": "\\item[\\textbf{9.}] Se tiene un paralelogramo $ABCD$, en la prolongación de $\\overline{CD}$ se ubica el punto $N$, de modo que la circunferencia circunscrita al triángulo $NAD$ es tangente a $\\overline{AB}$ en $A$ y a $\\overline{BC}$ en $M$. Si $ND=6$ y $m\\sphericalangle ADN=53^\\circ$, calcular el área de la región cuadrangular $ABCD$. £A)$25$æB)$\\dfrac{25}{8}$æC)$\\dfrac{25}{4}$£D)$12$ææE)$\\dfrac{12}{5}$£ A) $25$ B) $\\dfrac{25}{8}$ C) $\\dfrac{25}{4}$ D) $12$ E) $\\dfrac{12}{5}$",
+      "after": "\\item[\\textbf{9.}] Se tiene un paralelogramo $ABCD$, en la prolongación de $\\overline{CD}$ se ubica el punto $N$, de modo que la circunferencia circunscrita al triángulo $NAD$ es tangente a $\\overline{AB}$ en $A$ y a $\\overline{BC}$ en $M$. Si $ND=6$ y $m\\sphericalangle ADN=53^\\circ$, calcular el área de la región cuadrangular $ABCD$. £A)$25$æB)$\\dfrac{25}{8}$æC)$\\dfrac{25}{4}$£D)$12$ææE)$\\dfrac{12}{5}$£",
+      "reason": "duplicate_trailing_options"
+    },
+    {
+      "id": 9375,
+      "before": "\\item[\\textbf{17.}] Se dibujan dos circunferencias $\\zeta_1$ y $\\zeta_2$ tangentes exteriores en el punto $P$. Se trazan las tangentes comunes $\\overline{AB}$ y $\\overline{CD}$, $A\\in\\zeta_1$ y $B\\in\\zeta_2$. Si los radios de las circunferencias miden $R$ y $r$ ($R>r$), entonces el área de la región cuadrangular $ABCD$ es: £A)$\\dfrac{8Rr\\sqrt{Rr}}{R+r}$æB)$\\dfrac{4Rr\\sqrt{Rr}}{R+r}$æC)$\\dfrac{2Rr\\sqrt{Rr}}{R+r}$£D)$\\dfrac{4Rr\\sqrt{Rr}}{R-r}$ææE)$\\dfrac{8Rr\\sqrt{Rr}}{R-r}$£ A) $\\dfrac{8Rr\\sqrt{Rr}}{R+r}$ B) $\\dfrac{4Rr\\sqrt{Rr}}{R+r}$ C) $\\dfrac{2Rr\\sqrt{Rr}}{R+r}$ D) $\\dfrac{4Rr\\sqrt{Rr}}{R-r}$ E) $\\dfrac{8Rr\\sqrt{Rr}}{R-r}$",
+      "after": "\\item[\\textbf{17.}] Se dibujan dos circunferencias $\\zeta_1$ y $\\zeta_2$ tangentes exteriores en el punto $P$. Se trazan las tangentes comunes $\\overline{AB}$ y $\\overline{CD}$, $A\\in\\zeta_1$ y $B\\in\\zeta_2$. Si los radios de las circunferencias miden $R$ y $r$ ($R>r$), entonces el área de la región cuadrangular $ABCD$ es: £A)$\\dfrac{8Rr\\sqrt{Rr}}{R+r}$æB)$\\dfrac{4Rr\\sqrt{Rr}}{R+r}$æC)$\\dfrac{2Rr\\sqrt{Rr}}{R+r}$£D)$\\dfrac{4Rr\\sqrt{Rr}}{R-r}$ææE)$\\dfrac{8Rr\\sqrt{Rr}}{R-r}$£",
+      "reason": "duplicate_trailing_options"
+    },
+    {
+      "id": 9380,
+      "before": "\\item[\\textbf{22.}] En una circunferencia cuyo radio mide $8\\,u$, se dibujan dos cuerdas congruentes y paralelas separadas entre sí $8\\,u$. Entonces, el área en $u^2$ de la parte del círculo comprendida entre las dos cuerdas es: £A)$\\dfrac{64\\pi}{3}-32\\sqrt{3}$æB)$32\\sqrt{3}+\\dfrac{64\\pi}{3}$æC)$32\\sqrt{3}+\\dfrac{128\\pi}{3}$£D)$16\\sqrt{3}+\\dfrac{128\\pi}{3}$ææE)$\\dfrac{128\\pi}{3}$£ A) $\\dfrac{64\\pi}{3}-32\\sqrt{3}$ B) $32\\sqrt{3}+\\dfrac{64\\pi}{3}$ C) $32\\sqrt{3}+\\dfrac{128\\pi}{3}$ D) $16\\sqrt{3}+\\dfrac{128\\pi}{3}$ E) $\\dfrac{128\\pi}{3}$",
+      "after": "\\item[\\textbf{22.}] En una circunferencia cuyo radio mide $8\\,u$, se dibujan dos cuerdas congruentes y paralelas separadas entre sí $8\\,u$. Entonces, el área en $u^2$ de la parte del círculo comprendida entre las dos cuerdas es: £A)$\\dfrac{64\\pi}{3}-32\\sqrt{3}$æB)$32\\sqrt{3}+\\dfrac{64\\pi}{3}$æC)$32\\sqrt{3}+\\dfrac{128\\pi}{3}$£D)$16\\sqrt{3}+\\dfrac{128\\pi}{3}$ææE)$\\dfrac{128\\pi}{3}$£",
+      "reason": "duplicate_trailing_options"
+    },
+    {
+      "id": 9385,
+      "before": "\\item[\\textbf{27.}] Se tiene una malla de longitud $L$ con la que se desea cercar un terreno que tiene la forma de un trapecio circular. Calcular el área máxima del terreno que se puede cercar con dicha malla. £A)$L^2$æB)$\\dfrac{L^2}{2}$æC)$\\dfrac{\\pi L^2}{4}$£D)$\\dfrac{\\pi L^2}{8}$ææE)$\\dfrac{L^2}{16}$£ A) $L^2$ B) $\\dfrac{L^2}{2}$ C) $\\dfrac{\\pi L^2}{4}$ D) $\\dfrac{\\pi L^2}{8}$ E) $\\dfrac{L^2}{16}$",
+      "after": "\\item[\\textbf{27.}] Se tiene una malla de longitud $L$ con la que se desea cercar un terreno que tiene la forma de un trapecio circular. Calcular el área máxima del terreno que se puede cercar con dicha malla. £A)$L^2$æB)$\\dfrac{L^2}{2}$æC)$\\dfrac{\\pi L^2}{4}$£D)$\\dfrac{\\pi L^2}{8}$ææE)$\\dfrac{L^2}{16}$£",
+      "reason": "duplicate_trailing_options"
+    }
+  ]
+}

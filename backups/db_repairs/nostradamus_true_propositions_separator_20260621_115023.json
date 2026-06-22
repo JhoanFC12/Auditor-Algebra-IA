@@ -1,0 +1,11 @@
+{
+  "db": "mathcontentstudio_local_mirror",
+  "created_at": "2026-06-21T11:50:23",
+  "affected": [
+    {
+      "id": 9269,
+      "before": "\\item[\\textbf{7.}] En un triángulo rectángulo $ABC$, $N$, $E$ y $M$ son los puntos medios de $\\overline{AB}$, $\\overline{BC}$ y $\\overline{AC}$, respectivamente, $\\overline{BH}$ es altura. Si $HN=a$, $HE=b$, $BM=c$, $AH=m$ y $HC=n$, indique las proposiciones verdaderas. I. $2b^2=cm$ II. $h^2=mn$ III. $a^2+b^2=c^2$ IV. $ab=hc$ V. $\\dfrac{1}{a^2}+\\dfrac{1}{b^2}=\\dfrac{1}{h^2}$ £A)I y IIæB)I, II y IIIæC)II y III£D)II, III y IVææE)III y IV£",
+      "after": "\\item[\\textbf{7.}] En un triángulo rectángulo $ABC$, $N$, $E$ y $M$ son los puntos medios de $\\overline{AB}$, $\\overline{BC}$ y $\\overline{AC}$, respectivamente, $\\overline{BH}$ es altura. Si $HN=a$, $HE=b$, $BM=c$, $AH=m$ y $HC=n$, indique las proposiciones verdaderas. £I. $2b^2=cm$ II. $h^2=mn$ III. $a^2+b^2=c^2$ IV. $ab=hc$ V. $\\dfrac{1}{a^2}+\\dfrac{1}{b^2}=\\dfrac{1}{h^2}$ £A)I y IIæB)I, II y IIIæC)II y III£D)II, III y IVææE)III y IV£"
+    }
+  ]
+}

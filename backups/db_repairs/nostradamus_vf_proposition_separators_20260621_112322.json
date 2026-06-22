@@ -1,0 +1,121 @@
+{
+  "db": "mathcontentstudio_local_mirror",
+  "book": "academia-nostradamus-semestral-2022-i",
+  "created_at": "2026-06-21T11:23:22",
+  "affected": [
+    {
+      "id": 8910,
+      "instancia": "semana_n_01_-_segmentos_y_angulos_-_conjuntos_convexos",
+      "before": "\\item[\\textbf{8.}] Indique el valor de verdad de las siguientes proposiciones: I. El postulado de la medida de un ángulo tiene demostración matemática. II. El complemento y el suplemento de un ángulo forman un par lineal. III. El postulado de la construcción de un ángulo está relacionado con un transportador. IV. El postulado de la adición de ángulos tiene demostración matemática. £A)FVVFæB)FFVFæC)FFFF£D)FVFVææE)FFVF£",
+      "after": "\\item[\\textbf{8.}] Indique el valor de verdad de las siguientes proposiciones: £I. El postulado de la medida de un ángulo tiene demostración matemática. £II. El complemento y el suplemento de un ángulo forman un par lineal. £III. El postulado de la construcción de un ángulo está relacionado con un transportador. £IV. El postulado de la adición de ángulos tiene demostración matemática. £A)FVVFæB)FFVFæC)FFFF£D)FVFVææE)FFVF£"
+    },
+    {
+      "id": 8914,
+      "instancia": "semana_n_01_-_segmentos_y_angulos_-_conjuntos_convexos",
+      "before": "\\item[\\textbf{12.}] Indique el valor de verdad de las siguientes proposiciones: I. La bisectriz de un ángulo es una semirecta. II. Las bisectrices de dos ángulos adyacentes son perpendiculares. III. A todo ángulo le corresponde un número real positivo comprendido entre $0^\\circ$ y $180^\\circ$. £A)FFFæB)FFVæC)VFV£D)VVVææE)FVV£",
+      "after": "\\item[\\textbf{12.}] Indique el valor de verdad de las siguientes proposiciones: £I. La bisectriz de un ángulo es una semirecta. £II. Las bisectrices de dos ángulos adyacentes son perpendiculares. £III. A todo ángulo le corresponde un número real positivo comprendido entre $0^\\circ$ y $180^\\circ$. £A)FFFæB)FFVæC)VFV£D)VVVææE)FVV£"
+    },
+    {
+      "id": 8918,
+      "instancia": "semana_n_01_-_segmentos_y_angulos_-_conjuntos_convexos",
+      "before": "\\item[\\textbf{16.}] Indique el valor de verdad de siguientes proposiciones: I. Una recta $\\mathcal{L}$, contenida en un plano, determina los semiplanos $S_1$ y $S_2$, luego $S_1\\cap S_2=\\mathcal{L}$. II. Sea $T$ una región triangular y $O$ el circuncentro del triángulo, entonces $T-\\{O\\}$ es siempre un conjunto no convexo. III. Ningún punto es un conjunto no convexo. IV. El interior de un ángulo es un conjunto no convexo. £A)FFFFæB)FFVFæC)FFVV£D)FVVVææE)VVVV£",
+      "after": "\\item[\\textbf{16.}] Indique el valor de verdad de siguientes proposiciones: £I. Una recta $\\mathcal{L}$, contenida en un plano, determina los semiplanos $S_1$ y $S_2$, luego $S_1\\cap S_2=\\mathcal{L}$. £II. Sea $T$ una región triangular y $O$ el circuncentro del triángulo, entonces $T-\\{O\\}$ es siempre un conjunto no convexo. £III. Ningún punto es un conjunto no convexo. £IV. El interior de un ángulo es un conjunto no convexo. £A)FFFFæB)FFVFæC)FFVV£D)FVVVææE)VVVV£"
+    },
+    {
+      "id": 8919,
+      "instancia": "semana_n_01_-_segmentos_y_angulos_-_conjuntos_convexos",
+      "before": "\\item[\\textbf{17.}] Indique verdadero (V) o falso (F): I. Un segmento menos uno de los extremos es un conjunto convexo. II. Una región triangular, menos una altura, es siempre un conjunto no convexo. III. Algún ángulo es un conjunto convexo. £A)VVVæB)VFFæC)FFF£D)VFVææE)VVF£",
+      "after": "\\item[\\textbf{17.}] Indique verdadero (V) o falso (F): £I. Un segmento menos uno de los extremos es un conjunto convexo. £II. Una región triangular, menos una altura, es siempre un conjunto no convexo. £III. Algún ángulo es un conjunto convexo. £A)VVVæB)VFFæC)FFF£D)VFVææE)VVF£"
+    },
+    {
+      "id": 8920,
+      "instancia": "semana_n_01_-_segmentos_y_angulos_-_conjuntos_convexos",
+      "before": "\\item[\\textbf{18.}] Indique verdadero (V) o falso (F) en las proposiciones: I. Tres rectas paralelas al intersecar a un triángulo determinan como máximo $6$ puntos de intersección. II. El número de conjuntos convexos disjuntos que determina un par lineal no es $7$. III. La intersección de dos conjuntos no convexos es un conjunto no convexo. £A)FVFæB)VVFæC)FFF£D)FVVææE)VFF£",
+      "after": "\\item[\\textbf{18.}] Indique verdadero (V) o falso (F) en las proposiciones: £I. Tres rectas paralelas al intersecar a un triángulo determinan como máximo $6$ puntos de intersección. £II. El número de conjuntos convexos disjuntos que determina un par lineal no es $7$. £III. La intersección de dos conjuntos no convexos es un conjunto no convexo. £A)FVFæB)VVFæC)FFF£D)FVVææE)VFF£"
+    },
+    {
+      "id": 8921,
+      "instancia": "semana_n_01_-_segmentos_y_angulos_-_conjuntos_convexos",
+      "before": "\\item[\\textbf{19.}] Indique el valor de verdad de las siguientes proposiciones: I. El rayo sin un punto es un conjunto convexo. II. El conjunto de los vértices de un triángulo es un conjunto convexo. III. El rectángulo es un conjunto no convexo. IV. Sea $T_1$, $T_2$, $T_3$ y $T_4$ cuatro regiones triangulares, si $T_4\\subset(T_1\\cap T_2\\cap T_3)$ entonces $(T_1\\cap T_2\\cap T_3)$ es una región poligonal convexa. £A)FFVVæB)FVVFæC)VFFF£D)FVVFææE)FFFF£",
+      "after": "\\item[\\textbf{19.}] Indique el valor de verdad de las siguientes proposiciones: £I. El rayo sin un punto es un conjunto convexo. £II. El conjunto de los vértices de un triángulo es un conjunto convexo. £III. El rectángulo es un conjunto no convexo. £IV. Sea $T_1$, $T_2$, $T_3$ y $T_4$ cuatro regiones triangulares, si $T_4\\subset(T_1\\cap T_2\\cap T_3)$ entonces $(T_1\\cap T_2\\cap T_3)$ es una región poligonal convexa. £A)FFVVæB)FVVFæC)VFFF£D)FVVFææE)FFFF£"
+    },
+    {
+      "id": 8922,
+      "instancia": "semana_n_01_-_segmentos_y_angulos_-_conjuntos_convexos",
+      "before": "\\item[\\textbf{20.}] Dadas las siguientes proposiciones, ¿cuáles son verdaderas? I. Si al círculo se le extrae un punto cualquiera, entonces queda un conjunto no convexo. II. Una región triangular cuyos vértices se han omitido es un conjunto convexo. III. El exterior de un plano es un conjunto convexo. £A)FVFæB)FFFæC)FVV£D)VVFææE)FFV£",
+      "after": "\\item[\\textbf{20.}] Dadas las siguientes proposiciones, ¿cuáles son verdaderas? £I. Si al círculo se le extrae un punto cualquiera, entonces queda un conjunto no convexo. £II. Una región triangular cuyos vértices se han omitido es un conjunto convexo. £III. El exterior de un plano es un conjunto convexo. £A)FVFæB)FFFæC)FVV£D)VVFææE)FFV£"
+    },
+    {
+      "id": 8923,
+      "instancia": "semana_n_01_-_segmentos_y_angulos_-_conjuntos_convexos",
+      "before": "\\item[\\textbf{21.}] Indique verdadero (V) o falso (F): I. La intersección de dos conjuntos convexos puede ser un conjunto convexo. II. La unión de dos conjuntos convexos puede ser un conjunto no convexo. III. La unión de dos conjuntos no convexos puede ser un conjunto convexo. £A)VVVæB)FFVæC)FVF£D)FVVææE)FFF£",
+      "after": "\\item[\\textbf{21.}] Indique verdadero (V) o falso (F): £I. La intersección de dos conjuntos convexos puede ser un conjunto convexo. £II. La unión de dos conjuntos convexos puede ser un conjunto no convexo. £III. La unión de dos conjuntos no convexos puede ser un conjunto convexo. £A)VVVæB)FFVæC)FVF£D)FVVææE)FFF£"
+    },
+    {
+      "id": 8925,
+      "instancia": "semana_n_01_-_segmentos_y_angulos_-_conjuntos_convexos",
+      "before": "\\item[\\textbf{23.}] Indique la veracidad o falsedad de los siguientes enunciados: I. Toda poligonal abierta de $n$ segmentos solo se puede particionar en $n$ partes. II. En una región triangular $ABC$, la ceviana $\\overline{AD}$ la divide en solo $2$ conjuntos convexos. III. Todo conjunto convexo se puede dividir por lo menos en $2$ conjuntos convexos. £A)FFVæB)FFFæC)FVF£D)VVFææE)VFF£",
+      "after": "\\item[\\textbf{23.}] Indique la veracidad o falsedad de los siguientes enunciados: £I. Toda poligonal abierta de $n$ segmentos solo se puede particionar en $n$ partes. £II. En una región triangular $ABC$, la ceviana $\\overline{AD}$ la divide en solo $2$ conjuntos convexos. £III. Todo conjunto convexo se puede dividir por lo menos en $2$ conjuntos convexos. £A)FFVæB)FFFæC)FVF£D)VVFææE)VFF£"
+    },
+    {
+      "id": 8926,
+      "instancia": "semana_n_01_-_segmentos_y_angulos_-_conjuntos_convexos",
+      "before": "\\item[\\textbf{24.}] Indique el valor de verdad de las siguientes proposiciones: I. El semiplano es un conjunto convexo. II. El plano sin la recta que determina sus dos semiplanos es un conjunto convexo. III. Tres rectas en un plano, dos de ellas paralelas determinan cuatro conjuntos convexos y dos conjuntos no convexos en el plano disjunto. IV. Una recta y una región triangular disjuntas, contenidos en un plano, determinan únicamente una partición de $5$ elementos de este plano. £A)FFFVæB)VFVFæC)FVFF£D)VFFVææE)VFFF£",
+      "after": "\\item[\\textbf{24.}] Indique el valor de verdad de las siguientes proposiciones: £I. El semiplano es un conjunto convexo. £II. El plano sin la recta que determina sus dos semiplanos es un conjunto convexo. £III. Tres rectas en un plano, dos de ellas paralelas determinan cuatro conjuntos convexos y dos conjuntos no convexos en el plano disjunto. £IV. Una recta y una región triangular disjuntas, contenidos en un plano, determinan únicamente una partición de $5$ elementos de este plano. £A)FFFVæB)VFVFæC)FVFF£D)VFFVææE)VFFF£"
+    },
+    {
+      "id": 8927,
+      "instancia": "semana_n_01_-_segmentos_y_angulos_-_conjuntos_convexos",
+      "before": "\\item[\\textbf{25.}] Indique el valor de verdad de las siguientes proposiciones: I. Un triángulo determina en el plano que lo contiene alguna partición de $3$ elementos. II. Dos rectas paralelas determinan en el plano que lo contiene alguna partición de $5$ elementos. III. En un plano $F$ están contenidos la circunferencia $\\mathcal{C}$ y el triángulo $T$, entonces $\\mathcal{C}$ y $T$ determinan alguna partición de $5$ elementos en $F$. £A)FFFæB)VVFæC)VFV£D)VVVææE)FVV£",
+      "after": "\\item[\\textbf{25.}] Indique el valor de verdad de las siguientes proposiciones: £I. Un triángulo determina en el plano que lo contiene alguna partición de $3$ elementos. £II. Dos rectas paralelas determinan en el plano que lo contiene alguna partición de $5$ elementos. £III. En un plano $F$ están contenidos la circunferencia $\\mathcal{C}$ y el triángulo $T$, entonces $\\mathcal{C}$ y $T$ determinan alguna partición de $5$ elementos en $F$. £A)FFFæB)VVFæC)VFV£D)VVVææE)FVV£"
+    },
+    {
+      "id": 8928,
+      "instancia": "semana_n_01_-_segmentos_y_angulos_-_conjuntos_convexos",
+      "before": "\\item[\\textbf{26.}] Determinar el valor de verdad de las siguientes proposiciones: I. La intersección del interior de un ángulo y un círculo es siempre un conjunto convexo. II. En toda región triangular, si se omite el circuncentro resulta siempre un conjunto convexo. III. Alguna diferencia de dos conjuntos no convexos es un conjunto convexo. £A)VVFæB)VFFæC)VFV£D)FVVææE)FVF£",
+      "after": "\\item[\\textbf{26.}] Determinar el valor de verdad de las siguientes proposiciones: £I. La intersección del interior de un ángulo y un círculo es siempre un conjunto convexo. £II. En toda región triangular, si se omite el circuncentro resulta siempre un conjunto convexo. £III. Alguna diferencia de dos conjuntos no convexos es un conjunto convexo. £A)VVFæB)VFFæC)VFV£D)FVVææE)FVF£"
+    },
+    {
+      "id": 8929,
+      "instancia": "semana_n_01_-_segmentos_y_angulos_-_conjuntos_convexos",
+      "before": "\\item[\\textbf{27.}] Determine el valor de verdad de las siguientes proposiciones: I. Una región triangular dos de cuyos lados se han excluido es una región convexa. II. La unión de dos conjuntos convexos es un conjunto convexo. III. Si $A_1$, $A_2$, $A_3$ y $A_4$ son cuatro regiones triangulares tal que $A_4\\subset(A_1\\cap A_2\\cap A_3)$ entonces $A_1\\cap A_2\\cap A_3$ es una región poligonal convexa. £A)VVVæB)VFVæC)VFF£D)FVFææE)FVV£",
+      "after": "\\item[\\textbf{27.}] Determine el valor de verdad de las siguientes proposiciones: £I. Una región triangular dos de cuyos lados se han excluido es una región convexa. £II. La unión de dos conjuntos convexos es un conjunto convexo. £III. Si $A_1$, $A_2$, $A_3$ y $A_4$ son cuatro regiones triangulares tal que $A_4\\subset(A_1\\cap A_2\\cap A_3)$ entonces $A_1\\cap A_2\\cap A_3$ es una región poligonal convexa. £A)VVVæB)VFVæC)VFF£D)FVFææE)FVV£"
+    },
+    {
+      "id": 8930,
+      "instancia": "semana_n_01_-_segmentos_y_angulos_-_conjuntos_convexos",
+      "before": "\\item[\\textbf{28.}] Determine el valor de verdad de las siguientes proposiciones: I. Si $A$ y $B$ son dos conjuntos convexos, $A\\cap B$ es un conjunto convexo. II. Todo punto que pertenece a la recta divide a la recta en dos conjuntos no vacíos llamados semirectas. III. Si la intersección de dos conjuntos no es un conjunto convexo, entonces ninguno de los dos conjuntos es convexo. £A)VVVæB)VVFæC)FFV£D)FFFææE)FVV£",
+      "after": "\\item[\\textbf{28.}] Determine el valor de verdad de las siguientes proposiciones: £I. Si $A$ y $B$ son dos conjuntos convexos, $A\\cap B$ es un conjunto convexo. £II. Todo punto que pertenece a la recta divide a la recta en dos conjuntos no vacíos llamados semirectas. £III. Si la intersección de dos conjuntos no es un conjunto convexo, entonces ninguno de los dos conjuntos es convexo. £A)VVVæB)VVFæC)FFV£D)FFFææE)FVV£"
+    },
+    {
+      "id": 8931,
+      "instancia": "semana_n_01_-_segmentos_y_angulos_-_conjuntos_convexos",
+      "before": "\\item[\\textbf{29.}] Indique el valor de verdad de las siguientes proposiciones: I. La intersección de una región cuadrangular convexa y una región cuadrangular no convexa puede ser un conjunto convexo o no convexo. II. Si dos cuadriláteros limitan regiones no convexas, la diferencia puede ser convexa o no convexa. III. Si dos cuadriláteros limitan regiones no convexas, entonces la unión puede ser convexa o no convexa. £A)VVFæB)VFVæC)VFF£D)FFFææE)VVV£",
+      "after": "\\item[\\textbf{29.}] Indique el valor de verdad de las siguientes proposiciones: £I. La intersección de una región cuadrangular convexa y una región cuadrangular no convexa puede ser un conjunto convexo o no convexo. £II. Si dos cuadriláteros limitan regiones no convexas, la diferencia puede ser convexa o no convexa. £III. Si dos cuadriláteros limitan regiones no convexas, entonces la unión puede ser convexa o no convexa. £A)VVFæB)VFVæC)VFF£D)FFFææE)VVV£"
+    },
+    {
+      "id": 9053,
+      "instancia": "semana_n_06_-_poligonos",
+      "before": "\\item[\\textbf{1.}] Indique el valor de verdad de las siguientes proposiciones: I. Un polígono equilátero y equiángulo es un polígono regular. II. En un polígono cualquiera, la suma de las medidas de los ángulos internos se calcula con la fórmula $180^\\circ(n-2)$, siendo $n$ el número de lados del polígono. III. La suma de las medidas de los ángulos externos de un polígono es igual a $360^\\circ$. £A)VVVæB)VFVæC)FFF£D)VFFææE)VVF£",
+      "after": "\\item[\\textbf{1.}] Indique el valor de verdad de las siguientes proposiciones: £I. Un polígono equilátero y equiángulo es un polígono regular. £II. En un polígono cualquiera, la suma de las medidas de los ángulos internos se calcula con la fórmula $180^\\circ(n-2)$, siendo $n$ el número de lados del polígono. £III. La suma de las medidas de los ángulos externos de un polígono es igual a $360^\\circ$. £A)VVVæB)VFVæC)FFF£D)VFFææE)VVF£"
+    },
+    {
+      "id": 9054,
+      "instancia": "semana_n_06_-_poligonos",
+      "before": "\\item[\\textbf{2.}] Indicar el valor de verdad de las siguientes proposiciones: I. En un polígono equiángulo de $n$ lados $(n\\geqslant 3)$, cada ángulo interno mide $\\dfrac{180^\\circ(n-2)}{n}$. II. El máximo número de ángulos internos de un polígono convexo es $3$. III. Existen polígonos regulares cuyas diagonales todas son congruentes. £A)FVVæB)FFFæC)VVF£D)FVFææE)VVV£",
+      "after": "\\item[\\textbf{2.}] Indicar el valor de verdad de las siguientes proposiciones: £I. En un polígono equiángulo de $n$ lados $(n\\geqslant 3)$, cada ángulo interno mide $\\dfrac{180^\\circ(n-2)}{n}$. £II. El máximo número de ángulos internos de un polígono convexo es $3$. £III. Existen polígonos regulares cuyas diagonales todas son congruentes. £A)FVVæB)FFFæC)VVF£D)FVFææE)VVV£"
+    },
+    {
+      "id": 9186,
+      "instancia": "semana_n_10_-_puntos_notables",
+      "before": "\\item[\\textbf{14.}] Indique la secuencia correcta de verdad (V) o falsedad (F) de los siguientes enunciados. I. Sea $G$ baricentro de un triángulo $ABC$. Si $m\\sphericalangle AGC=90^\\circ$, entonces $BG=AC$. II. Sea $H$ ortocentro de un triángulo $ABC$. Si $m\\sphericalangle ABC=45^\\circ$, entonces $BH=AC$. III. El baricentro y el ortocentro de un triángulo pueden coincidir. £A)VFVæB)FFVæC)FFF£D)VVFææE)VVV£",
+      "after": "\\item[\\textbf{14.}] Indique la secuencia correcta de verdad (V) o falsedad (F) de los siguientes enunciados. £I. Sea $G$ baricentro de un triángulo $ABC$. Si $m\\sphericalangle AGC=90^\\circ$, entonces $BG=AC$. £II. Sea $H$ ortocentro de un triángulo $ABC$. Si $m\\sphericalangle ABC=45^\\circ$, entonces $BH=AC$. £III. El baricentro y el ortocentro de un triángulo pueden coincidir. £A)VFVæB)FFVæC)FFF£D)VVFææE)VVV£"
+    },
+    {
+      "id": 9299,
+      "instancia": "semana_n_15_-_poligonos_regulares",
+      "before": "\\item[\\textbf{1.}] Indique el valor de verdad de las siguientes proposiciones: I. En todo decágono regular la longitud de su lado es igual a la longitud de la sección áurea de su circunradio. II. La longitud del lado de un pentágono regular es igual a la longitud de la sección áurea de su diagonal. III. Al construir un triángulo con el lado de un pentágono regular, con el lado de un decágono regular y con el lado de un hexágono regular que tienen el mismo circunradio, dicho triángulo es rectángulo. IV. Dado un segmento $\\overline{AB}$ y un punto $M$, $M\\in\\overline{AB}$, tal que $AM$ es la sección áurea de $AB$, entonces $MB$ es de igual longitud que la sección áurea de $AM$. £A)VVVVæB)VVVFæC)VVFV£D)VFVVææE)FVVV£",
+      "after": "\\item[\\textbf{1.}] Indique el valor de verdad de las siguientes proposiciones: £I. En todo decágono regular la longitud de su lado es igual a la longitud de la sección áurea de su circunradio. £II. La longitud del lado de un pentágono regular es igual a la longitud de la sección áurea de su diagonal. £III. Al construir un triángulo con el lado de un pentágono regular, con el lado de un decágono regular y con el lado de un hexágono regular que tienen el mismo circunradio, dicho triángulo es rectángulo. £IV. Dado un segmento $\\overline{AB}$ y un punto $M$, $M\\in\\overline{AB}$, tal que $AM$ es la sección áurea de $AB$, entonces $MB$ es de igual longitud que la sección áurea de $AM$. £A)VVVVæB)VVVFæC)VVFV£D)VFVVææE)FVVV£"
+    }
+  ]
+}

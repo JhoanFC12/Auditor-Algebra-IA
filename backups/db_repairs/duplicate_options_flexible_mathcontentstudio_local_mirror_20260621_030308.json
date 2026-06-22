@@ -1,0 +1,16 @@
+{
+  "db": "mathcontentstudio_local_mirror",
+  "created_at": "2026-06-21T03:03:08",
+  "affected": [
+    {
+      "id": 9141,
+      "before": "\\item[\\textbf{29.}] En un triángulo escaleno $ABC$, se traza la ceviana $\\overline{BM}$, y las circunferencias inscritas en los triángulos $ABM$ y $BMC$ son tangentes a dicha mediana en $P$ y $Q$, y la circunferencia inscrita en el triángulo $ABC$ es tangente a $\\overline{AC}$ en $N$. Indique la relación correcta. £A)$PQ=2(MN)$æB)$PQ=3(MN)$æC)$PQ=MN$£D)$2(PQ)=MN$ææE)$PQ>MN$£ A) $PQ=2\\left(MN\\right)$ B) $PQ=3\\left(MN\\right)$ C) $PQ=MN$ D) $2\\left(PQ\\right)=MN$ E) $PQ>MN$",
+      "after": "\\item[\\textbf{29.}] En un triángulo escaleno $ABC$, se traza la ceviana $\\overline{BM}$, y las circunferencias inscritas en los triángulos $ABM$ y $BMC$ son tangentes a dicha mediana en $P$ y $Q$, y la circunferencia inscrita en el triángulo $ABC$ es tangente a $\\overline{AC}$ en $N$. Indique la relación correcta. £A)$PQ=2(MN)$æB)$PQ=3(MN)$æC)$PQ=MN$£D)$2(PQ)=MN$ææE)$PQ>MN$£"
+    },
+    {
+      "id": 9337,
+      "before": "\\item[\\textbf{9.}] Dos circunferencias de radios $R$ y $r$ ($R>r$) tienen un punto de contacto interior. Halle el radio de una tercera circunferencia tangente a las dos primeras y a la recta que contiene a los centros de las dos primeras. £A)$\\dfrac{Rr}{R+r}$æB)$\\dfrac{2Rr}{R-r}$æC)$\\dfrac{4Rr(R-r)}{(R+r)^2}$£D)$\\dfrac{4Rr}{R+r}$ææE)$\\dfrac{4Rr}{R-r}$£ A) $\\dfrac{Rr}{R+r}$ B) $\\dfrac{2Rr}{R-r}$ C) $\\dfrac{4Rr\\left(R-r\\right)}{\\left(R+r\\right)^2}$ D) $\\dfrac{4Rr}{R+r}$ E) $\\dfrac{4Rr}{R-r}$",
+      "after": "\\item[\\textbf{9.}] Dos circunferencias de radios $R$ y $r$ ($R>r$) tienen un punto de contacto interior. Halle el radio de una tercera circunferencia tangente a las dos primeras y a la recta que contiene a los centros de las dos primeras. £A)$\\dfrac{Rr}{R+r}$æB)$\\dfrac{2Rr}{R-r}$æC)$\\dfrac{4Rr(R-r)}{(R+r)^2}$£D)$\\dfrac{4Rr}{R+r}$ææE)$\\dfrac{4Rr}{R-r}$£"
+    }
+  ]
+}

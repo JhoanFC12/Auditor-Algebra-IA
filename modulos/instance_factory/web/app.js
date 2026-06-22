@@ -1963,7 +1963,7 @@ function renderManualWordSession() {
         <button id="convertManualWordSessionBtn" class="primary" type="button" ${disabled || !String(manual.sessionPath || "").trim() ? "disabled" : ""}>
           ${manual.converting ? "Convirtiendo..." : "Convertir sesion"}
         </button>
-        <button id="openManualWordSessionBtn" type="button" ${result.word_url ? "" : "disabled"}>Abrir Word generado</button>
+        <button id="openManualWordSessionBtn" type="button" ${result.word_url || result.word_path ? "" : "disabled"}>Abrir Word generado</button>
         <button id="clearManualWordSessionBtn" type="button" ${disabled || (!manual.sessionPath && !manual.outputDocx && !manual.lastResult) ? "disabled" : ""}>Limpiar</button>
       </div>
       ${manual.error ? `<div class="library-notice error-notice">${escapeHtml(manual.error)}</div>` : ""}
@@ -2089,7 +2089,7 @@ function renderWordProblemSelection() {
       ${ps.lastResult?.word_path ? `
         <div class="library-notice success-notice word-problem-success">
           <span>Word generado: ${escapeHtml(ps.lastResult.word_path)}</span>
-          <button id="openWordProblemResultBtn" type="button" ${ps.lastResult?.word_url ? "" : "disabled"}>Abrir Word generado</button>
+          <button id="openWordProblemResultBtn" type="button" ${ps.lastResult?.word_url || ps.lastResult?.word_path ? "" : "disabled"}>Abrir Word generado</button>
         </div>
       ` : ""}
       ${ps.loading ? `<div class="muted">Cargando problemas de la BD...</div>` : ""}
@@ -3572,7 +3572,7 @@ function bindWordEvents() {
     btn.onclick = () => {
       const key = String(btn.dataset.wordBookComplete || "");
       const book = (state.library.word?.catalog?.books || []).find((item) => String(item.book_key || "") === key);
-      return convertWordCombined(wordBookConvertibleInstances(book)).catch((err) => setStatus(`Error Word completo: ${err.message}`));
+      return handleWordBookComplete(book).catch((err) => setStatus(`Error Word completo: ${err.message}`));
     };
   });
   bindManualWordSessionEvents();
@@ -3623,14 +3623,14 @@ function bindWordEvents() {
     btn.onclick = () => convertWordSession(btn.dataset.convertWord).catch((err) => setStatus(`Error Word: ${err.message}`));
   });
   document.querySelectorAll("[data-open-word]").forEach((btn) => {
-    btn.onclick = () => openWordSession(btn.dataset.openWord);
+    btn.onclick = () => openWordSession(btn.dataset.openWord).catch((err) => setStatus(`Error abriendo Word: ${err.message || String(err)}`));
   });
   document.querySelectorAll("[data-word-row]").forEach((row) => {
     row.onclick = () => {
       state.library.word.selectedKey = String(row.dataset.wordRow || "");
       renderLibraryContent();
     };
-    row.ondblclick = () => openWordSession(row.dataset.wordRow);
+    row.ondblclick = () => openWordSession(row.dataset.wordRow).catch((err) => setStatus(`Error abriendo Word: ${err.message || String(err)}`));
   });
 }
 
@@ -8014,6 +8014,7 @@ function appendMissingContinuationText(value, record) {
 }
 
 function finalTextContainsContinuation(text, continuation) {
+  if (continuationIsCoveredByFinalOptions(text, continuation)) return true;
   const normalize = (value) => String(value || "")
     .toLowerCase()
     .replace(/\\+/g, "\\")
@@ -8028,6 +8029,43 @@ function finalTextContainsContinuation(text, continuation) {
   if (compactBody && compactBase.includes(compactBody)) return true;
   const bodyHead = compactBody.slice(0, 24);
   return Boolean(bodyHead.length >= 12 && compactBase.includes(bodyHead));
+}
+
+function continuationIsCoveredByFinalOptions(text, continuation) {
+  const finalOptions = extractFinalFormatOptions(text);
+  const continuationOptions = extractLooseOptionLine(stripFinalContinuationMarker(continuation));
+  if (!finalOptions || !continuationOptions) return false;
+  const labels = ["A", "B", "C", "D", "E"];
+  return labels.every((label) => {
+    const finalValue = canonicalOptionValue(finalOptions[label] || "");
+    const continuationValue = canonicalOptionValue(continuationOptions[label] || "");
+    return continuationValue && finalValue === continuationValue;
+  });
+}
+
+function extractFinalFormatOptions(text) {
+  const value = normalizeFinalLatexForStorage(text);
+  const match = value.match(/£A\)([\s\S]*?)æB\)([\s\S]*?)æC\)([\s\S]*?)£D\)([\s\S]*?)ææE\)([\s\S]*?)£/);
+  if (!match) return null;
+  return { A: match[1], B: match[2], C: match[3], D: match[4], E: match[5] };
+}
+
+function extractLooseOptionLine(text) {
+  const value = normalizeFinalLatexForStorage(text).replace(/\s+/g, " ").trim();
+  const match = value.match(/(?:^|\s)A\)([\s\S]*?)\s+B\)([\s\S]*?)\s+C\)([\s\S]*?)\s+D\)([\s\S]*?)\s+E\)([\s\S]*?)\s*$/i);
+  if (!match) return null;
+  return { A: match[1], B: match[2], C: match[3], D: match[4], E: match[5] };
+}
+
+function canonicalOptionValue(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/\$/g, "")
+    .replace(/\\circ\b/g, "degree")
+    .replace(/°/g, "degree")
+    .replace(/\s+/g, "")
+    .replace(/[{}]/g, "")
+    .trim();
 }
 
 function normalizedForBatchRecord(record) {
@@ -9113,13 +9151,15 @@ function renderReviewStage() {
               <h3>Formato final</h3>
               <p class="muted">Texto que quedara como salida final revisable para futura BD.</p>
             </div>
-            <span id="finalLatexReviewStatus" class="nav-counter">Formato pendiente</span>
+            <div class="final-review-heading-actions">
+              <span id="finalLatexReviewStatus" class="nav-counter">Formato pendiente</span>
+              <button type="submit" class="primary final-review-submit">Guardar formato final</button>
+            </div>
           </div>
           <textarea id="finalLatexText" class="final-review-text" spellcheck="false">${escapeHtml(finalLatexText)}</textarea>
           <section id="finalLatexPreview" class="latex-preview final-latex-preview" data-latex-source="${escapeAttr(latexPreviewSourceKey("final", finalLatexText))}" aria-label="Vista renderizada del formato final">
             ${renderFinalLatexPreviewHtml(finalLatexText)}
           </section>
-          <button type="submit" class="primary wide-action">Guardar formato final en staging</button>
         </form>
       </div>
     ` : `<div class="panel muted">Selecciona un problema.</div>`}
@@ -9309,7 +9349,26 @@ function repairFinalLatexForRecord(value, record, normalized = {}) {
     `\\item[\\textbf{${number}.}]`,
   );
   repaired = stripLeadingOcrNumberMarkerFromFinalLatex(repaired, number);
-  return repaired;
+  return removeDuplicateLooseOptionContinuation(repaired);
+}
+
+function removeDuplicateLooseOptionContinuation(text) {
+  const value = String(text || "").trim();
+  const finalOptions = extractFinalFormatOptions(value);
+  if (!finalOptions) return value;
+  const lines = value.split(/\r?\n/);
+  let lastIndex = lines.length - 1;
+  while (lastIndex >= 0 && !String(lines[lastIndex] || "").trim()) lastIndex -= 1;
+  if (lastIndex < 0) return value;
+  const looseOptions = extractLooseOptionLine(lines[lastIndex]);
+  if (!looseOptions) return value;
+  const labels = ["A", "B", "C", "D", "E"];
+  const sameOptions = labels.every((label) => (
+    canonicalOptionValue(finalOptions[label] || "") === canonicalOptionValue(looseOptions[label] || "")
+  ));
+  if (!sameOptions) return value;
+  lines.splice(lastIndex, 1);
+  return lines.join("\n").trim();
 }
 
 let finalLatexPreviewTimer = null;
@@ -9458,6 +9517,7 @@ async function saveReviewForm(event) {
         mark_ready: payload.markReady,
         compact: true,
         include_summary: false,
+        defer_golden_sync: true,
       },
     });
     applyRecordSavedPayload(result);
@@ -10705,14 +10765,44 @@ async function convertWordProblems() {
   }
 }
 
-function openWordProblemResult() {
+async function openWordPath({ wordPath = "", wordUrl = "", label = "Word" } = {}) {
+  const cleanPath = String(wordPath || "").trim();
+  if (cleanPath) {
+    try {
+      const result = await api("/api/word/open", {
+        method: "POST",
+        body: { word_path: cleanPath },
+      });
+      if (result?.opened) {
+        setStatus(`Abriendo ${label}: ${result.word_path || cleanPath}`);
+        return true;
+      }
+    } catch (err) {
+      if (!wordUrl) {
+        throw err;
+      }
+      setStatus(`No pude abrir con Windows; intento por navegador: ${err.message || String(err)}`);
+    }
+  }
+  if (wordUrl) {
+    window.open(wordUrl, "_blank", "noopener");
+    setStatus(`Abriendo ${label} por navegador: ${cleanPath || wordUrl}`);
+    return true;
+  }
+  return false;
+}
+
+async function openWordProblemResult() {
   const ps = wordProblemSelectionState();
   const result = ps.lastResult || {};
-  if (!result.word_url) {
+  if (!result.word_path && !result.word_url) {
     return setStatus("No hay Word generado disponible para abrir.");
   }
-  window.open(result.word_url, "_blank", "noopener");
-  setStatus(`Abriendo Word generado: ${result.word_path || result.output_docx || ""}`);
+  await openWordPath({
+    wordPath: result.word_path || result.output_docx || "",
+    wordUrl: result.word_url || "",
+    label: "Word generado",
+  }).catch((err) => setStatus(`Error abriendo Word generado: ${err.message || String(err)}`));
 }
 
 function wordAllInstances() {
@@ -10998,14 +11088,17 @@ async function convertManualWordSession() {
   }
 }
 
-function openManualWordSession() {
+async function openManualWordSession() {
   const manual = manualWordSessionState();
   const result = manual.lastResult || {};
-  if (!result.word_url) {
+  if (!result.word_path && !result.word_url) {
     return setStatus("No hay Word manual generado disponible para abrir.");
   }
-  window.open(result.word_url, "_blank", "noopener");
-  setStatus(`Abriendo Word manual: ${result.word_path || result.output_docx || ""}`);
+  await openWordPath({
+    wordPath: result.word_path || result.output_docx || "",
+    wordUrl: result.word_url || "",
+    label: "Word manual",
+  }).catch((err) => setStatus(`Error abriendo Word manual: ${err.message || String(err)}`));
 }
 
 async function convertWordInstanceRow(row, book = {}) {
@@ -11129,8 +11222,13 @@ async function convertWordCombined(rows) {
       outputDocx: result.word_path || result.output_docx || "",
       error: "",
     };
+    const firstBook = queue[0]?.book || selectedWordBook() || {};
+    if (firstBook && typeof firstBook === "object") {
+      firstBook.complete_word_path = result.word_path || result.output_docx || firstBook.complete_word_path || "";
+      firstBook.complete_word_url = result.word_url || firstBook.complete_word_url || "";
+      firstBook.complete_word_exists = Boolean(result.word_exists || result.word_path || result.output_docx);
+    }
     wordSelectionKeys().clear();
-    await loadWordSessions({ silent: true });
     const included = (result.instances || []).filter((row) => !row.skipped).length;
     const skipped = (result.instances || []).filter((row) => row.skipped).length;
     const detail = skipped ? ` Incluidas: ${included}; omitidas: ${skipped}.` : ` Incluidas: ${included}.`;
@@ -11145,18 +11243,65 @@ async function convertWordCombined(rows) {
   }
 }
 
-function openWordSession(instanceKey) {
-  const found = findWordInstance(instanceKey);
+async function handleWordBookComplete(book) {
+  if (!book) return setStatus("No encontre el libro para Word completo.");
+  const existingUrl = String(book.complete_word_url || "");
+  const existingPath = String(book.complete_word_path || "");
+  if (book.complete_word_exists && (existingUrl || existingPath)) {
+    const answer = window.prompt(
+      `Ya existe un Word completo para este libro.\n\nEscribe "abrir" para abrirlo o "regenerar" para volver a crearlo.`,
+      "abrir",
+    );
+    const action = String(answer || "").trim().toLowerCase();
+    if (!action) return setStatus("Accion cancelada.");
+    if (action.startsWith("a")) {
+      if (existingUrl || existingPath) {
+        await openWordPath({
+          wordPath: existingPath,
+          wordUrl: existingUrl,
+          label: "Word completo",
+        });
+        return;
+      }
+      await loadWordSessions({ silent: true });
+      const fresh = (state.library.word?.catalog?.books || []).find((item) => String(item.book_key || "") === String(book.book_key || ""));
+      if (fresh?.complete_word_url || fresh?.complete_word_path) {
+        await openWordPath({
+          wordPath: fresh.complete_word_path || "",
+          wordUrl: fresh.complete_word_url || "",
+          label: "Word completo",
+        });
+        return;
+      }
+      return setStatus("El Word completo existe, pero no pude resolver su URL. Prueba Actualizar y abrir de nuevo.");
+    }
+    if (!action.startsWith("r")) {
+      return setStatus('Accion no reconocida. Usa "abrir" o "regenerar".');
+    }
+  }
+  return convertWordCombined(wordBookConvertibleInstances(book));
+}
+
+async function openWordSession(instanceKey) {
+  let found = findWordInstance(instanceKey);
   if (!found) return setStatus("No encontre el Word seleccionado.");
-  const row = found.instance || {};
+  let row = found.instance || {};
   state.library.word.selectedKey = String(row.instance_key || "");
-  if (!row.word_exists || !row.word_url) {
+  if (row.word_exists && !row.word_url) {
+    await loadWordSessions({ silent: true });
+    found = findWordInstance(instanceKey);
+    row = found?.instance || row;
+  }
+  if (!row.word_exists || (!row.word_path && !row.word_url)) {
     renderLibraryContent();
     return setStatus("Todavia no hay Word exportado para esta instancia.");
   }
-  window.open(row.word_url, "_blank", "noopener");
+  await openWordPath({
+    wordPath: row.word_path || "",
+    wordUrl: row.word_url || "",
+    label: "Word",
+  });
   renderLibraryContent();
-  setStatus(`Abriendo Word: ${row.title || row.word_path}`);
 }
 
 function naturalSortInstances(instances) {

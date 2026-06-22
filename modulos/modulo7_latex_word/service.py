@@ -238,6 +238,9 @@ class LatexWordService:
         cover_path = self._normalize_existing_text_path(str(book.get("cover_path") or book.get("coverPath") or ""))
         cover_url = self.file_url_resolver(cover_path) if cover_path and self.file_url_resolver else ""
         ready = sum(1 for row in instances if row.get("word_exists"))
+        complete_word_path = self._book_complete_word_path(book=book, code=code, title=title)
+        complete_word_exists = bool(complete_word_path and complete_word_path.exists())
+        complete_word_url = self.file_url_resolver(str(complete_word_path)) if complete_word_exists and self.file_url_resolver else ""
         return {
             "book_key": self._stable_key(code, title, str(book.get("id") or "")),
             "id": int(book.get("id") or 0),
@@ -251,6 +254,9 @@ class LatexWordService:
             "workspace_dir": self._normalize_existing_text_path(str(book.get("workspace_dir") or "")),
             "cover_path": cover_path,
             "cover_url": cover_url,
+            "complete_word_path": str(complete_word_path or ""),
+            "complete_word_exists": complete_word_exists,
+            "complete_word_url": complete_word_url,
             "instances": sorted(instances, key=lambda row: self._session_instance_sort_key(str(row.get("title") or ""))),
             "counts": {
                 "instances": len(instances),
@@ -258,6 +264,14 @@ class LatexWordService:
                 "word_pending": max(0, len(instances) - ready),
             },
         }
+
+    def _book_complete_word_path(self, *, book: dict[str, Any], code: str, title: str) -> Path | None:
+        source_pdf_path = str(book.get("pdf_path") or book.get("pdfPath") or "").strip()
+        raw_title = f"{str(title or code or 'Documento').strip()} - completo"
+        try:
+            return self._normalize_path(Path(self._default_combined_instances_output_name(title=raw_title, libro_codigo=code, source_pdf_path=source_pdf_path)))
+        except Exception:
+            return None
 
     def _session_instance_payload(
         self,
@@ -517,7 +531,7 @@ class LatexWordService:
         if not source_text:
             raise RuntimeError("Los problemas seleccionados no tienen enunciado_latex utilizable.")
         input_tex = self._write_scan_source_tex(output_docx=job.output_docx, suffix="__db_source", source_text=source_text)
-        images_dir = self.prepare_images_dir_for_db(problems, output_docx=job.output_docx)
+        images_dir = self.prepare_images_dir_for_db(problems, output_docx=job.output_docx, source_text=source_text)
         produced = self.run_tex_to_word(job=job, input_tex=input_tex, images_dir=images_dir)
         return {
             "schema_version": "latex_word_db_conversion_v1",
@@ -588,7 +602,7 @@ class LatexWordService:
         if not source_text:
             raise RuntimeError("Los problemas de la instancia no tienen enunciado_latex utilizable.")
         input_tex = self._write_scan_source_tex(output_docx=job.output_docx, suffix="__instance_source", source_text=source_text)
-        images_dir = self.prepare_images_dir_for_db(problems, output_docx=job.output_docx)
+        images_dir = self.prepare_images_dir_for_db(problems, output_docx=job.output_docx, source_text=source_text)
         produced = self.run_tex_to_word(job=job, input_tex=input_tex, images_dir=images_dir)
         return {
             "schema_version": "latex_word_db_instance_conversion_v1",
@@ -667,7 +681,7 @@ class LatexWordService:
         )
         source_text = self._build_combined_instances_source_text(usable_sections, title=title)
         input_tex = self._write_raw_scan_source_tex(output_docx=job.output_docx, suffix="__combined_instances_source", source_text=source_text)
-        images_dir = self.prepare_images_dir_for_db(all_problems, output_docx=job.output_docx)
+        images_dir = self.prepare_images_dir_for_db(all_problems, output_docx=job.output_docx, source_text=source_text)
         produced = self.run_tex_to_word(job=job, input_tex=input_tex, images_dir=images_dir)
         return {
             "schema_version": "latex_word_db_instances_combined_conversion_v1",
@@ -934,8 +948,8 @@ class LatexWordService:
             source = str(section.get("source_text") or "").strip()
             if not source:
                 continue
-            blocks.append(rf"\section*{{TITULO: {self._latex_escape_heading(section_title)}}}")
-            blocks.append(self._ensure_enumerate_wrapper(source))
+            blocks.append(rf"\subsection*{{{self._latex_escape_heading(section_title)}}}")
+            blocks.append(self._ensure_clean_enumerate_block(source))
         return "\n\n".join(blocks).strip()
 
     def _build_scan_source_text_from_db(
@@ -990,17 +1004,30 @@ class LatexWordService:
         return f"{' '.join(metadata_tags)} {remainder}".strip()
 
     def _normalize_db_text_separators(self, text: str) -> str:
-        normalized = str(text or "")
+        normalized = self._repair_db_text_mojibake(str(text or ""))
         replacements = {
-            "Ã‚Â£": "£",
-            "ÃƒÂ¦": "æ",
-            "Â£": "£",
-            "Ã¦": "æ",
+            "Ã‚Â£": "\u00a3",
+            "ÃƒÂ¦": "\u00e6",
+            "Â£": "\u00a3",
+            "Ã¦": "\u00e6",
             "\u00a0": " ",
         }
         for source, target in replacements.items():
             normalized = normalized.replace(source, target)
         return normalized
+
+    def _repair_db_text_mojibake(self, text: str) -> str:
+        value = str(text or "")
+        markers = ("Ã", "Â")
+        if not any(marker in value for marker in markers):
+            return value
+        try:
+            repaired = value.encode("latin-1", errors="strict").decode("utf-8", errors="strict")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            return value
+        current_score = sum(value.count(marker) for marker in markers)
+        repaired_score = sum(repaired.count(marker) for marker in markers)
+        return repaired if repaired_score < current_score else value
 
     def _strip_generic_db_tags(self, text: str) -> str:
         cleaned = str(text or "")
@@ -1069,7 +1096,7 @@ class LatexWordService:
         if clean == original and len(clean) <= 80:
             return clean
         digest = hashlib.sha1(original.encode("utf-8", errors="ignore")).hexdigest()[:10]
-        return self._safe_filename(f"{self._db_marker_prefix(problem)}_{clean}_{digest}", fallback=f"img_{digest}", limit=92)
+        return self._safe_filename(f"{self._db_marker_prefix(problem)}_img_{digest}", fallback=f"img_{digest}", limit=48)
 
     def _structured_db_image_paths(self, problem: dict[str, Any]) -> list[str]:
         raw_images = problem.get("imagenes", [])
@@ -1110,7 +1137,7 @@ class LatexWordService:
             base = clean_base
         else:
             digest = hashlib.sha1(raw_base.encode("utf-8", errors="ignore")).hexdigest()[:10]
-            base = self._safe_filename(f"{raw_base}_{digest}", fallback="img", limit=92)
+            base = self._safe_filename(f"{self._db_marker_prefix(problem)}_img_{digest}", fallback="img", limit=48)
         key = base.lower()
         counts[key] = counts.get(key, 0) + 1
         return self._safe_filename(f"{base}_{counts[key]}", fallback="img", limit=92) if counts[key] > 1 else base
@@ -1207,8 +1234,16 @@ class LatexWordService:
                 return matches
         return matches
 
-    def prepare_images_dir_for_db(self, problems: list[dict[str, Any]], *, output_docx: Path) -> Path | None:
+    def prepare_images_dir_for_db(
+        self,
+        problems: list[dict[str, Any]],
+        *,
+        output_docx: Path,
+        source_text: str | None = None,
+    ) -> Path | None:
         if not problems:
+            return None
+        if source_text is not None and not IMAGE_MARKER_RE.search(str(source_text or "")):
             return None
         images_dir = output_docx.with_name(f"{output_docx.stem}__db_images")
         images_dir.mkdir(parents=True, exist_ok=True)
@@ -1231,7 +1266,7 @@ class LatexWordService:
                         continue
                 except Exception:
                     pass
-                shutil.copy2(str(source), str(target))
+                self._materialize_file_fast(source, target)
                 copied += 1
         if copied > 0:
             self.log(f"BD Word: se materializaron {copied} imagen(es) en {images_dir}")
@@ -1251,6 +1286,25 @@ class LatexWordService:
         except OSError as exc:
             self.log(f"BD Word: no se pudo crear placeholder para {clean_marker}: {exc}")
             return None
+
+    def _materialize_file_fast(self, source: Path, target: Path) -> None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if target.exists():
+                try:
+                    if target.stat().st_size == source.stat().st_size:
+                        return
+                except OSError:
+                    return
+                target.unlink()
+        except OSError:
+            pass
+        try:
+            os.link(str(source), str(target))
+            return
+        except OSError:
+            shutil.copy2(str(source), str(target))
+
 
     def _normalize_state_tag(self, value: str) -> str:
         state = str(value or "").strip().lower()
@@ -1422,6 +1476,8 @@ class LatexWordService:
             cmd.extend(["--template", str(job.template)])
         if images_dir and images_dir.exists():
             cmd.extend(["--images-dir", str(images_dir)])
+        timeout_seconds = self._tex_to_word_timeout_seconds(input_tex)
+        self.log(f"Modulo 7: timeout conversion Word={timeout_seconds}s para {input_tex.name}")
         try:
             proc = subprocess.run(
                 cmd,
@@ -1430,7 +1486,7 @@ class LatexWordService:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=300,
+                timeout=timeout_seconds,
             )
         except subprocess.TimeoutExpired as exc:
             recovered = self._recover_pandoc_intermediate_docx(job.output_docx)
@@ -1454,6 +1510,18 @@ class LatexWordService:
                 return recovered
             raise RuntimeError(f"La conversion termino sin crear el Word: {produced}")
         return produced
+
+    def _tex_to_word_timeout_seconds(self, input_tex: Path) -> int:
+        try:
+            text = input_tex.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return 300
+        item_count = len(re.findall(r"\\item\s*\[", text))
+        if item_count <= 120:
+            return 300
+        if item_count <= 350:
+            return 900
+        return 1800
 
     def _recover_pandoc_intermediate_docx(self, output_docx: Path) -> Path | None:
         output = self._normalize_path(output_docx)
@@ -1619,6 +1687,12 @@ class LatexWordService:
         low = text.lower()
         if "\\begin{enumerate}" in low and "\\end{enumerate}" in low:
             return text
+        return "\\begin{enumerate}\n" + text + "\n\\end{enumerate}"
+
+    def _ensure_clean_enumerate_block(self, source_text: str) -> str:
+        text = str(source_text or "").strip()
+        text = re.sub(r"\\(?:begin|end)\s*\{\s*enumerate\s*\}", " ", text, flags=re.IGNORECASE)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
         return "\\begin{enumerate}\n" + text + "\n\\end{enumerate}"
 
     def session_word_candidates(self, session_path: Path | None) -> list[Path]:
@@ -1822,7 +1896,7 @@ class LatexWordService:
                     return
             except Exception:
                 pass
-            shutil.copy2(str(source), str(target))
+            self._materialize_file_fast(source, target)
             copied += 1
 
         preview_map = payload.get("preview_images", {}) if isinstance(payload, dict) else {}

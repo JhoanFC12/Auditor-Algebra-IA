@@ -292,6 +292,30 @@ class LatexWordServiceTests(unittest.TestCase):
             self.assertEqual(result["count"], 1)
             self.assertTrue((root / "instancia__instance_source.tex").exists())
 
+    def test_db_instance_source_repairs_mojibake_before_word(self) -> None:
+        service = LatexWordService()
+        problems = [
+            {
+                "id": 91,
+                "numero_original": 1,
+                "curso": "Geometria",
+                "tema": "Circunferencia",
+                "enunciado_latex": (
+                    r"\item[\textbf{1.}] En un triÃ¡ngulo, calcule el Ã¡ngulo. "
+                    r"Â£A)$10^\circ$Ã¦B)$20^\circ$Â£"
+                ),
+            }
+        ]
+
+        source = service._build_scan_source_text_from_db(problems)
+
+        self.assertIn("triangulo", service._normalize_search(source))
+        self.assertIn("angulo", service._normalize_search(source))
+        self.assertIn("\u00a3A)", source)
+        self.assertIn("\u00e6B)", source)
+        self.assertNotIn("Ã", source)
+        self.assertNotIn("Â£", source)
+
     def test_converts_db_instance_to_word_folder_next_to_pdf_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -362,14 +386,15 @@ class LatexWordServiceTests(unittest.TestCase):
 
             class PracticeController:
                 def obtener_problemas_por_instancia(self, _db_name, *, libro_codigo, codigo_instancia):
+                    number = 31 if codigo_instancia == "S2" else 1
                     return [
                         {
                             "id": 100 + len(codigo_instancia),
-                            "numero_original": 1,
+                            "numero_original": number,
                             "curso": "Geometria",
                             "tema": "Triangulos",
                             "respuesta_correcta": "A",
-                            "enunciado_latex": rf"\item[\textbf{{1.}}] Problema de {codigo_instancia}.",
+                            "enunciado_latex": rf"\item[\textbf{{{number}.}}] Problema de {codigo_instancia}.",
                         }
                     ]
 
@@ -390,10 +415,13 @@ class LatexWordServiceTests(unittest.TestCase):
             source = (root / "completo__combined_instances_source.tex").read_text(encoding="utf-8")
             self.assertTrue(output.exists())
             self.assertEqual(result["schema_version"], "latex_word_db_instances_combined_conversion_v1")
-            self.assertIn(r"\section*{TITULO: NOMBRE\_DE\_S1}", source)
-            self.assertIn(r"\section*{TITULO: NOMBRE\_DE\_S2}", source)
+            self.assertIn(r"\subsection*{NOMBRE\_DE\_S1}", source)
+            self.assertIn(r"\subsection*{NOMBRE\_DE\_S2}", source)
+            self.assertNotIn("TITULO:", source)
             self.assertIn("Problema de S1", source)
             self.assertIn("Problema de S2", source)
+            self.assertIn(r"\item[\textbf{1.}]", source)
+            self.assertIn(r"\item[\textbf{31.}]", source)
 
     def test_recovers_pandoc_intermediate_when_word_postprocess_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -447,6 +475,27 @@ class LatexWordServiceTests(unittest.TestCase):
             placeholder = images_dir / "img-faltante.png"
             self.assertTrue(placeholder.exists())
             self.assertGreater(placeholder.stat().st_size, 0)
+
+    def test_prepare_db_images_skips_when_source_has_no_image_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "practice.docx"
+            service = LatexWordService()
+            problems = [
+                {
+                    "id": 9144,
+                    "enunciado_latex": r"\item[\textbf{2.}] En la figura. [[Imagen=img-faltante]] A)$1$ B)$2$",
+                }
+            ]
+
+            images_dir = service.prepare_images_dir_for_db(
+                problems,
+                output_docx=output,
+                source_text=r"\item[\textbf{2.}] Enunciado sin marcador de imagen. A)$1$ B)$2$",
+            )
+
+            self.assertIsNone(images_dir)
+            self.assertFalse((root / "practice__db_images").exists())
 
     def test_db_image_markers_are_shortened_consistently(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -6,6 +6,7 @@ import binascii
 import gzip
 import json
 import mimetypes
+import os
 import shutil
 import tempfile
 import threading
@@ -319,6 +320,8 @@ class LibraryWebRuntime:
                     template=str(payload.get("template") or ""),
                     style=str(payload.get("style") or "Estilo_plantilla"),
                 )
+            if method == "POST" and path == "/api/word/open":
+                return self._open_word_file(self._required_str(payload, "word_path"))
             if method == "POST" and path == "/api/word/convert-instance":
                 self.word_service.controller = self._word_controller()
                 self.word_service.practice_controller = self._word_practice_controller(str(payload.get("db_name") or self.default_db_name))
@@ -1155,6 +1158,7 @@ class LibraryWebRuntime:
             "/api/word/sessions": {"GET"},
             "/api/word/problems": {"GET"},
             "/api/word/convert": {"POST"},
+            "/api/word/open": {"POST"},
             "/api/word/convert-instance": {"POST"},
             "/api/word/convert-instances": {"POST"},
             "/api/word/convert-problems": {"POST"},
@@ -1175,3 +1179,24 @@ class LibraryWebRuntime:
                 status=405,
                 code="method_not_allowed",
             )
+
+    def _open_word_file(self, path_text: str) -> dict[str, Any]:
+        try:
+            word_path = remap_legacy_drive_path(Path(path_text).expanduser(), prefer_existing=True).resolve()
+        except Exception as exc:
+            raise ValueError(f"Ruta Word invalida: {exc}") from exc
+        if word_path.suffix.lower() != ".docx":
+            raise ValueError("Solo se pueden abrir archivos .docx desde este flujo.")
+        if not word_path.exists() or not word_path.is_file():
+            raise FileNotFoundError(f"No existe el Word: {word_path}")
+        try:
+            os.startfile(str(word_path))  # type: ignore[attr-defined]
+        except AttributeError as exc:
+            raise RuntimeError("Este sistema no soporta apertura directa con os.startfile.") from exc
+        except OSError as exc:
+            raise RuntimeError(f"No pude abrir el Word con Windows: {exc}") from exc
+        return {
+            "schema_version": "latex_word_open_v1",
+            "opened": True,
+            "word_path": str(word_path),
+        }

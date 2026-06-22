@@ -2723,6 +2723,35 @@ canvas {
   white-space: pre-wrap;
 }
 
+.final-review-form {
+  grid-template-rows: auto minmax(150px, 1fr) minmax(150px, 1fr);
+  max-height: calc(100vh - 260px);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.final-review-form .panel-heading-row {
+  min-height: 0;
+  align-items: start;
+  gap: 12px;
+}
+
+.final-review-heading-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 220px;
+}
+
+.final-review-form .final-review-text {
+  min-height: 150px;
+  max-height: none;
+  resize: none;
+  overflow: auto;
+}
+
 .nav-counter.status-error {
   border-color: color-mix(in srgb, var(--red) 55%, var(--border));
   color: var(--red);
@@ -2747,7 +2776,12 @@ canvas {
 }
 
 .final-latex-preview {
-  min-height: 260px;
+  min-height: 150px;
+  overflow: auto;
+}
+
+.final-review-submit {
+  min-width: 180px;
 }
 
 .preview-problem {

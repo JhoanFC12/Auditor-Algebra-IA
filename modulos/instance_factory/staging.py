@@ -103,6 +103,74 @@ def _first_problem_number(*values: Any) -> str:
     return ""
 
 
+def _canonical_final_option_value(value: Any) -> str:
+    text = str(value or "").lower()
+    text = (
+        text.replace(r"\circ", "degree")
+        .replace("°", "degree")
+        .replace(r"\(", "")
+        .replace(r"\)", "")
+    )
+    return re.sub(r"[${}\s]", "", text).strip()
+
+
+def _extract_final_format_options(value: Any) -> dict[str, str] | None:
+    text = (
+        str(value or "")
+        .replace("Ã‚Â£", "\u00a3")
+        .replace("Â£", "\u00a3")
+        .replace("Ã¦", "\u00e6")
+        .replace("Â¦", "\u00e6")
+    )
+    match = re.search(
+        r"\u00a3A\)([\s\S]*?)\u00e6B\)([\s\S]*?)\u00e6C\)([\s\S]*?)\u00a3D\)([\s\S]*?)\u00e6\u00e6E\)([\s\S]*?)\u00a3",
+        text,
+    )
+    if not match:
+        return None
+    return dict(zip(("A", "B", "C", "D", "E"), (str(item) for item in match.groups())))
+
+
+def _extract_loose_option_line(value: Any) -> dict[str, str] | None:
+    text = str(value or "").strip()
+    text = re.sub(r"^\s*\[CONT\.?\]\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text)
+    match = re.search(
+        r"(?:^|\s)A\)([\s\S]*?)\s+B\)([\s\S]*?)\s+C\)([\s\S]*?)\s+D\)([\s\S]*?)\s+E\)([\s\S]*?)\s*$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return dict(zip(("A", "B", "C", "D", "E"), (str(item) for item in match.groups())))
+
+
+def _remove_duplicate_loose_option_continuation(value: Any) -> str:
+    text = str(value or "").strip()
+    final_options = _extract_final_format_options(text)
+    if not text or not final_options:
+        return text
+    lines = text.splitlines()
+    final_line = 0
+    acc: list[str] = []
+    for index, line in enumerate(lines):
+        acc.append(line)
+        if _extract_final_format_options("\n".join(acc)):
+            final_line = index
+            break
+    out: list[str] = []
+    for index, line in enumerate(lines):
+        loose_options = _extract_loose_option_line(line) if index > final_line else None
+        if loose_options and all(
+            _canonical_final_option_value(final_options[label]) == _canonical_final_option_value(loose_options[label])
+            and _canonical_final_option_value(loose_options[label])
+            for label in ("A", "B", "C", "D", "E")
+        ):
+            continue
+        out.append(line)
+    return "\n".join(out).strip()
+
+
 def _repair_normalized_final_latex_number(
     normalized: dict[str, Any],
     record: StagingProblemRecord,
@@ -138,6 +206,7 @@ def _repair_normalized_final_latex_number(
         count=1,
         flags=re.IGNORECASE,
     )
+    repaired = _remove_duplicate_loose_option_continuation(repaired)
     payload["latex_rendered_item"] = repaired
     return payload
 

@@ -1,0 +1,211 @@
+{
+  "db": "mathcontentstudio_local_mirror",
+  "created_at": "2026-06-21T02:53:07",
+  "affected": [
+    {
+      "id": 8882,
+      "before": "\\item[\\textbf{10.}] Dado un trapecio, cuyas bases miden $6,cm$ y $2,cm$, se traza una paralela a las bases de tal manera que dicho trapecio es dividido en dos regiones cuyas áreas son iguales. Halle la longitud de la paralela en $cm$.",
+      "after": "\\item[\\textbf{10.}] Dado un trapecio, cuyas bases miden $6\\,cm$ y $2\\,cm$, se traza una paralela a las bases de tal manera que dicho trapecio es dividido en dos regiones cuyas áreas son iguales. Halle la longitud de la paralela en $cm$."
+    },
+    {
+      "id": 8887,
+      "before": "\\item[\\textbf{15.}] En un triángulo $ABC$ se trazan las cevianas $\\overline{BP}$ y $\\overline{BQ}$ tal que $AP=PQ=QC$. Sobre los lados $\\overline{AB}$ y $\\overline{BC}$ se ubican los puntos $F$ y $G$, respectivamente, tal que $AF=2(FB)$ y $BG=2(GC)$. Halle el área de la región determinada por $\\overline{FG}$, $\\overline{BP}$ y $\\overline{BQ}$, si el área $(\\triangle ABC)$ es $45,cm^2$. £A)$1$æB)$2$æC)$3$£D)$4$ææE)$5$£",
+      "after": "\\item[\\textbf{15.}] En un triángulo $ABC$ se trazan las cevianas $\\overline{BP}$ y $\\overline{BQ}$ tal que $AP=PQ=QC$. Sobre los lados $\\overline{AB}$ y $\\overline{BC}$ se ubican los puntos $F$ y $G$, respectivamente, tal que $AF=2(FB)$ y $BG=2(GC)$. Halle el área de la región determinada por $\\overline{FG}$, $\\overline{BP}$ y $\\overline{BQ}$, si el área $(\\triangle ABC)$ es $45\\,cm^2$. £A)$1$æB)$2$æC)$3$£D)$4$ææE)$5$£"
+    },
+    {
+      "id": 8891,
+      "before": "\\item[\\textbf{19.}] En un cuadrilátero convexo $ABCD$, se traza $\\overline{AP}$ perpendicular a $\\overline{BD}$, $P\\in\\overline{BD}$. Si $BP=1,u$, $AP=7,u$, $m\\sphericalangle ABC=m\\sphericalangle BDC=90^\\circ$ y $AB=BC$, entonces, ¿cuál es el área de la región triangular $ADC$? £A)$2,u^2$æB)$2,5,u^2$æC)$3,u^2$£D)$3,5,u^2$ææE)$4,u^2$£",
+      "after": "\\item[\\textbf{19.}] En un cuadrilátero convexo $ABCD$, se traza $\\overline{AP}$ perpendicular a $\\overline{BD}$, $P\\in\\overline{BD}$. Si $BP=1\\,u$, $AP=7\\,u$, $m\\sphericalangle ABC=m\\sphericalangle BDC=90^\\circ$ y $AB=BC$, entonces, ¿cuál es el área de la región triangular $ADC$? £A)$2\\,u^2$æB)$2,5\\,u^2$æC)$3\\,u^2$£D)$3,5\\,u^2$ææE)$4\\,u^2$£"
+    },
+    {
+      "id": 8892,
+      "before": "\\item[\\textbf{20.}] En el triángulo isósceles $ABC$ ($AB=BC=10,cm$), la ceviana $\\overline{AN}$, $N\\in\\overline{BC}$, intercepta a la altura $\\overline{BM}$, $M\\in\\overline{AC}$, en el punto $P$. Si $AC=16,cm$ y $BN=2,cm$, determinar el área en $cm^2$ de la región triangular $APB$. £A)$6$æB)$7$æC)$8$£D)$9$ææE)$10$£",
+      "after": "\\item[\\textbf{20.}] En el triángulo isósceles $ABC$ ($AB=BC=10\\,cm$), la ceviana $\\overline{AN}$, $N\\in\\overline{BC}$, intercepta a la altura $\\overline{BM}$, $M\\in\\overline{AC}$, en el punto $P$. Si $AC=16\\,cm$ y $BN=2\\,cm$, determinar el área en $cm^2$ de la región triangular $APB$. £A)$6$æB)$7$æC)$8$£D)$9$ææE)$10$£"
+    },
+    {
+      "id": 8897,
+      "before": "\\item[\\textbf{25.}] Se tiene el triángulo $ABC$, se trazan las alturas $\\overline{AQ}$, $\\overline{BR}$ y $\\overline{CP}$. Si las distancias de $A$, $B$ y $C$ a $\\overline{PR}$, $\\overline{PQ}$ y $\\overline{QR}$ son: $4,cm$, $6,cm$ y $12,cm$, calcule el área de la región triangular $PQR$ en $\\mathrm{cm}^2$. £A)$10\\sqrt{2}$æB)$18$æC)$21$£D)$24$ææE)$48$£",
+      "after": "\\item[\\textbf{25.}] Se tiene el triángulo $ABC$, se trazan las alturas $\\overline{AQ}$, $\\overline{BR}$ y $\\overline{CP}$. Si las distancias de $A$, $B$ y $C$ a $\\overline{PR}$, $\\overline{PQ}$ y $\\overline{QR}$ son: $4\\,cm$, $6\\,cm$ y $12\\,cm$, calcule el área de la región triangular $PQR$ en $\\mathrm{cm}^2$. £A)$10\\sqrt{2}$æB)$18$æC)$21$£D)$24$ææE)$48$£"
+    },
+    {
+      "id": 9017,
+      "before": "\\item[\\textbf{25.}] En un triángulo $ABC$, se ubica el punto $D$ interior al triángulo tal que $\\overline{AB}\\cong\\overline{CD}$. Si $m\\sphericalangle ABD=2\\alpha$, $m\\sphericalangle ACD=m\\sphericalangle BAD=\\alpha$, $m\\sphericalangle ADC=5\\alpha$ y $AC=40,u$, entonces la longitud de $\\overline{AD}$, en $u$, es: £A)$10$æB)$15$æC)$20$£D)$40$ææE)$80$£",
+      "after": "\\item[\\textbf{25.}] En un triángulo $ABC$, se ubica el punto $D$ interior al triángulo tal que $\\overline{AB}\\cong\\overline{CD}$. Si $m\\sphericalangle ABD=2\\alpha$, $m\\sphericalangle ACD=m\\sphericalangle BAD=\\alpha$, $m\\sphericalangle ADC=5\\alpha$ y $AC=40\\,u$, entonces la longitud de $\\overline{AD}$, en $u$, es: £A)$10$æB)$15$æC)$20$£D)$40$ææE)$80$£"
+    },
+    {
+      "id": 9023,
+      "before": "\\item[\\textbf{1.}] En un triángulo rectángulo $ABC$, se traza la ceviana $\\overline{AD}$, de tal manera que $m\\sphericalangle DAC=2(m\\sphericalangle BAD)$. Si $m\\sphericalangle BED=m\\sphericalangle DFC=90^\\circ$, $DF=7,u$. Halle $BE$, $E\\in\\overline{AD}$ y $F\\in\\overline{AC}$. £A)$2$æB)$2,5$æC)$3$£D)$3,5$ææE)$4$£",
+      "after": "\\item[\\textbf{1.}] En un triángulo rectángulo $ABC$, se traza la ceviana $\\overline{AD}$, de tal manera que $m\\sphericalangle DAC=2(m\\sphericalangle BAD)$. Si $m\\sphericalangle BED=m\\sphericalangle DFC=90^\\circ$, $DF=7\\,u$. Halle $BE$, $E\\in\\overline{AD}$ y $F\\in\\overline{AC}$. £A)$2$æB)$2,5$æC)$3$£D)$3,5$ææE)$4$£"
+    },
+    {
+      "id": 9025,
+      "before": "\\item[\\textbf{3.}] En un triángulo rectángulo $ABC$, recto en $B$, se traza la altura $\\overline{BH}$, las bisectrices de los ángulos $ABH$ y $HBC$ intersecan al lado $\\overline{AC}$ en los puntos $M$ y $N$, respectivamente. Si $AB=8,u$, $BC=15,u$, halle $MN$ en $u$. £A)$3,5$æB)$4$æC)$5,5$£D)$6$ææE)$5,5$£",
+      "after": "\\item[\\textbf{3.}] En un triángulo rectángulo $ABC$, recto en $B$, se traza la altura $\\overline{BH}$, las bisectrices de los ángulos $ABH$ y $HBC$ intersecan al lado $\\overline{AC}$ en los puntos $M$ y $N$, respectivamente. Si $AB=8\\,u$, $BC=15\\,u$, halle $MN$ en $u$. £A)$3,5$æB)$4$æC)$5,5$£D)$6$ææE)$5,5$£"
+    },
+    {
+      "id": 9026,
+      "before": "\\item[\\textbf{4.}] En un triángulo $ABC$, se traza la bisectriz interior del ángulo $A$ y la bisectriz exterior del ángulo $C$ se intersectan en $E$, las bisectrices de los ángulos $ABC$ y $AEC$ se intersectan en $Q$ e intersecan al lado $\\overline{AC}$ en $M$ y $N$. Si $MN=8,cm$, calcule $MQ$ en $cm$. £A)$6$æB)$8$æC)$9$£D)$10$ææE)$12$£",
+      "after": "\\item[\\textbf{4.}] En un triángulo $ABC$, se traza la bisectriz interior del ángulo $A$ y la bisectriz exterior del ángulo $C$ se intersectan en $E$, las bisectrices de los ángulos $ABC$ y $AEC$ se intersectan en $Q$ e intersecan al lado $\\overline{AC}$ en $M$ y $N$. Si $MN=8\\,cm$, calcule $MQ$ en $cm$. £A)$6$æB)$8$æC)$9$£D)$10$ææE)$12$£"
+    },
+    {
+      "id": 9029,
+      "before": "\\item[\\textbf{7.}] En un triángulo $ABC$ isósceles, $AB=BC$, se trazan las bisectrices interiores del ángulo $A$ y exterior del ángulo $C$, intersecándose en $P$, luego se traza $\\overline{PH}\\perp\\overline{BC}$. Si $BH=3,cm$, halle $AC$ en $cm$. £A)$3$æB)$4$æC)$5$£D)$6$ææE)$8$£",
+      "after": "\\item[\\textbf{7.}] En un triángulo $ABC$ isósceles, $AB=BC$, se trazan las bisectrices interiores del ángulo $A$ y exterior del ángulo $C$, intersecándose en $P$, luego se traza $\\overline{PH}\\perp\\overline{BC}$. Si $BH=3\\,cm$, halle $AC$ en $cm$. £A)$3$æB)$4$æC)$5$£D)$6$ææE)$8$£"
+    },
+    {
+      "id": 9030,
+      "before": "\\item[\\textbf{8.}] En un triángulo $ABC$, se traza la bisectriz interior del ángulo $C$ y la bisectriz exterior del ángulo $A$, intersecándose en el punto $M$, por donde se traza una paralela al lado $\\overline{AC}$, intersecando a la bisectriz interior del ángulo $A$ en el punto $N$ y a los lados $\\overline{AB}$ y $\\overline{BC}$ en los puntos $P$ y $Q$, respectivamente. Si $AP=5,u$, $QC=7,u$, halle $MN$ en $u$. £A)$10$æB)$11$æC)$12$£D)$13$ææE)$14$£",
+      "after": "\\item[\\textbf{8.}] En un triángulo $ABC$, se traza la bisectriz interior del ángulo $C$ y la bisectriz exterior del ángulo $A$, intersecándose en el punto $M$, por donde se traza una paralela al lado $\\overline{AC}$, intersecando a la bisectriz interior del ángulo $A$ en el punto $N$ y a los lados $\\overline{AB}$ y $\\overline{BC}$ en los puntos $P$ y $Q$, respectivamente. Si $AP=5\\,u$, $QC=7\\,u$, halle $MN$ en $u$. £A)$10$æB)$11$æC)$12$£D)$13$ææE)$14$£"
+    },
+    {
+      "id": 9032,
+      "before": "\\item[\\textbf{10.}] En un triángulo $ABC$ recto en $B$, en la mediatriz de $\\overline{AC}$ se ubica el punto $E$ exterior al triángulo, se traza $\\overline{EF}\\perp\\overline{BC}$, $F\\in\\overline{BC}$, $BF=6,u$ y $FC=2,u$. Si $M$ es el punto medio de $\\overline{AC}$ y $AM=ME$. Calcule $AB$ en $u$. £A)$4$æB)$4\\sqrt{2}$æC)$3\\sqrt{6}$£D)$4\\sqrt{3}$ææE)$8$£",
+      "after": "\\item[\\textbf{10.}] En un triángulo $ABC$ recto en $B$, en la mediatriz de $\\overline{AC}$ se ubica el punto $E$ exterior al triángulo, se traza $\\overline{EF}\\perp\\overline{BC}$, $F\\in\\overline{BC}$, $BF=6\\,u$ y $FC=2\\,u$. Si $M$ es el punto medio de $\\overline{AC}$ y $AM=ME$. Calcule $AB$ en $u$. £A)$4$æB)$4\\sqrt{2}$æC)$3\\sqrt{6}$£D)$4\\sqrt{3}$ææE)$8$£"
+    },
+    {
+      "id": 9034,
+      "before": "\\item[\\textbf{12.}] En el triángulo $ABC$, $AB=BC$, $\\overline{AD}$ es bisectriz interior y en el triángulo $ADC$ se trazan la bisectriz $\\overline{DM}$ interior y $\\overline{DN}$ exterior con $N$ en $\\overline{AC}$. Si $AD=5,u$, calcule $MN$ en $u$. £A)$10$æB)$12$æC)$8$£D)$9$ææE)$11$£",
+      "after": "\\item[\\textbf{12.}] En el triángulo $ABC$, $AB=BC$, $\\overline{AD}$ es bisectriz interior y en el triángulo $ADC$ se trazan la bisectriz $\\overline{DM}$ interior y $\\overline{DN}$ exterior con $N$ en $\\overline{AC}$. Si $AD=5\\,u$, calcule $MN$ en $u$. £A)$10$æB)$12$æC)$8$£D)$9$ææE)$11$£"
+    },
+    {
+      "id": 9037,
+      "before": "\\item[\\textbf{15.}] En un triángulo rectángulo $ABC$, en $\\overline{AC}$ y $\\overline{BC}$ se ubican los puntos $D$ y $E$, respectivamente, de manera que $2(m\\sphericalangle EAB)=m\\sphericalangle EAC$, además $m\\sphericalangle AED=m\\sphericalangle BCA$. Si $EB=10,cm$, calcule $DE$ en $cm$. £A)$15$æB)$17$æC)$18$£D)$20$ææE)$22$£",
+      "after": "\\item[\\textbf{15.}] En un triángulo rectángulo $ABC$, en $\\overline{AC}$ y $\\overline{BC}$ se ubican los puntos $D$ y $E$, respectivamente, de manera que $2(m\\sphericalangle EAB)=m\\sphericalangle EAC$, además $m\\sphericalangle AED=m\\sphericalangle BCA$. Si $EB=10\\,cm$, calcule $DE$ en $cm$. £A)$15$æB)$17$æC)$18$£D)$20$ææE)$22$£"
+    },
+    {
+      "id": 9038,
+      "before": "\\item[\\textbf{16.}] Sean los triángulos rectángulos $ABC$ y $ADC$, $AD=DC$, rectos en $B$ y $D$, respectivamente, contenidos en semiplanos distintos con respecto a $\\overline{AC}$. Si $AB=3,u$, se traza $\\overline{DH}$ perpendicular a $\\overline{BC}$. Calcule $DH$ en $u$. £A)$5$æB)$5,5$æC)$6$£D)$6,5$ææE)$4,5$£",
+      "after": "\\item[\\textbf{16.}] Sean los triángulos rectángulos $ABC$ y $ADC$, $AD=DC$, rectos en $B$ y $D$, respectivamente, contenidos en semiplanos distintos con respecto a $\\overline{AC}$. Si $AB=3\\,u$, se traza $\\overline{DH}$ perpendicular a $\\overline{BC}$. Calcule $DH$ en $u$. £A)$5$æB)$5,5$æC)$6$£D)$6,5$ææE)$4,5$£"
+    },
+    {
+      "id": 9039,
+      "before": "\\item[\\textbf{17.}] En un triángulo rectángulo $ABC$, recto en $B$, donde $P\\in\\overline{BC}$ y $E\\in\\overline{AC}$, se tiene que $m\\sphericalangle APE=m\\sphericalangle C$, $m\\sphericalangle PAC=2(m\\sphericalangle PAB)$ y $BP=4,cm$. Halle $PE$ en $cm$. £A)$4$æB)$6$æC)$8$£D)$10$ææE)$12$£",
+      "after": "\\item[\\textbf{17.}] En un triángulo rectángulo $ABC$, recto en $B$, donde $P\\in\\overline{BC}$ y $E\\in\\overline{AC}$, se tiene que $m\\sphericalangle APE=m\\sphericalangle C$, $m\\sphericalangle PAC=2(m\\sphericalangle PAB)$ y $BP=4\\,cm$. Halle $PE$ en $cm$. £A)$4$æB)$6$æC)$8$£D)$10$ææE)$12$£"
+    },
+    {
+      "id": 9040,
+      "before": "\\item[\\textbf{18.}] En un triángulo $ABC$ recto en $A$, donde $AB=8,u$, se traza la mediana $\\overline{BD}$ de manera que $m\\sphericalangle ABD=45^\\circ+\\dfrac{1}{2}m\\sphericalangle BCA$. Calcule $BC$ en $u$. £A)$16$æB)$18$æC)$20$£D)$24$ææE)$36$£",
+      "after": "\\item[\\textbf{18.}] En un triángulo $ABC$ recto en $A$, donde $AB=8\\,u$, se traza la mediana $\\overline{BD}$ de manera que $m\\sphericalangle ABD=45^\\circ+\\dfrac{1}{2}m\\sphericalangle BCA$. Calcule $BC$ en $u$. £A)$16$æB)$18$æC)$20$£D)$24$ææE)$36$£"
+    },
+    {
+      "id": 9043,
+      "before": "\\item[\\textbf{21.}] En un triángulo $ABC$ se traza la mediana $\\overline{BM}$. Si $AB=8,u$ y $BC=13,u$, entonces la mayor longitud entera de la mediana $\\overline{BM}$ en $u$ es: £A)$8$æB)$9$æC)$10$£D)$11$ææE)$12$£",
+      "after": "\\item[\\textbf{21.}] En un triángulo $ABC$ se traza la mediana $\\overline{BM}$. Si $AB=8\\,u$ y $BC=13\\,u$, entonces la mayor longitud entera de la mediana $\\overline{BM}$ en $u$ es: £A)$8$æB)$9$æC)$10$£D)$11$ææE)$12$£"
+    },
+    {
+      "id": 9075,
+      "before": "\\item[\\textbf{23.}] En un hexágono $ABCDEF$ equiángulo, $AB=7,u$ y $BC=3,u$. Si $CD=5,u$, $EF=2,u$ y $Q$ es punto interior al hexágono, entonces la suma de las distancias, en $u$, de $Q$ a los lados $\\overline{AB}$, $\\overline{CD}$ y $\\overline{EF}$ es: £A)$5\\sqrt{3}$æB)$6\\sqrt{3}$æC)$8\\sqrt{3}$£D)$9\\sqrt{3}$ææE)$10\\sqrt{3}$£",
+      "after": "\\item[\\textbf{23.}] En un hexágono $ABCDEF$ equiángulo, $AB=7\\,u$ y $BC=3\\,u$. Si $CD=5\\,u$, $EF=2\\,u$ y $Q$ es punto interior al hexágono, entonces la suma de las distancias, en $u$, de $Q$ a los lados $\\overline{AB}$, $\\overline{CD}$ y $\\overline{EF}$ es: £A)$5\\sqrt{3}$æB)$6\\sqrt{3}$æC)$8\\sqrt{3}$£D)$9\\sqrt{3}$ææE)$10\\sqrt{3}$£"
+    },
+    {
+      "id": 9091,
+      "before": "\\item[\\textbf{9.}] Exteriormente a un triángulo acutángulo $ABC$ se dibujan cuadrados de lados $\\overline{AB}$, $\\overline{BC}$ y $\\overline{AC}$, cuyos centros son $D$, $E$ y $F$, respectivamente. Si $DE=6,cm$, halle $BF$ en $cm$. £A)$5$æB)$6$æC)$8$£D)$10$ææE)$12$£",
+      "after": "\\item[\\textbf{9.}] Exteriormente a un triángulo acutángulo $ABC$ se dibujan cuadrados de lados $\\overline{AB}$, $\\overline{BC}$ y $\\overline{AC}$, cuyos centros son $D$, $E$ y $F$, respectivamente. Si $DE=6\\,cm$, halle $BF$ en $cm$. £A)$5$æB)$6$æC)$8$£D)$10$ææE)$12$£"
+    },
+    {
+      "id": 9097,
+      "before": "\\item[\\textbf{15.}] En un trapecio las diagonales miden $8,cm$ y $12,cm$. Calcule el máximo valor entero de la mediana en $cm$. £A)$5$æB)$6$æC)$7$£D)$8$ææE)$9$£",
+      "after": "\\item[\\textbf{15.}] En un trapecio las diagonales miden $8\\,cm$ y $12\\,cm$. Calcule el máximo valor entero de la mediana en $cm$. £A)$5$æB)$6$æC)$7$£D)$8$ææE)$9$£"
+    },
+    {
+      "id": 9127,
+      "before": "\\item[\\textbf{15.}] $ABCD$ es un trapecio isósceles ($AB=CD$, $BC<AD$). Si $M$ y $N$ son puntos en $\\overline{AB}$ y $\\overline{CD}$ tales que $MBCN$ y $AMND$ son circunscriptibles, la mediana del trapecio mide $m,u$ y $AB=\\ell,u$, calcule la longitud de $\\overline{MN}$. £A)$\\ell-m$æB)$\\ell+m$æC)$\\dfrac{\\ell+m}{2}$£D)$\\dfrac{\\ell-m}{2}$ææE)$2(\\ell-m)$£",
+      "after": "\\item[\\textbf{15.}] $ABCD$ es un trapecio isósceles ($AB=CD$, $BC<AD$). Si $M$ y $N$ son puntos en $\\overline{AB}$ y $\\overline{CD}$ tales que $MBCN$ y $AMND$ son circunscriptibles, la mediana del trapecio mide $m\\,u$ y $AB=\\ell\\,u$, calcule la longitud de $\\overline{MN}$. £A)$\\ell-m$æB)$\\ell+m$æC)$\\dfrac{\\ell+m}{2}$£D)$\\dfrac{\\ell-m}{2}$ææE)$2(\\ell-m)$£"
+    },
+    {
+      "id": 9167,
+      "before": "\\item[\\textbf{25.}] En la figura, calcule $AB$, si $r=3,u$. £A)$2\\sqrt{3}$æB)$3\\sqrt{2}$æC)$\\sqrt{2}+1$£D)$\\sqrt{3}+1$ææE)$3\\sqrt{3}$£",
+      "after": "\\item[\\textbf{25.}] En la figura, calcule $AB$, si $r=3\\,u$. £A)$2\\sqrt{3}$æB)$3\\sqrt{2}$æC)$\\sqrt{2}+1$£D)$\\sqrt{3}+1$ææE)$3\\sqrt{3}$£"
+    },
+    {
+      "id": 9189,
+      "before": "\\item[\\textbf{17.}] En un triángulo $ABC$ se trazan las medianas $\\overline{BE}$, $\\overline{AF}$ y $\\overline{CG}$ de longitudes $3,m$, $3\\sqrt{3},m$ y $6,m$, respectivamente. Halle $m\\sphericalangle GMB$ si $M$ es el baricentro de la región triangular. £A)$60^\\circ$æB)$40^\\circ$æC)$30^\\circ$£D)$90^\\circ$ææE)$45^\\circ$£",
+      "after": "\\item[\\textbf{17.}] En un triángulo $ABC$ se trazan las medianas $\\overline{BE}$, $\\overline{AF}$ y $\\overline{CG}$ de longitudes $3\\,m$, $3\\sqrt{3}\\,m$ y $6\\,m$, respectivamente. Halle $m\\sphericalangle GMB$ si $M$ es el baricentro de la región triangular. £A)$60^\\circ$æB)$40^\\circ$æC)$30^\\circ$£D)$90^\\circ$ææE)$45^\\circ$£"
+    },
+    {
+      "id": 9207,
+      "before": "\\item[\\textbf{5.}] En un triángulo $ABC$, en $\\overline{BC}$ se ubican los puntos $M$ y $R$, $M$ próximo a $B$, y en $\\overline{AC}$ se ubica el punto $N$, tal que $\\overline{MN}\\parallel\\overline{AB}$, $\\overline{AM}\\parallel\\overline{NR}$. Calcule $RC$, si $BM=2,cm$ y $RM=1,cm$. £A)$0,5,cm$æB)$0,8,cm$æC)$1,cm$£D)$1,5,cm$ææE)$2,cm$£",
+      "after": "\\item[\\textbf{5.}] En un triángulo $ABC$, en $\\overline{BC}$ se ubican los puntos $M$ y $R$, $M$ próximo a $B$, y en $\\overline{AC}$ se ubica el punto $N$, tal que $\\overline{MN}\\parallel\\overline{AB}$, $\\overline{AM}\\parallel\\overline{NR}$. Calcule $RC$, si $BM=2\\,cm$ y $RM=1\\,cm$. £A)$0,5\\,cm$æB)$0,8\\,cm$æC)$1\\,cm$£D)$1,5\\,cm$ææE)$2\\,cm$£"
+    },
+    {
+      "id": 9217,
+      "before": "\\item[\\textbf{15.}] En un triángulo acutángulo $ABC$ de ortocentro $O$, la prolongación de $\\overline{BO}$ interseca a la circunferencia circunscrita en el punto $F$; luego, al prolongar $\\overline{FA}$ interseca a $\\overline{CO}$ en el punto $D$. Si $AF=2,cm$, $AD=5,cm$ y $DO=6,cm$. Calcule $OC$. £A)$4,cm$æB)$3,cm$æC)$5,cm$£D)$2,cm$ææE)$8,cm$£",
+      "after": "\\item[\\textbf{15.}] En un triángulo acutángulo $ABC$ de ortocentro $O$, la prolongación de $\\overline{BO}$ interseca a la circunferencia circunscrita en el punto $F$; luego, al prolongar $\\overline{FA}$ interseca a $\\overline{CO}$ en el punto $D$. Si $AF=2\\,cm$, $AD=5\\,cm$ y $DO=6\\,cm$. Calcule $OC$. £A)$4\\,cm$æB)$3\\,cm$æC)$5\\,cm$£D)$2\\,cm$ææE)$8\\,cm$£"
+    },
+    {
+      "id": 9243,
+      "before": "\\item[\\textbf{11.}] En una circunferencia de centro $O$ y radio igual a $2,m$, se ubican los puntos consecutivos $A$, $C$, $B$ y $D$, tal que $\\overline{AD}$ es diámetro. Desde $B$ se traza $\\overline{BH}$ perpendicular a la prolongación de $\\overline{AC}$, $H$ en dicha prolongación. Si $(BH)(AC)=3$, calcule la distancia de $C$ a $\\overline{AB}$, $B$ pertenece a la mediatriz de $\\overline{OD}$. £A)$\\sqrt{3}$æB)$\\dfrac{\\sqrt{3}}{2}$æC)$\\dfrac{\\sqrt{3}}{3}$£D)$\\dfrac{2\\sqrt{3}}{3}$ææE)$2\\sqrt{3}$£",
+      "after": "\\item[\\textbf{11.}] En una circunferencia de centro $O$ y radio igual a $2\\,m$, se ubican los puntos consecutivos $A$, $C$, $B$ y $D$, tal que $\\overline{AD}$ es diámetro. Desde $B$ se traza $\\overline{BH}$ perpendicular a la prolongación de $\\overline{AC}$, $H$ en dicha prolongación. Si $(BH)(AC)=3$, calcule la distancia de $C$ a $\\overline{AB}$, $B$ pertenece a la mediatriz de $\\overline{OD}$. £A)$\\sqrt{3}$æB)$\\dfrac{\\sqrt{3}}{2}$æC)$\\dfrac{\\sqrt{3}}{3}$£D)$\\dfrac{2\\sqrt{3}}{3}$ææE)$2\\sqrt{3}$£"
+    },
+    {
+      "id": 9254,
+      "before": "\\item[\\textbf{22.}] $ABCD$ es un cuadrilátero inscrito en una circunferencia de radio $r$ y circunscrito a una circunferencia de radio $R$. Si $\\overline{BD}$ interseca $\\overline{AC}$ en $I$, $3(BI)=AI$ y $AB+CD=a,cm$, $a>0$. Calcule la longitud, en $cm$, de $\\overline{BC}$. £A)$\\dfrac{a}{2}$æB)$\\dfrac{a}{3}$æC)$\\dfrac{a}{4}$£D)$\\dfrac{a}{5}$ææE)$\\dfrac{a}{6}$£",
+      "after": "\\item[\\textbf{22.}] $ABCD$ es un cuadrilátero inscrito en una circunferencia de radio $r$ y circunscrito a una circunferencia de radio $R$. Si $\\overline{BD}$ interseca $\\overline{AC}$ en $I$, $3(BI)=AI$ y $AB+CD=a\\,cm$, $a>0$. Calcule la longitud, en $cm$, de $\\overline{BC}$. £A)$\\dfrac{a}{2}$æB)$\\dfrac{a}{3}$æC)$\\dfrac{a}{4}$£D)$\\dfrac{a}{5}$ææE)$\\dfrac{a}{6}$£"
+    },
+    {
+      "id": 9268,
+      "before": "\\item[\\textbf{6.}] En un triángulo $ABC$ recto en $B$, sus lados miden $AB=5,u$, $BC=12,u$ y $AC=13,u$. Entonces, la distancia del incentro del triángulo al baricentro de la región triangular $ABC$ es: £A)$2,u$æB)$3,u$æC)$\\dfrac{\\sqrt{37}}{3},u$£D)$\\dfrac{\\sqrt{37}}{4},u$ææE)$\\dfrac{\\sqrt{37}}{5},u$£",
+      "after": "\\item[\\textbf{6.}] En un triángulo $ABC$ recto en $B$, sus lados miden $AB=5\\,u$, $BC=12\\,u$ y $AC=13\\,u$. Entonces, la distancia del incentro del triángulo al baricentro de la región triangular $ABC$ es: £A)$2\\,u$æB)$3\\,u$æC)$\\dfrac{\\sqrt{37}}{3}\\,u$£D)$\\dfrac{\\sqrt{37}}{4}\\,u$ææE)$\\dfrac{\\sqrt{37}}{5}\\,u$£"
+    },
+    {
+      "id": 9274,
+      "before": "\\item[\\textbf{12.}] En el interior de una semicircunferencia $\\zeta$ se inscriben $2$ semicircunferencias tangentes exteriormente y tangentes interiores a $\\zeta$. Si los diámetros de las semicircunferencias están en la relación de $2$ es a $1$, contenidas en el diámetro de $\\zeta$ que mide $14,u$, halle el radio de una circunferencia tangente a las tres semicircunferencias. £A)$2$æB)$3$æC)$4$£D)$3,5$ææE)$5$£",
+      "after": "\\item[\\textbf{12.}] En el interior de una semicircunferencia $\\zeta$ se inscriben $2$ semicircunferencias tangentes exteriormente y tangentes interiores a $\\zeta$. Si los diámetros de las semicircunferencias están en la relación de $2$ es a $1$, contenidas en el diámetro de $\\zeta$ que mide $14\\,u$, halle el radio de una circunferencia tangente a las tres semicircunferencias. £A)$2$æB)$3$æC)$4$£D)$3,5$ææE)$5$£"
+    },
+    {
+      "id": 9276,
+      "before": "\\item[\\textbf{14.}] En una semicircunferencia $\\mathcal{C}$ de diámetro $\\overline{AB}$ está inscrito un rectángulo $GFEH$, $\\overline{GH}$ está en el diámetro $\\overline{AB}$, por $E$ se traza una tangente a $\\mathcal{C}$ que intercepta a la prolongación de $\\overline{AB}$ en $C$. Si $AG=2,u$ y $BC=3,u$, halle la longitud de $\\overline{FG}$. £A)$\\sqrt{5},u$æB)$2\\sqrt{5},u$æC)$3\\sqrt{5},u$£D)$3,u$ææE)$3,5,u$£",
+      "after": "\\item[\\textbf{14.}] En una semicircunferencia $\\mathcal{C}$ de diámetro $\\overline{AB}$ está inscrito un rectángulo $GFEH$, $\\overline{GH}$ está en el diámetro $\\overline{AB}$, por $E$ se traza una tangente a $\\mathcal{C}$ que intercepta a la prolongación de $\\overline{AB}$ en $C$. Si $AG=2\\,u$ y $BC=3\\,u$, halle la longitud de $\\overline{FG}$. £A)$\\sqrt{5}\\,u$æB)$2\\sqrt{5}\\,u$æC)$3\\sqrt{5}\\,u$£D)$3\\,u$ææE)$3,5\\,u$£"
+    },
+    {
+      "id": 9280,
+      "before": "\\item[\\textbf{18.}] En una circunferencia de $16,cm$ de diámetro se traza una cuerda $\\overline{TD}$ de $12,cm$ y por $T$ una tangente $\\overline{TP}$ a la circunferencia, siendo $\\overline{PD}$ una secante que pasa por el centro de la circunferencia. Si $PT=24\\sqrt{3},cm$, la distancia de $P$ a la circunferencia es, en $cm$: £A)$40$æB)$42$æC)$50$£D)$54$ææE)$56$£",
+      "after": "\\item[\\textbf{18.}] En una circunferencia de $16\\,cm$ de diámetro se traza una cuerda $\\overline{TD}$ de $12\\,cm$ y por $T$ una tangente $\\overline{TP}$ a la circunferencia, siendo $\\overline{PD}$ una secante que pasa por el centro de la circunferencia. Si $PT=24\\sqrt{3}\\,cm$, la distancia de $P$ a la circunferencia es, en $cm$: £A)$40$æB)$42$æC)$50$£D)$54$ææE)$56$£"
+    },
+    {
+      "id": 9281,
+      "before": "\\item[\\textbf{19.}] Calcule la longitud del radio, en $cm$, de la circunferencia inscrita a un trapecio isósceles de bases cuyas longitudes son de $8,cm$ y $18,cm$. £A)$3$æB)$6$æC)$9$£D)$12$ææE)$15$£",
+      "after": "\\item[\\textbf{19.}] Calcule la longitud del radio, en $cm$, de la circunferencia inscrita a un trapecio isósceles de bases cuyas longitudes son de $8\\,cm$ y $18\\,cm$. £A)$3$æB)$6$æC)$9$£D)$12$ææE)$15$£"
+    },
+    {
+      "id": 9282,
+      "before": "\\item[\\textbf{20.}] En un rectángulo $ABCD$, con diámetro $\\overline{CD}$ y $\\overline{AD}$ se trazan semicircunferencias interiores que se interceptan en $Q$. Si $AQ=9,cm$ y $QC=4,cm$, halle $BQ$ en $cm$. £A)$\\sqrt{7}$æB)$\\sqrt{11}$æC)$\\sqrt{21}$£D)$\\sqrt{41}$ææE)$\\sqrt{61}$£",
+      "after": "\\item[\\textbf{20.}] En un rectángulo $ABCD$, con diámetro $\\overline{CD}$ y $\\overline{AD}$ se trazan semicircunferencias interiores que se interceptan en $Q$. Si $AQ=9\\,cm$ y $QC=4\\,cm$, halle $BQ$ en $cm$. £A)$\\sqrt{7}$æB)$\\sqrt{11}$æC)$\\sqrt{21}$£D)$\\sqrt{41}$ææE)$\\sqrt{61}$£"
+    },
+    {
+      "id": 9283,
+      "before": "\\item[\\textbf{21.}] Sea el triángulo rectángulo $ABC$, $D\\in\\overline{AB}$ y $E\\in\\overline{BC}$, $M$ y $N$ son puntos medios de los segmentos $\\overline{DE}$ y $\\overline{AC}$. Si $AD=2,cm$ y $CE=4,cm$, halle $MN$ en $cm$. £A)$\\sqrt{2}$æB)$\\sqrt{3}$æC)$\\sqrt{5}$£D)$\\sqrt{6}$ææE)$\\sqrt{7}$£",
+      "after": "\\item[\\textbf{21.}] Sea el triángulo rectángulo $ABC$, $D\\in\\overline{AB}$ y $E\\in\\overline{BC}$, $M$ y $N$ son puntos medios de los segmentos $\\overline{DE}$ y $\\overline{AC}$. Si $AD=2\\,cm$ y $CE=4\\,cm$, halle $MN$ en $cm$. £A)$\\sqrt{2}$æB)$\\sqrt{3}$æC)$\\sqrt{5}$£D)$\\sqrt{6}$ææE)$\\sqrt{7}$£"
+    },
+    {
+      "id": 9287,
+      "before": "\\item[\\textbf{25.}] $\\mathcal{C}$ es una circunferencia inscrita en un triángulo equilátero de longitud de lado $L$, la suma de los cuadrados de las longitudes de sus distancias de un punto de $\\mathcal{C}$ a los vértices del triángulo es $7,u$. Halle $L$ en $u$. £A)$\\sqrt{10}$æB)$\\sqrt{11}$æC)$\\sqrt{12}$£D)$\\sqrt{13}$ææE)$\\sqrt{14}$£",
+      "after": "\\item[\\textbf{25.}] $\\mathcal{C}$ es una circunferencia inscrita en un triángulo equilátero de longitud de lado $L$, la suma de los cuadrados de las longitudes de sus distancias de un punto de $\\mathcal{C}$ a los vértices del triángulo es $7\\,u$. Halle $L$ en $u$. £A)$\\sqrt{10}$æB)$\\sqrt{11}$æC)$\\sqrt{12}$£D)$\\sqrt{13}$ææE)$\\sqrt{14}$£"
+    },
+    {
+      "id": 9309,
+      "before": "\\item[\\textbf{11.}] Un hexágono regular $ABCDEF$ se encuentra inscrito en una circunferencia de longitud $24,cm$. Haciendo centro en los vértices $A$, $C$ y $E$, se trazan los arcos $\\overparen{BD}$, $\\overparen{BF}$ y $\\overparen{DF}$. Halle la suma de las longitudes de estos arcos en $cm$. £A)$18$æB)$20$æC)$24$£D)$36$ææE)$48$£",
+      "after": "\\item[\\textbf{11.}] Un hexágono regular $ABCDEF$ se encuentra inscrito en una circunferencia de longitud $24\\,cm$. Haciendo centro en los vértices $A$, $C$ y $E$, se trazan los arcos $\\overparen{BD}$, $\\overparen{BF}$ y $\\overparen{DF}$. Halle la suma de las longitudes de estos arcos en $cm$. £A)$18$æB)$20$æC)$24$£D)$36$ææE)$48$£"
+    },
+    {
+      "id": 9319,
+      "before": "\\item[\\textbf{21.}] En un pentágono regular $ABCDE$ las diagonales $\\overline{AC}$ y $\\overline{BE}$ se interceptan en $P$. Halle $PD$ en $m$, si $ED=4,m$. £A)$\\sqrt{10+2\\sqrt{5}}$æB)$\\sqrt{10+\\sqrt{5}}$æC)$\\sqrt{10-2\\sqrt{5}}$£D)$2\\sqrt{10-2\\sqrt{5}}$£",
+      "after": "\\item[\\textbf{21.}] En un pentágono regular $ABCDE$ las diagonales $\\overline{AC}$ y $\\overline{BE}$ se interceptan en $P$. Halle $PD$ en $m$, si $ED=4\\,m$. £A)$\\sqrt{10+2\\sqrt{5}}$æB)$\\sqrt{10+\\sqrt{5}}$æC)$\\sqrt{10-2\\sqrt{5}}$£D)$2\\sqrt{10-2\\sqrt{5}}$£"
+    },
+    {
+      "id": 9325,
+      "before": "\\item[\\textbf{27.}] Los ángulos $A$ y $C$ de un triángulo $ABC$ miden $117^\\circ$ y $18^\\circ$, respectivamente. Si el radio de la circunferencia circunscrita es de $4,m$, halle la longitud de la altura $\\overline{AH}$ en $m$. £A)$\\sqrt{10}-\\sqrt{2}$æB)$\\sqrt{10}-2$æC)$10-\\sqrt{2}$£D)$\\sqrt{10-\\sqrt{2}}$ææE)$\\dfrac{10-\\sqrt{2}}{\\sqrt{10}-2}$£",
+      "after": "\\item[\\textbf{27.}] Los ángulos $A$ y $C$ de un triángulo $ABC$ miden $117^\\circ$ y $18^\\circ$, respectivamente. Si el radio de la circunferencia circunscrita es de $4\\,m$, halle la longitud de la altura $\\overline{AH}$ en $m$. £A)$\\sqrt{10}-\\sqrt{2}$æB)$\\sqrt{10}-2$æC)$10-\\sqrt{2}$£D)$\\sqrt{10-\\sqrt{2}}$ææE)$\\dfrac{10-\\sqrt{2}}{\\sqrt{10}-2}$£"
+    },
+    {
+      "id": 9327,
+      "before": "\\item[\\textbf{29.}] En una circunferencia de radio $R=4,m$ se traza una cuerda que subtiende $108^\\circ$. Calcule la longitud de dicha cuerda. £A)$\\sqrt{5}-1$æB)$\\sqrt{5}+1$æC)$2(\\sqrt{5}-1)$£D)$2(\\sqrt{5}+1)$ææE)$\\sqrt{5}+2$£",
+      "after": "\\item[\\textbf{29.}] En una circunferencia de radio $R=4\\,m$ se traza una cuerda que subtiende $108^\\circ$. Calcule la longitud de dicha cuerda. £A)$\\sqrt{5}-1$æB)$\\sqrt{5}+1$æC)$2(\\sqrt{5}-1)$£D)$2(\\sqrt{5}+1)$ææE)$\\sqrt{5}+2$£"
+    },
+    {
+      "id": 9361,
+      "before": "\\item[\\textbf{3.}] Desde el vértice de uno de los ángulos agudos de un rombo se trazan perpendiculares de longitudes $2,cm$ a las prolongaciones de sus lados opuestos. Si la distancia entre los pies de dichas perpendiculares es $3,cm$, hallar el área del rombo. £A)$\\dfrac{30}{\\sqrt{7}},cm^2$æB)$\\dfrac{35}{2\\sqrt{7}},cm^2$æC)$\\dfrac{36}{5\\sqrt{6}},cm^2$£D)$\\dfrac{32}{3\\sqrt{7}},cm^2$ææE)$\\dfrac{39}{2\\sqrt{6}},cm^2$£",
+      "after": "\\item[\\textbf{3.}] Desde el vértice de uno de los ángulos agudos de un rombo se trazan perpendiculares de longitudes $2\\,cm$ a las prolongaciones de sus lados opuestos. Si la distancia entre los pies de dichas perpendiculares es $3\\,cm$, hallar el área del rombo. £A)$\\dfrac{30}{\\sqrt{7}}\\,cm^2$æB)$\\dfrac{35}{2\\sqrt{7}}\\,cm^2$æC)$\\dfrac{36}{5\\sqrt{6}}\\,cm^2$£D)$\\dfrac{32}{3\\sqrt{7}}\\,cm^2$ææE)$\\dfrac{39}{2\\sqrt{6}}\\,cm^2$£"
+    }
+  ]
+}

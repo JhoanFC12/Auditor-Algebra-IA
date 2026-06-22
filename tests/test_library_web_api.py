@@ -1630,6 +1630,23 @@ class LibraryWebApiTests(unittest.TestCase):
             finally:
                 runtime.stop()
 
+    def test_library_runtime_opens_word_file_via_windows_shell(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            word_path = root / "sesion.docx"
+            word_path.write_bytes(b"docx")
+            runtime = LibraryWebRuntime(controller=_FakeController())
+            try:
+                base = runtime.start()
+                with patch("modulos.instance_factory.library_web_server.os.startfile", create=True) as startfile:
+                    payload = _post_json(base, "api/word/open", {"word_path": str(word_path)})
+
+                self.assertEqual(payload["schema_version"], "latex_word_open_v1")
+                self.assertTrue(payload["opened"])
+                startfile.assert_called_once_with(str(word_path.resolve()))
+            finally:
+                runtime.stop()
+
     def test_library_runtime_converts_latex_word_session_via_api(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
