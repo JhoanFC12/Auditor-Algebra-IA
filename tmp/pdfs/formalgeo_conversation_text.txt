@@ -1,0 +1,607 @@
+
+
+===== PAGE 1 =====
+En este proyecto estabamos analizando un PDF de un 
+artículo como resolver problemas de geometría 
+Pensado durante 3m 2s
+Sí. Estábamos trabajando sobre el PDF “FormalGeo: An Extensible Formalized
+Framework For Olympiad Geometric Problem Solving”. La idea central del artículo es
+que los problemas de geometría olímpica pueden resolverse de forma mecanizable si
+primero se convierten a un lenguaje formal geométrico, y luego se resuelven como un
+problema de búsqueda sobre teoremas y condiciones.  
+El mapa del artículo era este:
+1. Problema que intenta resolver
+El artículo dice que la geometría formal tiene tres dificultades principales:
+1. Forma de conocimiento inconsistente: un problema geométrico mezcla texto,
+diagrama, relaciones geométricas, cálculos algebraicos y razonamiento lógico.
+2. Proceso de solución poco legible: los métodos algebraicos pueden resolver
+problemas, pero producen pruebas difíciles de leer.
+3. Método de solución no mecanizado: muchas soluciones geométricas dependen de
+intuición humana y no de un procedimiento computacional claro.
+2. Propuesta principal: GFT
+Los autores proponen una teoría llamada Geometry Formalization Theory, o GFT. Esta
+teoría tiene tres partes:
+Geometry ontology: organiza los objetos geométricos, relaciones, atributos y
+teoremas.
+Geometry representation theory: explica cómo representar diagramas y
+razonamientos geométricos de forma formal.
+Geometry formal language: introduce lenguajes formales para describir problemas y
+teoremas.
+3. FormalGeo
+Sobre esa teoría construyen FormalGeo, un sistema formal de geometría plana. Según el
+artículo, FormalGeo contiene 88 predicados geométricos y 196 teoremas, y puede
+representar, validar y resolver problemas desde nivel escolar hasta nivel IMO.
+2310.18021v6 2310.18021v6
+2310.18021v6
+FormalGeo Compartir
+
+===== PAGE 2 =====
+Ejemplos de predicados serían:
+La idea es que una frase como:
+se convierta en algo como:
+Y una propiedad como:
+se convierte en una regla formal que el sistema puede aplicar.
+4. Lenguajes GDL y CDL
+El artículo distingue dos lenguajes importantes:
+GDL — Geometry Definition Language
+Sirve para definir predicados, atributos y teoremas del sistema. Es decir, configura el
+“universo geométrico” que el solver conoce.
+CDL — Condition Declaration Language
+Sirve para escribir un problema concreto: construcción, condiciones dadas y objetivo. El
+artículo explica que CDL se divide en construction statements, condition statements y
+goal statements. 
+Por ejemplo, un objetivo podría escribirse así:
+que significa: probar que el cuadrilátero CEGD es un paralelogramo.
+5. Cómo “resuelve” un problema
+FormalGeo no resuelve como un humano que “tiene una idea brillante” de golpe. Lo hace
+más como un motor de inferencia:
+1. Lee las condiciones conocidas.
+Collinear(ABC)
+ParallelBetweenLine(AB,CD)
+IsMidpointOfLine(M,AB)
+IsoscelesTriangle(ABC)
+Equal(LengthOfLine(AB),LengthOfLine(AC))
+“M es el punto medio de AB”
+IsMidpointOfLine(M,AB)
+“Si M es punto medio de AB, entonces AM = MB”
+2310.18021v6
+Relation(Parallelogram(CEGD))
+
+===== PAGE 3 =====
+2. Las transforma a predicados formales.
+3. Aplica teoremas permitidos.
+4. Genera nuevas condiciones.
+5. Repite hasta llegar al objetivo.
+El artículo representa el proceso como un hiperárbol: los nodos son condiciones y las
+aristas son teoremas. Resolver el problema equivale a encontrar un camino desde las
+condiciones iniciales hasta el objetivo. 
+6. FGPS: el solver
+El artículo también presenta FGPS, un solver escrito en Python. Su arquitectura tiene
+módulos como:
+control principal,
+parser de lenguaje formal,
+motor de ejecución GPL,
+solucionador de ecuaciones,
+almacenamiento de condiciones,
+interfaz para IA.
+FGPS puede trabajar en modo interactivo o automático, y usa búsqueda hacia adelante,
+búsqueda hacia atrás y búsqueda asistida por IA. 
+7. Forward search y backward search
+El paper compara dos formas de búsqueda:
+Forward search
+Parte de las condiciones conocidas y aplica teoremas hasta llegar al objetivo.
+Ejemplo conceptual:
+Backward search
+Parte del objetivo y pregunta: “¿Qué condiciones bastarían para probar esto?”. Luego
+intenta probar esas subcondiciones.
+Ejemplo conceptual:
+2310.18021v6
+2310.18021v6
+Dado:
+IsMidpointOfLine(M,AB)
+Aplicar teorema:
+midpoint_of_line_property
+Obtener:
+Equal(LengthOfLine(AM),LengthOfLine(MB))
+
+===== PAGE 4 =====
+Entonces el solver reduce el problema a probar esas dos condiciones.
+8. Resultados experimentales
+Los autores evaluaron el sistema sobre formalgeo7k, un conjunto de 6,981 problemas,
+expandido por aumento de datos a 133,818 problemas. También mencionan formalgeo-
+imo, con problemas más difíciles de nivel IMO. 
+En los experimentos, el mejor resultado automático reportado en formalgeo7k fue con
+forward random search, alcanzando aproximadamente 39.7% de éxito. El artículo aclara
+que muchos fallos se debieron a timeouts, no necesariamente a imposibilidad lógica del
+sistema. 
+Resumen en una frase
+El artículo propone convertir la geometría olímpica en un sistema formal de predicados,
+teoremas y búsqueda, de modo que una computadora pueda leer, verificar y producir
+soluciones geométricas trazables.
+Podemos continuar desde la parte más útil: traducir un problema geométrico real a CDL,
+explicar el solver FGPS, o reconstruir paso a paso el ejemplo del paralelogramo CEGD.
+Objetivo:
+Parallelogram(ABCD)
+Una forma de probarlo:
+ParallelBetweenLine(AB,CD)
+ParallelBetweenLine(BC,AD)
+2310.18021v6
+2310.18021v6
+Teniendo en cuenta este trabajo, lo que quiero hacer es 
+crear un modelo de IA que pueda visualizar una imagen 
+geométrica y describa en los predicados que ellos 
+proponen para ello necesitamos que tengamos claro, 
+como se trabaja en el artículo 
+Pensado durante 4m 53s
+Exacto. Para tu proyecto, el artículo debe entenderse como una arquitectura imagen/texto
+→ lenguaje formal geométrico → verificación/razonamiento. Tu modelo de IA no
+debería intentar “resolver” desde la imagen en la primera etapa, sino traducir el diagrama
+a predicados FormalGeo, principalmente en formato CDL.
+
+===== PAGE 5 =====
+La idea central es esta:
+El propio artículo dice que la IA puede actuar como parser, permitiendo la
+autoformalización de lenguaje natural y diagramas geométricos; también puede actuar
+como solver o podador de búsqueda. FormalGeo, según el paper, contiene 88
+predicados geométricos y 196 teoremas, y FGPS es el solver que interpreta estas
+representaciones. 
+1. Qué parte del artículo nos interesa para tu modelo
+Para tu objetivo, la parte más importante no es todavía el motor de búsqueda ni la
+demostración final. Lo más importante es entender cómo FormalGeo representa un
+problema.
+FormalGeo separa el sistema en:
+GDL define el vocabulario del sistema: qué predicados existen, qué argumentos aceptan,
+qué condiciones de validez tienen y qué expansiones automáticas producen.
+CDL describe un problema concreto. Es decir, ahí va lo que queremos que produzca tu
+modelo a partir de la imagen. El artículo divide CDL en tres partes: construction
+statements, condition statements y goal statements. Las construction statements
+describen la estructura topológica del diagrama, por ejemplo Shape, Collinear y
+Cocircular; las condition statements describen condiciones dadas, incluyendo
+relaciones geométricas y algebraicas; y las goal statements declaran el objetivo del
+problema. 
+Por tanto, tu modelo debería producir algo como:
+Imagen geométrica
+      ↓
+Detección visual de puntos, líneas, círculos, marcas y relaciones
+      ↓
+Predicados FormalGeo
+      ↓
+construction_cdl + condition_cdl
+      ↓
+FGPS valida, expande condiciones y eventualmente resuelve
+2310.18021v6
+GDL = Geometry Definition Language
+CDL = Condition Declaration Language
+2310.18021v6
+construction_cdl:
+Shape(ABC)
+Collinear(AMB)
+
+===== PAGE 6 =====
+Pero hay un matiz importante: desde una imagen sola normalmente no se debe inferir
+el objetivo. El objetivo suele venir del enunciado textual, no del dibujo.
+2. La distinción clave: TSI y MI
+El paper distingue dos tipos de información en un diagrama geométrico:
+La TSI es la estructura básica del dibujo: qué puntos existen, qué puntos están
+conectados, qué puntos son colineales, qué figuras cerradas hay, qué puntos están sobre
+un círculo, qué líneas se intersectan, etc.
+La MI es la información métrica: igualdad de longitudes, medidas de ángulos,
+perpendicularidad, paralelismo, radios, diámetros, tangencias, bisectrices, marcas de
+igualdad, marcas de ángulo recto, etc. El artículo afirma que el reto principal es formalizar
+la información topológica implícita en los diagramas, y clasifica la información del
+diagrama en TSI y MI. 
+Para tu modelo, esto implica dos tareas distintas:
+La primera es más estructural. La segunda depende mucho de marcas visuales explícitas.
+3. Qué debe producir el modelo primero: construction_cdl
+En FormalGeo, los predicados estructurales fundamentales son:
+Cocircular(O,ABC)
+condition_cdl:
+Equal(LengthOfLine(AM),LengthOfLine(MB))
+PerpendicularBetweenLine(AC,BC)
+ParallelBetweenLine(AB,DE)
+goal_cdl:
+Relation(Parallelogram(ABCD))
+TSI = Topological Structure Information
+MI  = Metric Information
+2310.18021v6
+Tarea visual 1: extraer TSI
+Imagen → Shape / Collinear / Cocircular
+Tarea visual 2: extraer MI
+Imagen → ParallelBetweenLine / PerpendicularBetweenLine / Equal(...) / IsMidpoint..
+Shape(...)
+Collinear(...)
+Cocircular(...)
+
+===== PAGE 7 =====
+El artículo dice que FormalGeo usa estos tres predicados estructurales fundamentales y
+que, durante la inicialización, el solver aplica el método de construcción topológica para
+expandir automáticamente a entidades básicas como:
+Es decir, tu modelo no necesita emitir explícitamente todos los Point(A), Line(AB) o
+Angle(ABC) si ya produce bien Shape, Collinear y Cocircular; FGPS puede expandir
+esas entidades. 
+Ejemplo simple:
+Imagen:
+Salida esperada:
+A partir de eso, FGPS puede reconocer entidades como:
+La idea es que construction_cdl no describe “teoremas” ni “hechos deducidos”,
+sino la estructura básica del dibujo.
+4. Cómo FormalGeo entiende una figura cerrada
+El artículo propone el topological mapping method. La intuición es que una figura
+cerrada puede representarse por una lista ordenada de puntos. Por ejemplo, un triángulo
+Point
+Line
+Angle
+Polygon
+Arc
+Circle
+2310.18021v6
+Triángulo ABC con M sobre AB
+construction_cdl:
+Shape(ABC)
+Collinear(AMB)
+Point(A)
+Point(B)
+Point(C)
+Point(M)
+Line(AB)
+Line(AC)
+Line(BC)
+Angle(ABC)
+Polygon(ABC)
+
+===== PAGE 8 =====
+puede verse como:
+Formalmente se puede representar como:
+o, en algunas notaciones de ejemplo del artículo:
+Para figuras compuestas, el artículo propone el topological construction method, que
+descompone el diagrama en figuras simples y luego reconstruye el diagrama compuesto
+preservando la TSI y la MI. 
+Esto es muy importante para tu modelo: no tiene que reconocer “toda la figura” de golpe.
+Puede reconocer componentes simples.
+Por ejemplo, una figura compleja puede descomponerse en:
+Y luego agregar condiciones métricas:
+Ese enfoque coincide con el ejemplo del artículo sobre construcción topológica, donde se
+separa la información estructural de la información métrica. 
+5. Qué debe producir después: condition_cdl
+condition_cdl contiene hechos geométricos dados. En tu proyecto, estos hechos
+pueden venir de dos fuentes:
+Desde la imagen se pueden extraer, por ejemplo:
+A → B → C → A
+Shape(ABC)
+Shape(AB,BC,CA)
+2310.18021v6
+Shape(ABC)
+Shape(ACD)
+Shape(ADE)
+Collinear(BCD)
+PerpendicularBetweenLine(AC,DC)
+ParallelBetweenLine(AE,BD)
+ParallelBetweenLine(BA,DE)
+2310.18021v6
+1. Del diagrama visual
+2. Del enunciado textual
+
+===== PAGE 9 =====
+Marcas de igualdad de segmentos
+Si el diagrama muestra marcas iguales sobre AM y MB:
+Si además A, M, B son colineales:
+Entonces FGPS puede llegar a:
+Pero conviene distinguir entre observado y deducido. Si la imagen solo muestra dos
+segmentos con marcas iguales, la salida visual más prudente es:
+Si el texto dice “M es punto medio de AB”, entonces sí se puede emitir directamente:
+FormalGeo define ese predicado con chequeos de existencia como Point(M), Line(AB)
+y Collinear(AMB), y además puede extenderlo a una igualdad de longitudes.
+Ángulo recto
+Si aparece el cuadradito de ángulo recto en ABC:
+o equivalentemente:
+Pero para FormalGeo normalmente es más natural emitir:
+Paralelismo
+Equal(LengthOfLine(AM),LengthOfLine(MB))
+Collinear(AMB)
+IsMidpointOfLine(M,AB)
+Collinear(AMB)
+Equal(LengthOfLine(AM),LengthOfLine(MB))
+IsMidpointOfLine(M,AB)
+2310.18021v6
+PerpendicularBetweenLine(BA,BC)
+Equal(MeasureOfAngle(ABC),90)
+PerpendicularBetweenLine(BA,BC)
+
+===== PAGE 10 =====
+Si hay flechas de paralelismo en dos segmentos:
+Igualdad de ángulos
+Si hay arcos iguales en dos ángulos:
+Círculo
+Si hay un círculo con centro O que pasa por A, B, C:
+La notación IsCentreOfCircle(O,O) parece extraña al principio, pero aparece así en el
+ejemplo del paper: el primer O es el punto centro y el segundo O representa el círculo
+nombrado por su centro. 
+6. No todo lo que “parece” cierto en el dibujo debe convertirse en
+predicado
+Esto es crucial.
+En problemas olímpicos, los diagramas no siempre están a escala. Si dos líneas
+“parecen paralelas”, eso no siempre significa que debas producir:
+Solo deberías emitirlo si:
+Lo mismo para:
+ParallelBetweenLine(AB,CD)
+Equal(MeasureOfAngle(ABC),MeasureOfAngle(DEF))
+construction_cdl:
+Cocircular(O,ABC)
+condition_cdl:
+IsCentreOfCircle(O,O)
+2310.18021v6
+ParallelBetweenLine(AB,CD)
+1. Hay marca visual explícita de paralelismo;
+2. El texto lo dice;
+3. O el dataset asume que ciertas propiedades visuales son intencionales.
+Equal(LengthOfLine(AB),LengthOfLine(CD))
+PerpendicularBetweenLine(AB,CD)
+
+===== PAGE 11 =====
+Un buen parser geométrico debe separar:
+El artículo justamente diseña FGPS para validar condiciones, construir diagramas
+automáticamente, expandir condiciones y ejecutar razonamiento algebraico/relacional.
+7. La arquitectura recomendable para tu modelo
+Yo plantearía tu sistema en cinco módulos.
+Módulo 1: detector visual geométrico
+Entrada:
+Salida intermedia:
+Este módulo detecta puntos, etiquetas, líneas, arcos, círculos y marcas.
+Módulo 2: constructor topológico
+Convierte la salida visual en estructura FormalGeo:
+IsoscelesTriangle(ABC)
+Parallelogram(ABCD)
+Hechos visibles estructurales:
+Shape, Collinear, Cocircular
+Hechos métricos explícitos:
+marcas de igualdad, ángulo recto, paralelismo, tangencia, etc.
+Hechos deducidos:
+lo que debe obtener FGPS mediante teoremas
+2310.18021v6
+Imagen del problema
+{
+  "points": ["A", "B", "C", "M", "O"],
+  "segments": [["A","B"], ["B","C"], ["C","A"]],
+  "circles": [{"center": "O", "points": ["A","B","C"]}],
+  "collinear_groups": [["A","M","B"]],
+  "marks": {
+    "equal_segments": [["A","M"], ["M","B"]],
+    "right_angles": [["A","C","B"]],
+    "parallel_groups": [[["A","B"], ["C","D"]]]
+  }
+}
+JSON
+
+===== PAGE 12 =====
+Este módulo debe implementar reglas de ordenamiento: por ejemplo, si detecta un
+triángulo con vértices A, B, C, debe elegir una representación canónica para no
+producir duplicados como:
+FormalGeo contempla que una misma entidad puede tener múltiples representaciones,
+por ejemplo LengthOfLine(AB) y LengthOfLine(BA), así que conviene tener una capa
+de normalización/canonicalización. 
+Módulo 3: extractor de condiciones métricas
+Convierte marcas visuales en condition_cdl:
+Este módulo no debe deducir teoremas; solo debe traducir lo observado.
+Módulo 4: validador simbólico con FGPS
+La salida del modelo debe pasar por FGPS.
+FGPS tiene módulos para parser GDL/CDL, inverse parser, almacenamiento de
+condiciones, ejecución GPL, solver de ecuaciones e interfaz de IA. El artículo indica que
+el parser convierte lenguaje formal a lenguaje de máquina y que el módulo Problem
+asegura corrección y consistencia de las condiciones de entrada mediante construcción
+automática del diagrama, expansión de condiciones y chequeos de validez.
+Esto permite usar FGPS como corrector:
+Shape(ABC)
+Collinear(AMB)
+Cocircular(O,ABC)
+Shape(ABC)
+Shape(BCA)
+Shape(CAB)
+2310.18021v6
+Equal(LengthOfLine(AM),LengthOfLine(MB))
+PerpendicularBetweenLine(AC,BC)
+ParallelBetweenLine(AB,DE)
+Equal(MeasureOfAngle(ABC),MeasureOfAngle(DEF))
+2310.18021v6
+Modelo visual produce CDL
+        ↓
+FGPS intenta parsear
+        ↓
+Si falla:
+    hay error sintáctico, entidad inexistente o condición inválida
+
+===== PAGE 13 =====
+Módulo 5: fusión imagen + texto
+En problemas reales, la imagen sola no basta. El artículo dice que un problema típico
+contiene condiciones en lenguaje natural, objetivo y diagrama geométrico; la GFT busca
+transformar problemas descritos en lenguaje natural e imágenes en lenguaje formal
+unificado. 
+Entonces, idealmente tu sistema debería tener dos parsers:
+Ejemplo:
+Texto:
+CDL del paper:
+Y el diagrama aporta:
+Si pasa:
+    se guarda como representación formal candidata
+2310.18021v6
+Parser visual:
+imagen → construction_cdl + condiciones visibles
+Parser textual:
+enunciado → condition_cdl + goal_cdl
+Fusión:
+construction_cdl + condition_cdl + goal_cdl
+ABC es isósceles, F es punto medio de OB, O es centro del círculo O, OG = GD.
+Probar que CEGD es un paralelogramo.
+condition_cdl:
+IsMidpointOfLine(F,OB)
+IsCentreOfCircle(O,O)
+IsoscelesTriangle(ABC)
+Equal(LengthOfLine(OG),LengthOfLine(GD))
+goal_cdl:
+Relation(Parallelogram(CEGD))
+construction_cdl:
+Shape(CE,ODE,DC)
+Shape(ODE,EG,GD)
+Shape(EA,AO,OG,GE)
+Shape(GO,OF,FG)
+Shape(DG,GF,FB,BD)
+
+===== PAGE 14 =====
+Ese ejemplo aparece explícitamente en el artículo y es una buena plantilla para tu dataset.
+8. Qué etiquetas debería aprender tu modelo
+Tu modelo no debería aprender los 88 predicados de golpe. Conviene empezar con una
+taxonomía progresiva.
+Fase 1: predicados estructurales
+Estos son los más importantes para imagen:
+Son la base del construction_cdl.
+Fase 2: entidades básicas generadas o verificadas
+FGPS puede expandirlas, pero internamente existen:
+En el paper aparecen como entidades básicas integradas del solver. 
+Fase 3: relaciones geométricas visibles
+Las más útiles para diagramas son:
+Shape(OBD,DB)
+Collinear(CEA)
+Collinear(CDB)
+Collinear(AOFB)
+Collinear(EGF)
+Collinear(OGD)
+Cocircular(O,BDE)
+2310.18021v6
+Shape(...)
+Collinear(...)
+Cocircular(...)
+Point(A)
+Line(AB)
+Angle(ABC)
+Polygon(ABCD)
+Arc(OAB)
+Circle(O)
+2310.18021v6
+IsMidpointOfLine(M,AB)
+ParallelBetweenLine(AB,CD)
+PerpendicularBetweenLine(AB,CD)
+IsPerpendicularBisectorOfLine(AB,CD)
+IsBisectorOfAngle(BD,ABC)
+IsMedianOfTriangle(AD,ABC)
+
+===== PAGE 15 =====
+El artículo lista estas relaciones como parte de los predicados definidos mediante
+predicate definition language. 
+Fase 4: atributos y relaciones algebraicas
+Aquí entran expresiones como:
+Y se combinan con:
+El artículo lista estos atributos entre los predicados de FormalGeo. 
+Ejemplos:
+9. Formato de salida recomendado para entrenamiento
+Para entrenar y depurar, yo no haría que el modelo produzca solo texto plano. Usaría una
+salida estructurada con evidencia.
+Por ejemplo:
+IsAltitudeOfTriangle(AD,ABC)
+IsMidsegmentOfTriangle(DE,ABC)
+IsDiameterOfCircle(AB,O)
+IsTangentOfCircle(PA,O)
+IsCentreOfCircle(P,O)
+2310.18021v6
+LengthOfLine(AB)
+MeasureOfAngle(ABC)
+LengthOfArc(OAB)
+MeasureOfArc(OAB)
+RadiusOfCircle(O)
+DiameterOfCircle(O)
+AreaOfTriangle(ABC)
+AreaOfQuadrilateral(ABCD)
+Equal(...)
+Equation(...)
+Add(...)
+Sub(...)
+Mul(...)
+Div(...)
+Sin(...)
+Cos(...)
+Tan(...)
+2310.18021v6
+Equal(LengthOfLine(AB),LengthOfLine(AC))
+Equal(MeasureOfAngle(ABC),MeasureOfAngle(DEF))
+Equation(Sub(LengthOfLine(AB),LengthOfLine(CD)))
+
+===== PAGE 16 =====
+Luego una capa simbólica lo convierte a CDL definitivo:
+Esto te permite auditar errores: si FGPS falla, puedes saber si falló por OCR, detección de
+línea, orden de puntos, predicado inválido o inferencia indebida.
+10. El principio más importante: el modelo debe ser neuro-
+simbólico
+No conviene hacer:
+{
+  "construction_cdl": [
+    "Shape(ABC)",
+    "Collinear(AMB)"
+  ],
+  "condition_cdl": [
+    "Equal(LengthOfLine(AM),LengthOfLine(MB))",
+    "PerpendicularBetweenLine(AC,BC)"
+  ],
+  "goal_cdl": [],
+  "evidence": [
+    {
+      "predicate": "Collinear(AMB)",
+      "source": "line_detection",
+      "confidence": 0.98
+    },
+    {
+      "predicate": "Equal(LengthOfLine(AM),LengthOfLine(MB))",
+      "source": "same_tick_mark",
+      "confidence": 0.91
+    },
+    {
+      "predicate": "PerpendicularBetweenLine(AC,BC)",
+      "source": "right_angle_marker",
+      "confidence": 0.94
+    }
+  ]
+}
+construction_cdl:
+Shape(ABC)
+Collinear(AMB)
+condition_cdl:
+Equal(LengthOfLine(AM),LengthOfLine(MB))
+PerpendicularBetweenLine(AC,BC)
+JSON
+
+===== PAGE 17 =====
+sin control.
+Es mejor hacer:
+El modelo neuronal debe encargarse de lo difícil visual:
+La parte simbólica debe encargarse de:
+Así respetas el enfoque del artículo: FormalGeo no es solo una red neuronal, sino un
+sistema formal verificable donde la IA se integra como parser o asistente, y el solver valida
+y razona sobre predicados. 
+11. Resumen operativo para nuestro proyecto
+La forma correcta de trabajar, siguiendo el artículo, sería:
+En una frase: tu modelo debe convertir el diagrama en una lista verificable de
+predicados CDL, no en una solución geométrica. La solución debe quedar para FGPS
+imagen → LLM multimodal → CDL final
+imagen → detección visual → grafo geométrico → reglas simbólicas → CDL → FGPS
+detectar etiquetas
+detectar segmentos
+detectar círculos
+detectar intersecciones
+detectar marcas de igualdad
+detectar flechas de paralelismo
+detectar ángulos rectos
+ordenar puntos
+normalizar predicados
+evitar duplicados
+verificar tipos
+separar hechos observados de hechos deducidos
+llamar a FGPS
+2310.18021v6
+1. Definir el vocabulario FormalGeo que vamos a soportar inicialmente.
+2. Empezar con Shape, Collinear, Cocircular.
+3. Añadir relaciones visuales: paralelo, perpendicular, igualdad de segmentos, igua
+4. Construir un parser visual que produzca construction_cdl y condition_cdl.
+5. Pasar toda salida por FGPS para validación.
+6. No deducir propiedades desde la apariencia si no están marcadas o declaradas.
+7. Combinar imagen + texto para obtener problemas completos.
+8. Evaluar con precisión por predicado, validez CDL y éxito de FGPS.
+
+===== PAGE 18 =====
+o para una segunda IA que opere sobre el lenguaje formal.

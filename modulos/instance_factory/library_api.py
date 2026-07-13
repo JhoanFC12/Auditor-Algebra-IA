@@ -45,8 +45,14 @@ class LibraryInstanceInput:
     libro_id: int
     tipo: str
     total_esperado: int = 0
+    titulo_practica: str = ""
+    pdf_path: str = ""
     session_path: str = ""
     soluciones_dir: str = ""
+    nombre_instancia: str = ""
+    estado: str = "pendiente"
+    config_snapshot: dict[str, Any] | None = None
+    session_schema_version: str = ""
     notas: str = ""
     activo: bool = True
 
@@ -780,6 +786,7 @@ class LibraryWebApi:
 
     def _lightweight_instance(self, db_name: str, book: dict[str, Any], instance: dict[str, Any]) -> dict[str, Any]:
         row = dict(instance)
+        _apply_instance_catalog_metadata(row)
         row["factory_available"] = bool(str(book.get("pdf_path") or "").strip())
         row["factory_prepare_endpoint"] = f"/api/library/instances/{int(row.get('id') or 0)}/factory"
         row["timeline_stage"] = self._instance_timeline_stage(db_name, book, row, {})
@@ -1119,9 +1126,15 @@ def _instance_input(payload: dict[str, Any], *, book_id: int) -> LibraryInstance
             or payload.get("codigo_instancia")
             or ""
         ).strip(),
+        titulo_practica=str(payload.get("titulo_practica") or payload.get("practice_title") or "").strip(),
         total_esperado=max(int(payload.get("total_esperado") or payload.get("expected_total") or 0), 0),
+        pdf_path=str(payload.get("pdf_path") or payload.get("pdf") or "").strip(),
         session_path=str(payload.get("session_path") or "").strip(),
         soluciones_dir=str(payload.get("soluciones_dir") or payload.get("solutions_dir") or "").strip(),
+        nombre_instancia=str(payload.get("nombre_instancia") or payload.get("name") or "").strip(),
+        estado=str(payload.get("estado") or payload.get("state") or "pendiente").strip(),
+        config_snapshot=_dict_payload(payload.get("config_snapshot")),
+        session_schema_version=str(payload.get("session_schema_version") or "").strip(),
         notas=str(payload.get("notas") or payload.get("notes") or "").strip(),
         activo=bool(payload.get("activo", True)),
     )
@@ -1139,6 +1152,42 @@ def _serialize(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_serialize(item) for item in value]
     return value
+
+
+def _dict_payload(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return dict(value)
+    return None
+
+
+def _apply_instance_catalog_metadata(row: dict[str, Any]) -> None:
+    snapshot = row.get("config_snapshot")
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    page_range = str(
+        snapshot.get("page_range_display")
+        or snapshot.get("page_range")
+        or snapshot.get("range")
+        or ""
+    ).strip()
+    if page_range:
+        row.setdefault("pages", page_range)
+        row.setdefault("page_range", page_range)
+        row.setdefault("range", page_range)
+    practice_title = str(
+        row.get("practice_title")
+        or row.get("titulo_practica")
+        or row.get("nombre_instancia")
+        or snapshot.get("instance_name")
+        or snapshot.get("label_display")
+        or ""
+    ).strip()
+    if practice_title:
+        row.setdefault("practice_title", practice_title)
+        row.setdefault("titulo_practica", practice_title)
+    status = str(row.get("status") or row.get("estado") or snapshot.get("status") or "").strip()
+    if status:
+        row["status"] = status
 
 
 def _parse_instances_health(book: dict[str, Any]) -> list[dict[str, Any]]:

@@ -1,0 +1,69 @@
+{
+  "batch_id": "migration_server_verified_20260707",
+  "schema": "studio_factory_migration_manifest_v1",
+  "generated_at": "2026-07-07T13:39:40Z",
+  "source": {
+    "database": "mathcontentstudio_local_mirror",
+    "storage_root": "local_math_bank_bundle",
+    "bundle_manifest": "server-restored-current-state"
+  },
+  "target": {
+    "database": "mathcontentstudio",
+    "storage_root": "/srv/mathcontentstudio",
+    "release": {
+      "name": "nexumath_studio_systemd_20260706_232326",
+      "sha256": "cdf8348a3500259e814157ea365de9646b3fb5696b05b2cb1d648ad358a302dc",
+      "file_count": 169
+    }
+  },
+  "counts": {
+    "books": {
+      "source": 70,
+      "target": 70
+    },
+    "instances": {
+      "source": 430,
+      "target": 430
+    },
+    "problems": {
+      "source": 6415,
+      "target": 6415
+    },
+    "assets": {
+      "source": 111,
+      "target": 111
+    },
+    "tables": {
+      "libros_escaneo": 70,
+      "libro_instancias_escaneo": 430,
+      "problemas": 6415,
+      "libro_artifacts_locales": 62,
+      "instancia_artifacts_locales": 470
+    }
+  },
+  "path_rewrites": {
+    "rewritten": 111,
+    "local_only_remaining": 0,
+    "missing_files": 0,
+    "source_paths_redacted": true
+  },
+  "validation": {
+    "status": "passed",
+    "warnings": [],
+    "errors": [],
+    "evidence": {
+      "backup_ref": "/srv/mathcontentstudio/backups/mathcontentstudio_cutover_ready_20260707_133940.dump",
+      "backup_size_bytes": 686795,
+      "restore_test": "Restored into temporary PostgreSQL database and validated table counts.",
+      "server_pdf_count": 70,
+      "server_cover_count": 41,
+      "factory_payload_private_path_leak": false,
+      "remote_smoke_report": "E:/Github/Auditor-IA/storage/diagnostics/remote_studio_factory_nexumathjf_20260707_live.json"
+    }
+  },
+  "rollback": {
+    "available": true,
+    "backup_ref": "/srv/mathcontentstudio/backups/mathcontentstudio_cutover_ready_20260707_133940.dump",
+    "rollback_plan": "rollback-plan.md"
+  }
+}

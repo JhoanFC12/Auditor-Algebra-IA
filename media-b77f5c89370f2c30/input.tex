@@ -1,0 +1,385 @@
+% Options for packages loaded elsewhere
+\PassOptionsToPackage{unicode}{hyperref}
+\PassOptionsToPackage{hyphens}{url}
+\documentclass[
+  10pt,
+]{article}
+\usepackage{xcolor}
+\usepackage[margin=1.2cm]{geometry}
+\usepackage{amsmath,amssymb}
+\setcounter{secnumdepth}{-\maxdimen} % remove section numbering
+\usepackage{iftex}
+\ifPDFTeX
+  \usepackage[T1]{fontenc}
+  \usepackage[utf8]{inputenc}
+  \usepackage{textcomp} % provide euro and other symbols
+\else % if luatex or xetex
+  \usepackage{unicode-math} % this also loads fontspec
+  \defaultfontfeatures{Scale=MatchLowercase}
+  \defaultfontfeatures[\rmfamily]{Ligatures=TeX,Scale=1}
+\fi
+\usepackage{lmodern}
+\ifPDFTeX\else
+  % xetex/luatex font selection
+\fi
+% Use upquote if available, for straight quotes in verbatim environments
+\IfFileExists{upquote.sty}{\usepackage{upquote}}{}
+\IfFileExists{microtype.sty}{% use microtype if available
+  \usepackage[]{microtype}
+  \UseMicrotypeSet[protrusion]{basicmath} % disable protrusion for tt fonts
+}{}
+\makeatletter
+\@ifundefined{KOMAClassName}{% if non-KOMA class
+  \IfFileExists{parskip.sty}{%
+    \usepackage{parskip}
+  }{% else
+    \setlength{\parindent}{0pt}
+    \setlength{\parskip}{6pt plus 2pt minus 1pt}}
+}{% if KOMA class
+  \KOMAoptions{parskip=half}}
+\makeatother
+\setlength{\emergencystretch}{3em} % prevent overfull lines
+\providecommand{\tightlist}{%
+  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+\usepackage{bookmark}
+\IfFileExists{xurl.sty}{\usepackage{xurl}}{} % add URL line breaks if available
+\urlstyle{same}
+\hypersetup{
+  hidelinks,
+  pdfcreator={LaTeX via pandoc}}
+
+\author{}
+\date{}
+
+\begin{document}
+
+\textbf{TEORÍA DE EXPONENTES}
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\item
+  Calcular el valor de:\\
+  \[M = \frac{32 \cdot 15^{2} \cdot 6^{3}}{4^{3} \cdot 30^{2}}
+  \]A)\(1\) B)\(6\) C)\(9\)\\
+  D)\(18\) E)\(27\)
+\item
+  Si:\\
+  \[x = \frac{15\left( 10^{4} \right)\left( 6^{5} \right)}{96^{2} \cdot 15^{4}}
+  \] entonces es verdad que:\\
+  A)\(x < 2\) B)\(x\mathbb{\in N}\) C)\(3x\mathbb{\in Z}\)\\
+  D)\(2 < x < 2,5\) E)\(2x\mathbb{\in Z}\)
+\item
+  Indique el exponente final de \(x\) luego de reducir:\\
+  \[A = \left( x^{5} \right)^{4} \cdot \left( x^{- 3} \right)^{- 7^{0}} \cdot x^{4^{2}} \cdot x^{- 1^{2}}
+  \]; \(x \neq 0\)\\
+  A)\(39\) B)\(40\) C)\(38\)\\
+  D)\(37\) E)\(15\)
+\item
+  Reducir:\\
+  \[T = \frac{\left( a^{2} \right)^{3} \cdot a^{2^{3}} \cdot a^{( - 2)^{3}} \cdot a^{( - 2)^{4}}}{a^{- 2^{2}} \cdot a^{( - 2)^{0}} \cdot a^{2^{0}} \cdot a^{- 2^{0}}}
+  \]; \(a \neq 0\)\\
+  A)\(a^{15}\) B)\(a^{20}\) C)\(a^{25}\)\\
+  D)\(a^{30}\) E)\(a^{- 25}\)
+\item
+  Al simplificar:\\
+  \[V = \frac{\overset{(n + 2)\ \text{factores}}{\overbrace{x^{n - 1}x^{n - 1}x^{n - 1}\cdots}}}{\underset{(n + 4)\ \text{factores}}{\overset{x^{n - 3}x^{n - 3}x^{n - 3}\cdots}{︸}}}
+  \]; \(x \neq 0\) se obtiene:\\
+  A)\(x^{n}\) B)\(x^{2}\) C)\(x^{10}\)\\
+  D)\(1\) E)\(x^{4}\)
+\item
+  Simplificar:\\
+  \[E = \frac{\overset{20\ \text{veces}}{\overbrace{(5 \cdot 4)^{3}(5 \cdot 4)^{3}\cdots(5 \cdot 4)^{3}}} \cdot 128}{\underset{30\ \text{veces}}{\overset{\left( 5^{2}4^{2} \right)\left( 5^{2}4^{2} \right)\cdots\left( 5^{2}4^{2} \right)}{︸}}}
+  \]A)\(1\) B)\(2^{6}\) C)\(2^{7}\)\\
+  D)\(4\) E)\(20\)
+\item
+  El valor de la siguiente expresión:\\
+  \[S = \sqrt[7]{\frac{5^{6} + 5^{6} + 5^{6} + 5^{6} + 5^{6}}{6^{6} + 6^{6} + 6^{6} + 6^{6} + 6^{6} + 6^{6}}}
+  \] es:\\
+  A)\(1\) B)\(30\) C)\(\frac{5}{6}\)\\
+  D)\(\frac{6}{5}\) E)\(\sqrt[7]{\left( \frac{5}{6} \right)^{6}}\)
+\item
+  El valor de la siguiente expresión:\\
+  \[A = \sqrt[101]{\frac{\overset{99\ \text{sumandos}}{\overbrace{99^{100} + 99^{100} + 99^{100} + \cdots}}}{\underset{100\ \text{sumandos}}{\overset{100^{100} + 100^{100} + 100^{100} + \cdots}{︸}}}}
+  \] es:\\
+  A)\(1\) B)\(\frac{9}{10}\) C)\(\frac{99}{10}\)\\
+  D)\(\frac{100}{99}\) E)\(\frac{99}{100}\)
+\item
+  Efectuar:\\
+  \[E = \left\lbrack \left( \frac{1}{2} \right)\left( \frac{1}{4} \right)^{- 2} + \left( \frac{1}{125} \right)^{- \frac{1}{3}} + \left( \frac{1}{81} \right)^{- \frac{1}{4}} \right\rbrack^{- \frac{1}{2}}
+  \]A)\(0,25\) B)\(1\) C)\(0,5\)\\
+  D)\(4\) E)\(16\)
+\item
+  Simplificar:\\
+  \[S = \frac{( - 27)^{\frac{1}{3}} + 4^{2^{- 1}}}{2^{- (0,5)^{- 1}} - 81^{- \frac{1}{4}}}
+  \]A)\(3\) B)\(6\) C)\(9\)\\
+  D)\(12\) E)\(15\)
+\item
+  Sabiendo que \(a = 7^{n + 1}\); indicar el equivalente de:\\
+  \[U = \frac{7^{2n + 1} + 7^{2n}}{7^{n + 1} + 49 \cdot 7^{n}}
+  \]A)\(a\) B)\(\frac{a}{7}\) C)\(\frac{a}{49}\)\\
+  D)\(7a\) E)\(49a\)
+\item
+  Si: \(3^{x} = 7^{y}\); reducir:\\
+  \[C = \frac{3^{x + 1} - 7^{y + 1} + 3^{x}}{7^{y} - 7 \cdot 3^{x} + 3 \cdot 7^{y}}
+  \]A)\(0\) B)\(1\) C)\(2\)\\
+  D)\(3\) E)\(4\)
+\item
+  Simplificar:\\
+  \[R = \frac{2^{n + 3} + 2^{n + 2} - 2^{n + 1}}{2^{n + 2} - 2^{n + 1}}
+  \]A)\(5\) B)\(4\) C)\(2\)\\
+  D)\(\frac{1}{2}\) E)\(\frac{1}{5}\)
+\item
+  Simplificar:\\
+  \[C = \frac{5\left( 2^{x + 2} \right) + 6\left( 2^{x - 1} \right) - 2\left( 2^{x + 3} \right)}{4\left( 2^{x + 3} \right) - 30\left( 2^{x - 1} \right) - 2\left( 2^{x + 3} \right)}
+  \]A)\(1\) B)\(3\) C)\(5\)\\
+  D)\(7\) E)\(9\)
+\item
+  Reducir:\\
+  \[A = 27^{9^{- 16^{- 2^{- 2}}}}
+  \]A)\(3\) B)\(9\) C)\(\sqrt{3}\)\\
+  D)\(\sqrt[3]{3}\) E)\(27\)
+\item
+  Hallar la relación entre \(x\) e \(y\), si:\\
+  \[{x = \left( \frac{1}{4} \right)^{- 8^{- 9^{- 4^{- \frac{1}{2}}}}}
+  }{y = 64^{- 81^{- 16^{- 2^{- 1}}}}
+  }\]A)\(x + y = \frac{1}{2}\) B)\(\frac{x}{y} = \frac{1}{4}\)
+  C)\(\frac{y}{x} = 2\)\\
+  D)\(xy = \frac{1}{2}\) E)\(y = 4x\)
+\item
+  Si: \(m^{m} = 3\). Calcule: \(L = m^{m^{m + 1}}\)\\
+  A)\(4\) B)\(9\) C)\(27\)\\
+  D)\(81\) E)\(243\)
+\item
+  Si: \(b^{a} = 5 \land a^{- b} = \frac{1}{2}\). Calcular:
+  \(I = b^{a^{b + 1}}\)\\
+  A)\(10\) B)\(20\) C)\(25\)\\
+  D)\(30\) E)\(35\)
+\item
+  Si: \(x^{x^{x}} = 2\). Calcular:\\
+  \[M = x^{x^{x} + x^{x + x^{x}}}
+  \]A)\(8\) B)\(16\) C)\(32\)\\
+  D)\(64\) E)\(128\)
+\item
+  Si: \(a^{a} = 3\), hallar el valor de:\\
+  \[Q = a^{a + a^{a + 1}} + a^{a^{a + 1}}
+  \]A)\(27\) B)\(81\) C)\(108\)\\
+  D)\(120\) E)\(125\)
+\item
+  Si al reducir la expresión:\\
+  \[M = \frac{\overset{x\ \text{veces}}{\overbrace{(x \cdot x \cdot x\cdots x)}} \cdot \overset{x^{x}\ \text{veces}}{\overbrace{\left( x^{x} + x^{x} + x^{x} + \cdots + x^{x} \right)}}}{\left( x^{x} \right)^{2^{4^{0}}} \cdot x^{2^{4}} \cdot x^{( - 2)^{4}} \cdot x^{- 2^{4}}}
+  \] resulta la unidad. El valor de:\\
+  \[\left( \frac{x}{2} - 1 \right)^{2}
+  \], es:\\
+  A)\(8\) B)\(16\) C)\(25\)\\
+  D)\(36\) E)\(49\)
+\item
+  Calcular:\\
+  \[S = (0,25)(16)^{\sqrt[4]{2}(0,0625)^{(0,125) \cdot (0,5)}}
+  \]A)\(1\) B)\(2\) C)\(4\)\\
+  D)\(8\) E)\(\sqrt{2}\)
+\item
+  Hallar el resultado de efectuar:\\
+  \[P = \left( 3^{- 3^{- 3}} \right)^{3^{3}} \cdot \left( 3^{- 3^{3}} \right)^{- 3^{- 3}} \cdot \left( - 3^{- 3^{- 3}} \right)^{3^{- 3}} \cdot \left( 3^{3^{- 3}} \right)^{- 3^{- 3}}
+  \]A)\(- 1\) B)\(3\) C)\(\frac{1}{3}\)\\
+  D)\(3^{3}\) E)\(1\)
+\item
+  Si \(a\), \(b\) y \(c\) son números naturales, simplifique:\\
+  \[S = \sqrt[{a + b + c}]{\frac{135^{a + b} \cdot 147^{b + c} \cdot 175^{c + a}}{3^{2a + 3b} \cdot 5^{c + 2a} \cdot 7^{b + 2c}}}
+  \]A)\(21\) B)\(75\) C)\(105\)\\
+  D)\(14\) E)\(18\)
+\item
+  Simplifique:\\
+  \[M = \frac{37^{x + 4} + 37^{x + 3} + 37^{x + 2} + 37^{x + 1} + 37^{x}}{37^{x - 4} + 37^{x - 3} + 37^{x - 2} + 37^{x - 1} + 37^{x}}
+  \]A)\(37\) B)\(37^{2}\) C)\(37^{3}\)\\
+  D)\(37^{4}\) E)\(\frac{1}{37}\)
+\item
+  Si: \(n^{n} = 2\). Calcular:\\
+  \[M = n^{n^{n^{n + 1} + 1}}
+  \]A)\(32\) B)\(16\) C)\(8\)\\
+  D)\(4\) E)\(2\)
+\item
+  Sabiendo que: \(ab = b^{b} = 2\). Calcular el valor de:
+  \(E = ab^{ab^{ab}}\)\\
+  A)\(16\) B)\(4ab\) C)\(4a\)\\
+  D)\(4b\) E)\(32\)
+\item
+  Determinar el valor de \(R\).\\
+  \[R = 16^{- 4^{- 4^{\cdot^{\cdot^{\cdot^{- 4^{- 2^{- 1}}}}}}}}
+  \]A)\(0,25\) B)\(0,75\) C)\(0,50\)\\
+  D)\(0,125\) E)\(1\)
+\item
+  Reducir:\\
+  \[S = \left\lbrack 3^{- 3^{- 3}} \right\rbrack^{16^{8^{- 3^{- 1}}}} \cdot \left\lbrack 3^{3^{- 3}} \right\rbrack^{64^{27^{- 3^{- 1}}}}
+  \]A)\(3\) B)\(\frac{1}{3}\) C)\(1\)\\
+  D)\(3^{2}\) E)\(3^{- 2}\)
+\item
+  Si:\\
+  \[A_{n} = \frac{3^{3n + 1} + 3^{n + 2}}{3 + 9^{n}}
+  \]. El valor de \(T = \frac{A_{100}}{A_{98}}\), es:\\
+  A)\(1\) B)\(3\) C)\(9\)\\
+  D)\(81\) E)\(15\)
+\item
+  Efectuar:\\
+  \[P = \left\lbrack \sqrt[n^{2n^{n}}]{n^{n^{n^{n^{n}} + n^{n}}}} \right\rbrack^{n^{n^{n} - n^{n^{n}}}}
+  \]A)\(n\) B)\(\sqrt[n]{n}\)\\
+  C)\(n^{2}\sqrt[n]{n}\) D)\(n^{- 1}\)\\
+  E)\(n^{n}\)
+\item
+  Reducir:\\
+  \[Y = \left( 2^{n^{1 - n}} \right)^{\left( n^{n} \right)^{2}} \cdot \left( 2^{- n^{n}} \right)^{n}
+  \]A)\(1\) B)\(2\) C)\(\frac{1}{2}\)\\
+  D)\(2^{n}\) E)\(2^{- n}\)
+\item
+  Sabiendo que: \(\frac{1}{a} + \frac{1}{b} = \frac{1}{a + b}\).
+  Reducir:\\
+  \[M = \left( \frac{\sqrt[{a + b}]{x}}{\sqrt[a]{x}} \right)^{b} + \left( \frac{\sqrt[{a + b}]{x}}{\sqrt[b]{x}} \right)^{a}
+  \]A)\(\frac{x}{2}\) B)\(2x\) C)\(2x^{2}\)\\
+  D)\(4x\) E)\(1\)
+\item
+  Simplificar:\\
+  \[A = \sqrt{\frac{\sqrt[{a - b}]{7^{2a}} - 21\sqrt[{a - b}]{7^{2b}}}{\sqrt[{a - b}]{7^{a + b}}}}
+  \]A)\(1\) B)\(7^{a + b}\) C)\(2\)\\
+  D)\(7^{\frac{a + b}{a - b}}\) E)\(7^{b}\)
+\item
+  Sean \(\{ a;b;c\mathbb{\} \subset N}\) tales que
+  \(\frac{a}{a + b} + \frac{b}{b + c} + \frac{c}{a + c} = 4\). Halle el
+  reducido de:\\
+  \[S = \frac{\sqrt[{a + b}]{2^{a - b}} \cdot \sqrt[{b + c}]{2^{b - c}}}{\sqrt[{a + c}]{2^{a - c}}}
+  \]A)\(2\) B)\(1\) C)\(16\)\\
+  D)\(32\) E)\(128\)
+\item
+  Simplificar:\\
+  \[T = \frac{54 \times 56 \times 420 \times 625}{4 \times 21^{2} \times 15^{2} \times 10^{3}}
+  \]A)\(1\) B)\(2\) C)\(3\)\\
+  D)\(6\) E)\(10\)
+\item
+  Calcular:\\
+  \[\left\{ \left( \frac{1}{3} \right)^{- \left( \frac{1}{3} \right)^{- 1}} + \left( \frac{1}{2} \right)^{- \left( \frac{1}{2} \right)^{- 1}} + ( - 1)^{19990} \right\}^{\frac{1}{5}}
+  \]A)\(\sqrt[5]{30}\) B)\(\sqrt[5]{27}\) C)\(\frac{1}{2}\)\\
+  D)\(2\) E)\(\sqrt[5]{33}\)
+\item
+  Si: \(x^{x} = 2\), hallar:\\
+  \[E = x^{x^{1 + x^{x + 1}}}
+  \]A)\(8\) B)\(64\) C)\(16\)\\
+  D)\(4\) E)\(32\)
+\item
+  Simplificar la expresión:\\
+  \[\frac{2^{n + 1} + 2^{n + 2} + 2^{n + 3} + 2^{n + 4}}{2^{n - 1} + 2^{n - 2} + 2^{n - 3} + 2^{n - 4}}
+  \]A)\(1\) B)\(2\) C)\(16\)\\
+  D)\(32\) E)\(64\)
+\item
+  Calcular:\\
+  \[M = \left( \sqrt[x^{x}]{x^{x^{x} \cdot \sqrt[x]{x}}} \right)^{\sqrt[{- x}]{x}}
+  \]A)\(1\) B)\(x\) C)\(x^{2}\)\\
+  D)\(x^{- 1}\) E)\(\sqrt{x}\)
+
+  \textbf{CLAVES\\
+  1) E 2) E 3) C\\
+  4) C 5) C 6) C\\
+  7) C 8) E 9) A\\
+  10) D 11) C 12) B\\
+  13) A 14) D 15) A\\
+  16) D 17) C 18) C\\
+  19) A 20) C 21) E\\
+  22) C 23) A 24) C\\
+  25) D 26) B 27) C\\
+  28) A 29) C 30) C\\
+  31) A 32) A 33) B\\
+  34) C 35) E 36) B\\
+  37) D 38) C 39) D\\
+  40) B}
+
+  \textbf{TAREA DOMICILIARIA}
+\item
+  Indicar el exponente de \(n^{n}\) en \(n^{n^{n}}\)\\
+  A)\(n\) B)\(n^{- 1}\) C)\(n^{n + 1}\)\\
+  D)\(n^{n - 1}\) E)\(\text{ N.A.}\)
+\item
+  El equivalente de:\\
+  \[\left( \left( \cdots\left( \left( \left( x^{- 15} \right)^{- 14} \right)^{- 13} \right)\cdots \right)^{14} \right)^{15}
+  \]; es:\\
+  A)\(x^{2 \cdot 15!}\) B)\(x^{2019}\) C)\(x^{- 1}\)\\
+  D)\(1\) E)\(0\)
+\item
+  Si: \(2^{x + 1} = 3^{y}\), calcular:\\
+  \[\frac{2^{x} + 3^{y}}{2^{x} - 3^{y}}
+  \]A)\(3\) B)\(- 3\) C)\(\frac{1}{3}\)\\
+  D)\(- \frac{1}{3}\) E)\(- 1\)
+\item
+  Encontrar un número que sea equivalente a:\\
+  \[T = \frac{18^{6} \cdot 54^{- 3} \cdot 8^{- 6} \cdot 36^{2}}{24^{- 2} \cdot 3^{- 6} \cdot (0.5)^{4} \cdot 27^{5}}
+  \]A)\(1\) B)\(\frac{1}{2}\) C)\(\frac{1}{3}\)\\
+  D)\(\frac{1}{9}\) E)\(\frac{1}{5}\)
+\item
+  Calcular:\\
+  \[M = \left\lbrack \left( - \frac{3}{2} \right)^{- 2} - \left( - \frac{3}{2} \right)^{- 3} - 6^{- 1} - ( - 6)^{- 3} \right\rbrack^{- \frac{2}{3}}
+  \]A)\(\frac{5}{6}\) B)\(\frac{6}{5}\) C)\(\frac{25}{36}\)\\
+  D)\(\frac{36}{25}\) E)\(1\)
+\item
+  Si: \(a^{a^{a}} = 3\); \(a^{a^{3}} = 2\). Calcular:\\
+  \[M = a^{a^{a^{a^{a}} + 2a^{a}}}
+  \]A)\(8\) B)\(256\) C)\(512\)\\
+  D)\(1024\) E)\(\text{ N.A.}\)
+\item
+  Si: \(a^{a^{a}} = 3\). Calcule:\\
+  \[M = \sqrt[a^{a}]{a^{a^{2a} + a^{2a + a^{a}}}}
+  \]A)\(3\) B)\(9\) C)\(27\)\\
+  D)\(81\) E)\(243\)
+\item
+  Hallar el valor numérico de:\\
+  \[V = x^{x^{1 + 2x^{1 + x - x^{x + 1}}}}
+  \] siendo \(x^{x} = 2\)\\
+  A)\(2^{2}\) B)\(2^{3}\) C)\(2^{4}\)\\
+  D)\(2^{6}\) E)\(2^{7}\)
+\item
+  Al simplificar la expresión:\\
+  \[\sqrt[x^{- 1}]{x \cdot x^{x}} \div \left\lbrack \left( x^{1 + \frac{1}{x}} \right)^{x^{2}}x^{- 1} \right\rbrack
+  \] resulta:\\
+  A)\(1\) B)\(x\) C)\(x^{x}\)\\
+  D)\(x^{- 1}\) E)\(x^{2}\)
+\item
+  Si:\\
+  \[x = 8^{27^{- 9^{- 64^{- 6^{- 1}}}}}
+  \];\\
+  \[y = 9^{16^{- 16^{- 512^{- 3^{- 2}}}}}
+  \]. Calcule \(xy\)\\
+  A)\(2\) B)\(3\) C)\(6\)\\
+  D)\(8\) E)\(12\)
+\item
+  Reducir:\\
+  \[\left\lbrack \sqrt[(xy)^{xy}]{(xy)^{(xy)^{(xy)^{3}}}} \right\rbrack^{(xy)^{(xy) - (xy)^{3}}}
+  \]A)\(xy\) B)\((xy)^{xy}\)\\
+  C)\((xy)^{(xy)^{2}}\) D)\((xy)^{(xy)^{3}}\)\\
+  E)\((xy)^{(xy)^{4}}\)
+\item
+  Si: \(m + n = 3mn\). Simplificar:\\
+  \[\frac{8^{m} - 8^{n}}{\sqrt[n]{2^{m}} - \sqrt[m]{2^{n}}}
+  \]A)\(- \frac{1}{8}\) B)\(\frac{1}{2}\) C)\(1\)\\
+  D)\(2\) E)\(- 4\)
+\item
+  Al reducir:\\
+  \[\left\{ \sqrt[n]{n^{n^{\sqrt{n}}}} \right\}^{\sqrt[\sqrt{n}]{\frac{n^{\sqrt{n}}}{n^{n}}}}
+  \]; \(n \neq 0\) se obtiene:\\
+  A)\(n\) B)\(n^{- 1}\) C)\(\sqrt{n}\)\\
+  D)\(\frac{\sqrt{n}}{n}\) E)\(n^{\sqrt{n}}\)
+\item
+  Reducir:\\
+  \[\left\lbrack \sqrt[x^{- 1}]{x^{x^{x}}} \right\rbrack^{x^{x - 1}} \cdot \sqrt[x^{- x}]{x^{- x^{x}}}
+  \]A)\(x\) B)\(\frac{1}{x}\) C)\(\sqrt[x]{x}\)\\
+  D)\(1\) E)\(\frac{1}{x^{2}}\)
+\item
+  Indicar el equivalente de:\\
+  \[T = \left\lbrack \frac{x^{1 + \frac{1}{x}} + x^{1 - \frac{1}{x}}}{x + x^{1 - \frac{2}{x}}} \right\rbrack^{x}
+  \]A)\(x^{2}\) B)\(x\) C)\(x^{- 1}\)\\
+  D)\(x^{- 2}\) E)\(x^{- 3}\)
+
+  \textbf{CLAVES:}
+
+  \textbf{41) D 42) D 43) B\\
+  44) B 45) D 46) C\\
+  47) D 48) A 49) B\\
+  50) C 51) A 52) D\\
+  53) A 54) D 55) B}
+\end{enumerate}
+
+\end{document}

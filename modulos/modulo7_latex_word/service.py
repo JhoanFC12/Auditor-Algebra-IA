@@ -361,12 +361,12 @@ class LatexWordService:
 
     def _db_instance_problem_counts(self, db_name: str) -> dict[tuple[str, str], int] | None:
         if not str(db_name or "").strip():
-            return None
+            return {}
         try:
             controller = self._practice_controller()
             counter = getattr(controller, "contar_problemas_por_instancia_masivo", None)
             if not callable(counter):
-                return None
+                return {}
             raw_counts = counter(str(db_name or "").strip()) or {}
             result: dict[tuple[str, str], int] = {}
             for key, value in dict(raw_counts).items():
@@ -376,7 +376,7 @@ class LatexWordService:
             return result
         except Exception as exc:
             self.log(f"No se pudo precargar conteos BD de instancias: {exc}")
-            return None
+            return {}
 
     def _db_instance_count_key(self, libro_codigo: str, codigo_instancia: str) -> tuple[str, str]:
         return (self._normalize_db_count_key(libro_codigo), self._normalize_db_count_key(codigo_instancia))
@@ -770,6 +770,7 @@ class LatexWordService:
     def _problem_payload(self, row: dict[str, Any]) -> dict[str, Any]:
         text = str(row.get("enunciado_latex") or "").strip()
         images = row.get("imagenes") if isinstance(row.get("imagenes"), list) else []
+        image_payloads = self._problem_image_payloads(row)
         return {
             "id": int(row.get("id") or 0),
             "numero_original": int(row.get("numero_original") or 0),
@@ -782,11 +783,54 @@ class LatexWordService:
             "consistencia_matematica": str(row.get("consistencia_matematica") or "").strip(),
             "tipo_problema": str(row.get("tipo_problema") or "").strip(),
             "examen": str(row.get("examen") or "").strip(),
-            "imagenes_count": len(images),
+            "imagenes_count": max(len(images), len(image_payloads)),
+            "imagenes": image_payloads,
             "has_image_marker": bool(IMAGE_MARKER_RE.search(text)),
             "enunciado_latex": text,
             "preview": self._compact_problem_preview(text),
         }
+
+    def _problem_image_payloads(self, row: dict[str, Any]) -> list[dict[str, str]]:
+        if not self.file_url_resolver:
+            return []
+        payloads: list[dict[str, str]] = []
+        seen: set[str] = set()
+
+        def add(marker: str, path: Path) -> None:
+            try:
+                resolved = self._normalize_path(path).resolve()
+            except Exception:
+                return
+            key = str(resolved).lower()
+            if key in seen:
+                return
+            try:
+                if not resolved.exists() or not resolved.is_file():
+                    return
+            except Exception:
+                return
+            url = self.file_url_resolver(str(resolved))
+            if not url:
+                return
+            seen.add(key)
+            payloads.append(
+                {
+                    "marker": str(marker or resolved.stem).strip() or resolved.stem,
+                    "name": resolved.name,
+                    "url": url,
+                }
+            )
+
+        structured = self._resolve_db_structured_images(row)
+        if structured:
+            for marker, path in structured:
+                add(marker, path)
+            return payloads
+
+        for marker in self._db_problem_markers(row):
+            for path in self._resolve_db_marker_paths(marker, row)[:1]:
+                add(marker, path)
+        return payloads
 
     def _compact_problem_preview(self, text: str, limit: int = 240) -> str:
         clean = re.sub(r"\s+", " ", str(text or "")).strip()

@@ -1,0 +1,18 @@
+{
+  "schema_version": "problem_detector_multiclass_hf_training_v1",
+  "created_at": "2026-06-25T20:11:34",
+  "dataset_repo_id": "Jhoan12/problem-detector-multiclass-reviewed-julio-v2-20260625",
+  "model_repo_id": "Jhoan12/pdf-problem-detector-multiclass-julio-v2",
+  "base_model": "/root/.cache/huggingface/hub/datasets--Jhoan12--problem-detector-multiclass-reviewed-julio-v2-20260625/snapshots/24e2e37a03b27cc543586c361be3824b124e3676/base/pdf_problem_detector_multiclass_pilot_v1_best.pt",
+  "epochs": 35,
+  "batch": 4,
+  "imgsz": 768,
+  "classes": {
+    "0": "problem",
+    "1": "problem_number",
+    "2": "answer_block"
+  },
+  "save_dir": "/tmp/runs/problem_detector_multiclass/problem_detector_multiclass_julio_v2",
+  "best": "/tmp/runs/problem_detector_multiclass/problem_detector_multiclass_julio_v2/weights/best.pt",
+  "last": "/tmp/runs/problem_detector_multiclass/problem_detector_multiclass_julio_v2/weights/last.pt"
+}

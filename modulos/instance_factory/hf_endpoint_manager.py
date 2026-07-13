@@ -755,3 +755,59 @@ def cold_start_sleep_seconds(attempt: int) -> float:
     schedule = (8.0, 15.0, 30.0, 45.0, 60.0, 60.0, 90.0, 120.0)
     idx = max(0, min(len(schedule) - 1, int(attempt)))
     return schedule[idx]
+
+
+def _cold_start_max_attempts() -> int:
+    raw = (
+        os.getenv("HF_TRAINED_OCR_COLD_START_MAX_ATTEMPTS", "")
+        or os.getenv("HF_OCR_COLD_START_MAX_ATTEMPTS", "")
+        or "8"
+    )
+    try:
+        return max(1, min(20, int(str(raw).strip())))
+    except Exception:
+        return 8
+
+
+def call_with_hf_ocr_retry(
+    callback: Callable[[], Any],
+    *,
+    max_attempts: int | None = None,
+    sleep_func: Callable[[float], None] | None = None,
+    status_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> Any:
+    """Run one OCR request with cold-start retries only.
+
+    HF scale-to-zero commonly returns 502/503/timeouts while the endpoint warms
+    up. Permission/configuration errors must fail immediately so the UI shows
+    the real problem instead of burning endpoint time.
+    """
+    attempts = _cold_start_max_attempts() if max_attempts is None else max(1, int(max_attempts))
+    sleeper = sleep_func or time.sleep
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return callback()
+        except Exception as exc:
+            last_error = exc
+            if attempt >= attempts or not is_cold_start_runtime_error(exc):
+                raise
+            sleep_s = cold_start_sleep_seconds(attempt - 1)
+            if status_callback is not None:
+                try:
+                    status_callback(
+                        {
+                            "event": "hf_ocr_cold_start_retry",
+                            "attempt": attempt,
+                            "max_attempts": attempts,
+                            "sleep_s": sleep_s,
+                            "message": f"Endpoint OCR no disponible todavia; reintentando en {int(sleep_s)}s.",
+                            "error": str(exc),
+                        }
+                    )
+                except Exception:
+                    pass
+            sleeper(sleep_s)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("OCR retry loop exited unexpectedly.")

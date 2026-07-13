@@ -18,8 +18,11 @@ SYSTEM_PROMPT = (
     "Usa el formato: \\item[\\textbf{n.}] [[curso=...]] [[tema=...]] "
     "[[Estado=sin_revisar]] [[Clave=...]] enunciado [[Imagen=img-n]] "
     "\u00a3A)...\u00e6B)...\u00e6C)...\u00a3D)...\u00e6\u00e6E)...\u00a3. "
+    "Respeta exactamente los separadores de alternativas \u00a3 y \u00e6; no los cambies por listas A) B) C) D) E). "
     "Usa [[Imagen=img-n]] solo cuando la segmentacion indique grafico o el humano lo haya marcado. "
-    "No describas graficos. Fusiona continuaciones [CONT.] en el problema padre."
+    "No describas graficos. Si el JSON trae continuations o imagen OCR fusionada, integra ese contenido en el problema padre. "
+    "No uses [CONT.] como contrato: puede no existir, no debes pedirlo y nunca debe aparecer en la salida final. "
+    "Si procesas un lote externo, conserva cada separador ----nombre_imagen.png----- antes de su item LaTeX."
 )
 
 

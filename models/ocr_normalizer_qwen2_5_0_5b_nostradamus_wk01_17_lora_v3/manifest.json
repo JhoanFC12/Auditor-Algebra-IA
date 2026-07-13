@@ -1,0 +1,15 @@
+{
+  "schema_version": "local_ocr_normalizer_manifest_v1",
+  "created_at": "2026-06-21T23:29:30",
+  "model_repo": "Jhoan12/math-ocr-normalizer-qwen2.5-0.5b-nostradamus-wk01-17-lora-v3",
+  "base_repo": "Qwen/Qwen2.5-0.5B-Instruct",
+  "base_dir": "E:\\Github\\Auditor-IA\\models\\ocr_normalizer_qwen2_5_0_5b_nostradamus_wk01_17_lora_v3\\base",
+  "adapter_dir": "E:\\Github\\Auditor-IA\\models\\ocr_normalizer_qwen2_5_0_5b_nostradamus_wk01_17_lora_v3\\adapter",
+  "base_size_bytes": 999605190,
+  "adapter_size_bytes": 51128102,
+  "usage": {
+    "HF_OCR_NORMALIZER_PREFER_LOCAL": "1",
+    "HF_OCR_NORMALIZER_BASE_MODEL_LOCAL_DIR": "E:\\Github\\Auditor-IA\\models\\ocr_normalizer_qwen2_5_0_5b_nostradamus_wk01_17_lora_v3\\base",
+    "HF_OCR_NORMALIZER_LOCAL_DIR": "E:\\Github\\Auditor-IA\\models\\ocr_normalizer_qwen2_5_0_5b_nostradamus_wk01_17_lora_v3\\adapter"
+  }
+}

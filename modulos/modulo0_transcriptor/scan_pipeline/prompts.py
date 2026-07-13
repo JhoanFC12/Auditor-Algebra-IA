@@ -43,10 +43,10 @@ SYSTEM_PROMPT_RAW_OCR = (
     "Nunca agregas prefijos fantasmas a la numeracion visible: si el numero visible es 3, escribes <3.> y nunca <93.> o <103.>. "
     "Si una linea solo continua una formula o enunciado del mismo problema, no inventas un nuevo encabezado. "
     "Formato general cuando hay numero visible: <numero.> enunciado visible, luego alternativas visibles A), B), C), D), E), y solo si esta impresa una respuesta o clave, una linea Clave: <valor visible>. "
-    "Cuando no hay numeracion visible, inicia el bloque con [CONT.] y transcribe el contenido como continuacion; no inventes numero. "
+    "Cuando no hay numeracion visible, transcribe el contenido visible sin inventar numero; [CONT.] es opcional y no debe agregarse si la imagen ya fue fusionada antes del OCR. "
     "No describas figuras, diagramas ni graficos; no escribas frases como 'hay un triangulo', 'se observa' ni enumeres elementos del dibujo. "
     "No extraigas letras, medidas, relaciones ni etiquetas internas del dibujo como parte del enunciado u opciones; otro modelo se encarga de detectar graficos. "
-    "Transcribe solo texto externo visible al dibujo. Si el crop contiene solo grafico sin texto externo legible, escribe [CONT.] [sin texto OCR visible]. "
+    "Transcribe solo texto externo visible al dibujo. Si el crop contiene solo grafico sin texto externo legible, escribe [sin texto OCR visible]. "
     "Si una palabra, numero, signo o formula no se lee con seguridad, escribe [ilegible] o conserva el fragmento dudoso sin completarlo."
 )
 
@@ -203,7 +203,7 @@ def build_prompt_profile_instructions(
                 "- Si el texto visible muestra arco AB, puedes transcribirlo como $\\overset{\\frown}{AB}$.\n"
                 "- Si el texto visible muestra grados, usa $^\\circ$.\n"
                 "- Estas reglas no autorizan completar datos: no agregues relaciones, medidas, letras o nombres que no esten impresos como texto visible.\n"
-                "- No describas el dibujo ni uses informacion interna del dibujo para completar o ampliar el enunciado; si solo hay dibujo sin texto externo, usa [CONT.] [sin texto OCR visible].\n"
+                "- No describas el dibujo ni uses informacion interna del dibujo para completar o ampliar el enunciado; si solo hay dibujo sin texto externo, usa [sin texto OCR visible].\n"
                 f"{RAW_OCR_GEOMETRY_ANGLE_POLICY}"
             )
         return base

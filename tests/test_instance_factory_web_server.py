@@ -50,21 +50,47 @@ class _FakeService:
         self.calls.append(("resolve_page_selection", raw))
         return [int(part) for part in str(raw).split(",") if part.strip()]
 
-    def detect_pdf_pages(self, pages, *, dpi=300, confidence=0.25, detector_model="", replace_existing=False):
-        self.calls.append(("detect_pdf_pages", list(pages), dpi, confidence, detector_model, replace_existing))
+    def detect_pdf_pages(self, pages, *, dpi=300, confidence=0.25, detector_model="", replace_existing=False, preserve_reviewed=True):
+        self.calls.append(("detect_pdf_pages", list(pages), dpi, confidence, detector_model, replace_existing, preserve_reviewed))
         return list(self.pages)
 
-    def update_page_boxes(self, record_id, boxes, *, layout_mode="auto", reviewed=True, reorder=False):
-        self.calls.append(("update_page_boxes", record_id, boxes, layout_mode, reviewed, reorder))
+    def update_page_boxes(
+        self,
+        record_id,
+        boxes,
+        *,
+        layout_mode="auto",
+        reviewed=True,
+        reorder=False,
+        detector_detections=None,
+        force_training_capture=False,
+    ):
+        self.calls.append(("update_page_boxes", record_id, boxes, layout_mode, reviewed, reorder, detector_detections, force_training_capture))
         for page in self.pages:
             if page.record_id == record_id:
                 page.boxes = [tuple(box[:4]) for box in boxes]
+                if detector_detections is not None:
+                    page.detector_detections = list(detector_detections)
                 page.layout_mode = layout_mode
                 page.reviewed = reviewed
                 self._last_page_boxes_invalidated_count = len(self.invalidated_records_on_update)
                 self._last_page_boxes_invalidated_records = list(self.invalidated_records_on_update)
                 return page
         raise KeyError(record_id)
+
+    def capture_problem_detector_training_pages(self, record_ids=None, *, reviewed_only=True):
+        self.calls.append(("capture_problem_detector_training_pages", list(record_ids or []), reviewed_only))
+        pages = [page for page in self.pages if not record_ids or str(page.record_id) in {str(item) for item in record_ids}]
+        saved = sum(1 for page in pages if not reviewed_only or bool(getattr(page, "reviewed", False)))
+        skipped = len(pages) - saved
+        return {
+            "schema_version": "problem_detector_training_page_capture_v1",
+            "saved": saved,
+            "skipped": skipped,
+            "errors": 0,
+            "total_considered": len(pages),
+            "results": [],
+        }
 
     def delete_page_record(self, record_id):
         self.calls.append(("delete_page_record", record_id))
@@ -311,6 +337,38 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
         self.assertIn("mergeFinalLatexContinuation(finalLatex, continuationText)", app_js)
         self.assertIn("normalized.continuaciones_fusionadas = Array.from(byId.values())", app_js)
 
+    def test_web_app_ocr_queue_uses_effective_staging_records(self) -> None:
+        app_js = Path("modulos/instance_factory/web/app.js").read_text(encoding="utf-8")
+        self.assertIn("function recordMergedIntoParent(record)", app_js)
+        self.assertIn("source.replaced_by_record_id", app_js)
+        self.assertIn("record.replaced_by_record_id", app_js)
+        self.assertIn('String(record.ocr_input_mode || "").trim() === "replaced_by_merged_crop"', app_js)
+        self.assertIn("function stagingWorkRecords", app_js)
+        self.assertIn("const records = stagingWorkRecords(allRecords);", app_js)
+        self.assertIn("const activeRecords = stagingWorkRecords(state.snapshot.records || []);", app_js)
+        self.assertIn("const displayRecords = cropVisualFilteredRecords(activeRecords);", app_js)
+        self.assertIn("refreshCropGalleryWindow(displayRecords, { force: true });", app_js)
+        self.assertNotIn("refreshCropGalleryWindow(state.snapshot.records || [], { force: true });", app_js)
+        self.assertIn("!recordMergedIntoParent(record) && !recordSourceStale(record)", app_js)
+        self.assertIn('if (String(mode || "") === "raw_ocr") return stagingWorkRecords(allRecords);', app_js)
+        self.assertIn("function renderOcrRecord(record, records = stagingWorkRecords(state.snapshot.records || []))", app_js)
+        self.assertIn("function continuationDisplayCropTotal(scan = null)", app_js)
+        self.assertIn("const total = continuationDisplayCropTotal(scan) || totalRecords || 0;", app_js)
+        self.assertIn("updateCropsQueueUi(activeRecords);", app_js)
+        self.assertIn("function bindRecordCards(records = state.snapshot.records || [])", app_js)
+        self.assertIn("updateSelectedCropUi(records);", app_js)
+        self.assertIn("const record = selectedRecord(records);", app_js)
+        self.assertIn("const currentId = selectedRecord(records)?.record_id || state.selectedRecordId;", app_js)
+        self.assertIn("const CROP_VISUAL_FILTERS = [", app_js)
+        self.assertIn("function recordIsMergedCropReplacement(record)", app_js)
+        self.assertIn("function cropContinuityMarks(record)", app_js)
+        self.assertIn('String(source.ocr_input_mode || "").trim() === "merged_crops_replacement"', app_js)
+        self.assertIn("merged: true", app_js)
+        self.assertIn("function cropVisualFilteredRecords(records = stagingWorkRecords(state.snapshot?.records || []))", app_js)
+        self.assertIn("function renderCropVisualFilterBar", app_js)
+        self.assertIn("bindCropVisualFilterControls(records);", app_js)
+        self.assertIn("const displayRecords = cropVisualFilteredRecords(records);", app_js)
+
     def test_web_runtime_gzips_large_json_when_requested(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -342,6 +400,28 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
         self.assertEqual(payload["schema_version"], "pdf_factory_web_snapshot_v1")
         self.assertEqual(payload["records"][0]["record_id"], "crop_001")
 
+    def test_snapshot_exposes_library_instance_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            context = InstancePipelineContext(
+                book_code="ALG01",
+                instance_type="S01",
+                pdf_path=str(root / "book.pdf"),
+                db_name="library_db",
+                book_id=10,
+            )
+            store = InstanceStagingStore(context, root=root / "staging")
+            runtime = FactoryWebRuntime(context, service=_FakeService(context, store))
+            setattr(runtime, "_library_instance_id", 25)
+            setattr(runtime, "_library_book_id", 10)
+            setattr(runtime, "_library_db_name", "library_db")
+
+            snapshot = runtime._snapshot()
+
+        self.assertEqual(snapshot["context"]["instance_id"], 25)
+        self.assertEqual(snapshot["context"]["book_id"], 10)
+        self.assertEqual(snapshot["context"]["db_name"], "library_db")
+
     def test_snapshot_reuses_loaded_pages_and_records(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -357,6 +437,12 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                     page_number=1,
                     image_path=page_image,
                     boxes=[(1, 2, 30, 40)],
+                    box_details=[{"bbox_px": [1, 2, 30, 40], "class_name": "problem"}],
+                    detector_detections=[
+                        {"bbox_px": [1, 2, 30, 40], "class_name": "problem", "conf": 0.9},
+                        {"bbox_px": [2, 3, 12, 10], "class_name": "problem_number", "conf": 0.8},
+                        {"bbox_px": [3, 20, 28, 38], "class_name": "answer_block", "conf": 0.7},
+                    ],
                     reviewed=True,
                 )
             ])
@@ -378,6 +464,9 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
 
             self.assertEqual(snapshot["summary"]["records_total"], 1)
             self.assertEqual(snapshot["summary"]["pages_total"], 1)
+            self.assertEqual(snapshot["pages"][0]["boxes"], [[1, 2, 30, 40]])
+            self.assertEqual(len(snapshot["pages"][0]["detector_detections"]), 3)
+            self.assertEqual(snapshot["pages"][0]["detector_detections"][1]["class_name"], "problem_number")
             self.assertEqual(len(snapshot["timeline"]), 6)
             self.assertEqual(golden.load_count, 1)
             self.assertEqual(store.load_count, 1)
@@ -511,6 +600,50 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
 
             self.assertEqual(third["raw_ocr"], "OCR corregido")
             self.assertEqual(register_count["calls"], 2)
+
+    def test_large_snapshot_uses_compact_records_and_limited_media(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            context = InstancePipelineContext(book_code="AREAS", instance_type="propuestos", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            total = max(
+                web_server_module.SNAPSHOT_COMPACT_RECORD_THRESHOLD + 5,
+                web_server_module.SNAPSHOT_COMPACT_MEDIA_LIMIT + 5,
+            )
+            for index in range(total):
+                crop = root / f"crop_{index:03d}.png"
+                crop.write_bytes(b"png")
+                record = StagingProblemRecord(
+                    record_id=f"crop_{index:03d}",
+                    crop_id=f"crop_{index:03d}",
+                    crop_path=str(crop),
+                    status=StageStatus.NEEDS_REVIEW,
+                    raw_ocr=f"<{index + 1}.> OCR",
+                )
+                store._record_path(record.record_id).write_text(json.dumps(record.to_dict()), encoding="utf-8")
+            runtime = FactoryWebRuntime(context, service=_FakeService(context, store))
+            register_count = {"calls": 0}
+            original_register_file = runtime._register_file
+
+            def counting_register_file(path: Path, **kwargs) -> str:
+                register_count["calls"] += 1
+                return original_register_file(path, **kwargs)
+
+            runtime._register_file = counting_register_file  # type: ignore[method-assign]
+
+            snapshot = runtime._snapshot()
+
+            self.assertTrue(snapshot["records_compact"])
+            self.assertEqual(len(snapshot["records"]), total)
+            self.assertEqual(snapshot["records"][0]["record_detail_level"], "compact")
+            self.assertTrue(snapshot["records"][0]["crop_url"])
+            self.assertTrue(snapshot["records"][web_server_module.SNAPSHOT_COMPACT_MEDIA_LIMIT]["crop_exists"])
+            self.assertEqual(snapshot["records"][web_server_module.SNAPSHOT_COMPACT_MEDIA_LIMIT]["crop_url"], "")
+            self.assertEqual(register_count["calls"], web_server_module.SNAPSHOT_COMPACT_MEDIA_LIMIT)
+
+            detail = runtime._records_response({"record_ids": ["crop_120"], "detail": ["full"], "media": ["1"]})
+            self.assertEqual(detail["records"][0]["record_detail_level"], "full")
+            self.assertTrue(detail["records"][0]["crop_url"])
 
     def test_snapshot_reuses_page_web_payload_cache_until_boxes_change(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -785,6 +918,21 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                 self.assertIn("APP_VERSION_POLL_MS", app_js)
                 self.assertIn("APP_VERSION_HIDDEN_POLL_MS", app_js)
                 self.assertIn("window.setTimeout(checkAppVersionChanged, delay)", app_js)
+                self.assertIn("/api/staging/continuations/candidates", app_js)
+                self.assertIn("/api/staging/continuations/merge", app_js)
+                self.assertIn("Detector continuidad", app_js)
+                self.assertIn("Detector + fusionar", app_js)
+                self.assertIn("toolbarMergeSuggestedContinuations", app_js)
+                self.assertIn("max_candidates: maxCandidates", app_js)
+                self.assertIn("Math.min(5000, Math.max(500, totalRecords * 2))", app_js)
+                self.assertIn("galeria virtualizada solo afecta lo que se ve en pantalla", app_js)
+                self.assertIn("scan_summary", app_js)
+                self.assertIn("completos descartados", app_js)
+                self.assertIn("pares candidatos", app_js)
+                self.assertIn("Fusionar sugeridas", app_js)
+                self.assertIn("function detectAndMergeContinuations", app_js)
+                self.assertIn("function mergeSuggestedContinuations", app_js)
+                self.assertIn("function groupedContinuationMerges", app_js)
                 self.assertNotIn("records.map(recordCardHtml).join(\"\")", app_js)
                 self.assertNotIn("<select id=\"recordJump\">", app_js)
                 self.assertNotIn("window.setTimeout(checkAppVersionChanged, 5000)", app_js)
@@ -918,6 +1066,108 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                     ],
                 )
                 self.assertIn(("scale_to_zero",), endpoint.calls)
+            finally:
+                runtime.stop()
+
+    def test_web_runtime_exposes_factory_automation_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            crop_1 = root / "crop_001.png"
+            crop_2 = root / "crop_002.png"
+            crop_1.write_bytes(b"png")
+            crop_2.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            for record_id, crop in [("crop_001", crop_1), ("crop_002", crop_2)]:
+                store.upsert_record(
+                    StagingProblemRecord(
+                        record_id=record_id,
+                        crop_id=record_id,
+                        crop_path=str(crop),
+                        status=StageStatus.NEEDS_REVIEW,
+                    )
+                )
+            service = _FakeService(context, store)
+            runtime = FactoryWebRuntime(context, service=service)
+            try:
+                base = runtime.start()
+                started = _post_json(
+                    base,
+                    "api/automation/queue",
+                    {"steps": "ocr", "scope": "all", "provider": "local", "concurrency": 2},
+                )
+                self.assertEqual(started["schema_version"], "pdf_factory_automation_job_v1")
+                self.assertTrue(started["running"])
+                job_id = started["job_id"]
+
+                status = {}
+                for _ in range(80):
+                    status = _get_json(base, f"api/automation/status?job_id={job_id}")
+                    if not status["current_job"]["running"]:
+                        break
+                    time.sleep(0.05)
+
+                current = status["current_job"]
+                self.assertEqual(current["status"], "done")
+                self.assertEqual(current["total"], 2)
+                self.assertEqual(current["ok"], 2)
+                self.assertEqual(current["failed"], 0)
+                self.assertEqual(len(current["child_jobs"]), 2)
+                self.assertIn(("crop_001", [], True, False), service.phase_calls)
+                self.assertIn(("crop_001", [], False, True), service.phase_calls)
+                self.assertIn(("crop_002", [], True, False), service.phase_calls)
+                self.assertIn(("crop_002", [], False, True), service.phase_calls)
+            finally:
+                runtime.stop()
+
+    def test_web_runtime_automation_retry_errors_selects_error_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            crop_1 = root / "crop_001.png"
+            crop_2 = root / "crop_002.png"
+            crop_1.write_bytes(b"png")
+            crop_2.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(crop_1),
+                    status=StageStatus.ERROR,
+                    errors=["ocr:error"],
+                )
+            )
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_002",
+                    crop_id="crop_002",
+                    crop_path=str(crop_2),
+                    status=StageStatus.NEEDS_REVIEW,
+                )
+            )
+            service = _FakeService(context, store)
+            runtime = FactoryWebRuntime(context, service=service)
+            try:
+                base = runtime.start()
+                started = _post_json(
+                    base,
+                    "api/automation/retry-errors",
+                    {"provider": "local", "concurrency": 1},
+                )
+                job_id = started["job_id"]
+                status = {}
+                for _ in range(80):
+                    status = _get_json(base, f"api/automation/status?job_id={job_id}")
+                    if not status["current_job"]["running"]:
+                        break
+                    time.sleep(0.05)
+
+                current = status["current_job"]
+                self.assertEqual(current["status"], "done")
+                self.assertEqual(current["total"], 1)
+                self.assertIn(("crop_001", [], True, False), service.phase_calls)
+                self.assertNotIn(("crop_002", [], True, False), service.phase_calls)
             finally:
                 runtime.stop()
 
@@ -1790,7 +2040,7 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                 base = runtime.start()
                 snapshot = _post_json(base, "api/pages/detect", {"pages": "1", "dpi": 150, "confidence": 0.4})
                 self.assertEqual(snapshot["pages"][0]["record_id"], "page_001")
-                self.assertEqual(service.calls[-2:], [("resolve_page_selection", "1"), ("detect_pdf_pages", [1], 150, 0.4, "", False)])
+                self.assertEqual(service.calls[-2:], [("resolve_page_selection", "1"), ("detect_pdf_pages", [1], 150, 0.4, "", False, True)])
 
                 compact_replacing = _post_json(
                     base,
@@ -1803,7 +2053,7 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                     },
                 )
                 self.assertEqual(compact_replacing["schema_version"], "pdf_factory_web_pages_detected_v1")
-                self.assertEqual(service.calls[-2:], [("resolve_page_selection", "1"), ("detect_pdf_pages", [1], 300, 0.25, "", True)])
+                self.assertEqual(service.calls[-2:], [("resolve_page_selection", "1"), ("detect_pdf_pages", [1], 300, 0.25, "", True, True)])
 
                 detected_compact = _post_json(
                     base,
@@ -1858,6 +2108,36 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                 self.assertEqual(compact_page_without_summary["page"]["boxes"], [[12, 24, 68, 90]])
                 self.assertNotIn("summary", compact_page_without_summary)
                 self.assertNotIn("timeline", compact_page_without_summary)
+
+                compact_page_with_auxiliary_boxes = _post_json(
+                    base,
+                    "api/pages/boxes",
+                    {
+                        "record_id": "page_001",
+                        "boxes": [[12, 24, 68, 90]],
+                        "detector_detections": [
+                            {"bbox_px": [12, 24, 38, 40], "class_name": "problem_number"},
+                            {"bbox_px": [20, 70, 90, 86], "class_name": "answer_block"},
+                        ],
+                        "layout_mode": "una_columna",
+                        "reviewed": True,
+                        "compact": True,
+                        "include_summary": False,
+                    },
+                )
+                self.assertEqual(compact_page_with_auxiliary_boxes["schema_version"], "pdf_factory_web_page_saved_v1")
+                self.assertEqual(len(compact_page_with_auxiliary_boxes["page"]["detector_detections"]), 2)
+                self.assertEqual(compact_page_with_auxiliary_boxes["page"]["detector_detections"][0]["class_name"], "problem_number")
+                self.assertEqual(compact_page_with_auxiliary_boxes["page"]["detector_detections"][1]["class_name"], "answer_block")
+
+                training_capture = _post_json(
+                    base,
+                    "api/pages/training-capture",
+                    {"record_ids": ["page_001"], "reviewed_only": True},
+                )
+                self.assertEqual(training_capture["schema_version"], "pdf_factory_web_problem_detector_training_capture_v1")
+                self.assertEqual(training_capture["saved"], 1)
+                self.assertIn(("capture_problem_detector_training_pages", ["page_001"], True), service.calls)
 
                 invalidated_record = store.get_record("crop_001")
                 assert invalidated_record is not None
@@ -1921,6 +2201,7 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                 self.assertIn("summary", staging_compact)
                 self.assertIn("timeline", staging_compact)
                 self.assertNotIn("pages", staging_compact)
+
                 self.assertNotIn("models", staging_compact)
                 _post_json(base, "api/ocr/run", {"provider": "local", "curso": "ALG", "tema": "EC", "start_n": 3, "limit": 1, "record_id": "crop_001"})
                 ocr_compact = _post_json(
@@ -2013,7 +2294,7 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                         "defer_golden_sync": True,
                     },
                 )
-                self.assertEqual(review_compact["schema_version"], "pdf_factory_web_record_saved_v1")
+                self.assertEqual(review_compact["schema_version"], "pdf_factory_web_review_saved_v1")
                 self.assertEqual(review_compact["record"]["record_id"], "crop_001")
                 self.assertEqual(review_compact["record"]["normalized"]["numero"], "8")
                 self.assertEqual(review_compact["record"]["golden_sync"]["status"], "deferred")
@@ -2040,6 +2321,58 @@ class InstanceFactoryWebServerTests(unittest.TestCase):
                 self.assertEqual(detail["promotion_candidate"]["write_operations"], [])
             finally:
                 runtime.stop()
+
+    def test_page_detection_job_exposes_compact_result_for_browser_reconnect(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pdf = root / "book.pdf"
+            pdf.write_bytes(b"%PDF-1.4 placeholder")
+            page_image = root / "page.png"
+            page_image.write_bytes(b"png")
+            context = InstancePipelineContext(book_code="ALG01", instance_type="S01", pdf_path=str(pdf))
+            store = InstanceStagingStore(context, root=root / "staging")
+            service = _FakeService(context, store)
+            service.pages = [
+                ProblemPageRecord(
+                    record_id="page_001",
+                    pdf_path=str(pdf),
+                    page_number=1,
+                    image_path=page_image,
+                    boxes=[(1, 2, 30, 40)],
+                    reviewed=False,
+                )
+            ]
+            runtime = FactoryWebRuntime(context, service=service)
+
+            started = runtime._dispatch_api(
+                "POST",
+                "/api/pages/detect/jobs/start",
+                {},
+                {
+                    "pages": "1",
+                    "dpi": 150,
+                    "confidence": 0.4,
+                    "compact": True,
+                    "include_summary": False,
+                },
+            )
+            self.assertTrue(started["running"])
+            job_id = started["job_id"]
+
+            status = {}
+            for _ in range(30):
+                status = runtime._dispatch_api("GET", "/api/pages/detect/jobs/status", {"job_id": [job_id]}, {})
+                if not status.get("running"):
+                    break
+                time.sleep(0.05)
+
+            self.assertEqual(status["status"], "done")
+            self.assertEqual(status["result"]["schema_version"], "pdf_factory_web_pages_detected_v1")
+            self.assertEqual(status["result"]["pages"][0]["record_id"], "page_001")
+            self.assertEqual(
+                service.calls[-2:],
+                [("resolve_page_selection", "1"), ("detect_pdf_pages", [1], 150, 0.4, "", False, True)],
+            )
 
     def test_web_runtime_reuses_snapshot_and_summary_until_files_change(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,0 +1,15 @@
+{
+  "schema_version": "hf_geometry_ocr_agent_merge_v2",
+  "created_at": "2026-06-22T04:25:32.001Z",
+  "base_model": "Qwen/Qwen2.5-VL-3B-Instruct",
+  "adapter_model_repo_id": "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-agent-nostradamus-wk01-17-lora-v2",
+  "merged_model_repo_id": "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-agent-nostradamus-wk01-17-merged-v2",
+  "hf_merge_job_id": "6a38b93b953ed90bfb947c0b",
+  "hf_merge_job_url": "https://huggingface.co/jobs/Jhoan12/6a38b93b953ed90bfb947c0b",
+  "endpoint_name": "math-ocr-geometry-agent-nostradamus-wk01-17-v2",
+  "endpoint_repository": "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-agent-nostradamus-wk01-17-merged-v2",
+  "next_steps": [
+    "Create endpoint after merge completes: python tools/create_ocr_reasoning_endpoint.py --name math-ocr-geometry-agent-nostradamus-wk01-17-v2 --repository Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-agent-nostradamus-wk01-17-merged-v2 --timeout 180",
+    "Activate endpoint after creation: python tools/activate_trained_ocr_model.py --env-file .env.local --model Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-agent-nostradamus-wk01-17-merged-v2 --endpoint-url <URL_DEL_ENDPOINT>/v1 --endpoint-name math-ocr-geometry-agent-nostradamus-wk01-17-v2"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "dataset_repo_id": "Jhoan12/problem-detector-multiclass-reviewed-pilot-20260625",
+  "model_repo_id": "Jhoan12/pdf-problem-detector-multiclass-pilot-v1",
+  "job_name": "problem_detector_multiclass_pilot_v1",
+  "base_model": "base/pdf_problem_detector_yolov8n_v4_best.pt",
+  "epochs": 30,
+  "batch": 4,
+  "imgsz": 768,
+  "workers": 2,
+  "flavor": "t4-small",
+  "timeout_seconds": 7200,
+  "image": "ultralytics/ultralytics:latest"
+}

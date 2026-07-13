@@ -212,7 +212,7 @@ class TrainingAuditController:
     DEFAULT_OCR_NORMALIZATION_GOLDEN_DIR = DEFAULT_GOLDEN_ROOT / "ocr_normalization_golden_live"
     DEFAULT_PROBLEM_CROPS_LIVE_DIR = DEFAULT_GOLDEN_ROOT / "problem_crops_live"
     DEFAULT_SEGMENT_LIVE_DIR = DEFAULT_GOLDEN_ROOT / "segment_training_live"
-    TRAINED_OCR_VISION_MODEL = "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-agent-angle-policy-merged-v1"
+    TRAINED_OCR_VISION_MODEL = "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-agent-nostradamus-wk01-17-merged-v2"
     DEFAULT_OPENAI_FORMAT_MODEL = TRAINED_OCR_VISION_MODEL
     DEFAULT_HF_FORMAT_MODEL = TRAINED_OCR_VISION_MODEL
 

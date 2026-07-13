@@ -8,6 +8,7 @@ import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from PIL import Image
 
@@ -19,6 +20,8 @@ DEFAULT_MODEL_REPO_ID = "Jhoan12/pdf-problem-detector-yolov8n-v4"
 DEFAULT_PREDICT_ROOT = Path(".cache/transcriptor_runs/pdf_problem_detector_runtime").resolve()
 DEFAULT_PROBLEM_CROPS_LIVE_ROOT = Path(".cache/transcriptor_runs/datasets/problem_crops_live").resolve()
 DEFAULT_LOCAL_MODEL_PATH = Path("models/pdf_problem_detector_yolov8n_v4/weights/best.pt").resolve()
+PROBLEM_CLASS_NAMES = {"problem", "problema", "exercise", "ejercicio", "problem_box"}
+PROBLEM_SUBBOX_CLASS_NAMES = {"problem_number", "numero", "number", "answer_block", "alternatives", "alternativas", "options"}
 
 
 def _hf_hub_download(*args, **kwargs) -> str:
@@ -76,6 +79,96 @@ def sort_boxes_reading_order(boxes: list[tuple[int, int, int, int]], layout_mode
     return sorted(boxes, key=lambda box: (box[1], box[0]))
 
 
+def _class_key(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+
+
+def _box_tuple(raw: object) -> tuple[int, int, int, int] | None:
+    if not isinstance(raw, (list, tuple)) or len(raw) < 4:
+        return None
+    try:
+        x1, y1, x2, y2 = [int(round(float(value))) for value in list(raw)[:4]]
+    except Exception:
+        return None
+    left, right = sorted((x1, x2))
+    top, bottom = sorted((y1, y2))
+    if right - left < 2 or bottom - top < 2:
+        return None
+    return (left, top, right, bottom)
+
+
+def _detection_bbox(detail: dict[str, Any]) -> tuple[int, int, int, int] | None:
+    return _box_tuple(detail.get("bbox_px") or detail.get("xyxy") or [])
+
+
+def _is_problem_class(class_name: object) -> bool:
+    key = _class_key(class_name)
+    return key in PROBLEM_CLASS_NAMES or (key == "0")
+
+
+def _is_problem_subbox_class(class_name: object) -> bool:
+    return _class_key(class_name) in PROBLEM_SUBBOX_CLASS_NAMES
+
+
+def _sort_detection_details(details: list[dict[str, Any]], layout_mode: str = "auto") -> list[dict[str, Any]]:
+    by_box: dict[tuple[int, int, int, int], list[dict[str, Any]]] = {}
+    boxes: list[tuple[int, int, int, int]] = []
+    for detail in details:
+        bbox = _detection_bbox(detail)
+        if bbox is None:
+            continue
+        by_box.setdefault(bbox, []).append(detail)
+        boxes.append(bbox)
+    ordered: list[dict[str, Any]] = []
+    for bbox in sort_boxes_reading_order(boxes, layout_mode):
+        bucket = by_box.get(bbox) or []
+        if bucket:
+            ordered.append(bucket.pop(0))
+    return ordered
+
+
+def _problem_details_from_boxes(boxes: list[tuple[int, int, int, int]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "idx": index,
+            "bbox_px": [int(value) for value in box],
+            "class_name": "problem",
+            "role": "problem",
+            "conf": 1.0,
+            "source": "human_review",
+        }
+        for index, box in enumerate(boxes, start=1)
+    ]
+
+
+def _details_for_problem_boxes(row: "ProblemPageRecord") -> list[dict[str, Any]]:
+    boxes = [tuple(int(value) for value in box[:4]) for box in list(row.boxes or [])]
+    by_bbox: dict[tuple[int, int, int, int], list[dict[str, Any]]] = {}
+    for detail in list(row.box_details or []):
+        if not isinstance(detail, dict):
+            continue
+        bbox = _detection_bbox(detail)
+        if bbox is None:
+            continue
+        by_bbox.setdefault(bbox, []).append(dict(detail))
+
+    resolved: list[dict[str, Any]] = []
+    for index, box in enumerate(boxes, start=1):
+        detail = (by_bbox.get(box) or []).pop(0) if by_bbox.get(box) else {}
+        resolved.append(
+            {
+                **detail,
+                "idx": index,
+                "bbox_px": [int(value) for value in box],
+                "class_name": str(detail.get("class_name") or "problem"),
+                "class_key": _class_key(detail.get("class_name") or "problem"),
+                "role": "problem",
+                "conf": float(detail.get("conf") or 1.0),
+            }
+        )
+    return resolved
+
+
 @dataclass
 class ProblemPageRecord:
     record_id: str
@@ -86,6 +179,8 @@ class ProblemPageRecord:
     detector_source: str = "manual"
     reviewed: bool = False
     layout_mode: str = "auto"
+    box_details: list[dict[str, Any]] = field(default_factory=list)
+    detector_detections: list[dict[str, Any]] = field(default_factory=list)
 
 
 class PdfProblemGoldenController:
@@ -96,6 +191,7 @@ class PdfProblemGoldenController:
         self.predict_root.mkdir(parents=True, exist_ok=True)
         self._model = None
         self._model_path = ""
+        self.last_prediction_details: dict[str, Any] = {}
 
     def instance_dir(self, name: str) -> Path:
         return self.golden_root / safe_name(name)
@@ -116,8 +212,20 @@ class PdfProblemGoldenController:
                     detector_source=str(payload.get("detector_source", "manual")),
                     reviewed=bool(payload.get("reviewed", False)),
                     layout_mode=str(payload.get("layout_mode", "auto")),
+                    box_details=[
+                        dict(item)
+                        for item in payload.get("box_details", [])
+                        if isinstance(item, dict)
+                    ],
+                    detector_detections=[
+                        dict(item)
+                        for item in payload.get("detector_detections", [])
+                        if isinstance(item, dict)
+                    ],
                 )
             )
+            if not rows[-1].box_details:
+                rows[-1].box_details = _problem_details_from_boxes(rows[-1].boxes)
         return rows
 
     def load_instance_summary(self, name: str) -> dict[str, int] | None:
@@ -213,11 +321,66 @@ class PdfProblemGoldenController:
             name="predict",
             exist_ok=True,
         )[0]
+        names = getattr(self._model, "names", {}) or getattr(result, "names", {}) or {}
+        result_boxes = getattr(result, "boxes", None)
+        if result_boxes is None:
+            self.last_prediction_details = {
+                "schema_version": "pdf_problem_detector_prediction_v2",
+                "weights": weights,
+                "detections": [],
+                "problem_boxes": [],
+                "ignored_subboxes": [],
+            }
+            return []
+        xyxys = result_boxes.xyxy.tolist()
+        confs = result_boxes.conf.tolist() if getattr(result_boxes, "conf", None) is not None else [1.0] * len(xyxys)
+        classes = result_boxes.cls.tolist() if getattr(result_boxes, "cls", None) is not None else [0] * len(xyxys)
+        detections: list[dict[str, Any]] = []
+        for index, (xyxy, conf, cls_value) in enumerate(zip(xyxys, confs, classes), start=1):
+            class_id = int(cls_value)
+            class_name = str(names.get(class_id, class_id))
+            bbox = _box_tuple([int(round(value)) for value in xyxy])
+            if bbox is None:
+                continue
+            role = "problem" if _is_problem_class(class_name) else ("subbox" if _is_problem_subbox_class(class_name) else "other")
+            detections.append(
+                {
+                    "idx": index,
+                    "bbox_px": [int(value) for value in bbox],
+                    "class_id": class_id,
+                    "class_name": class_name,
+                    "class_key": _class_key(class_name),
+                    "role": role,
+                    "conf": float(conf),
+                }
+            )
+
+        class_keys = {_class_key(item.get("class_name")) for item in detections}
+        model_is_multiclass = bool(class_keys & PROBLEM_SUBBOX_CLASS_NAMES)
+        if model_is_multiclass:
+            problem_details = [item for item in detections if _is_problem_class(item.get("class_name"))]
+        else:
+            problem_details = [
+                {**item, "class_name": "problem", "class_key": "problem", "role": "problem"}
+                for item in detections
+            ]
+        ordered_problem_details = _sort_detection_details(problem_details, layout_mode)
         boxes = [
-            tuple(int(round(value)) for value in xyxy)
-            for xyxy in result.boxes.xyxy.tolist()
+            tuple(int(value) for value in (detail.get("bbox_px") or [])[:4])
+            for detail in ordered_problem_details
+            if _detection_bbox(detail) is not None
         ]
-        return sort_boxes_reading_order(boxes, layout_mode)
+        self.last_prediction_details = {
+            "schema_version": "pdf_problem_detector_prediction_v2",
+            "weights": weights,
+            "model_is_multiclass": model_is_multiclass,
+            "detections": detections,
+            "problem_boxes": ordered_problem_details,
+            "ignored_subboxes": [
+                item for item in detections if _is_problem_subbox_class(item.get("class_name"))
+            ],
+        }
+        return boxes
 
     @staticmethod
     def reorder_boxes(row: ProblemPageRecord) -> None:
@@ -259,13 +422,23 @@ class PdfProblemGoldenController:
             for old in row_crops.glob("*.png"):
                 old.unlink()
             crop_rows = []
+            row.box_details = _details_for_problem_boxes(row)
             with Image.open(row.image_path) as image:
                 for index, box in enumerate(row.boxes, start=1):
+                    box_detail = row.box_details[index - 1] if index - 1 < len(row.box_details) else {}
                     crop_file = compact_id(row.record_id, f"problem_{index:02d}", prefix="pr", max_len=32)
                     crop_path = row_crops / f"{crop_file}.png"
                     crop_path.parent.mkdir(parents=True, exist_ok=True)
                     image.crop(box).save(crop_path, format="PNG")
-                    crop_rows.append({"idx": index, "bbox_px": list(box), "crop_rel": str(crop_path.relative_to(instance)).replace("\\", "/")})
+                    crop_rows.append(
+                        {
+                            "idx": index,
+                            "bbox_px": list(box),
+                            "crop_rel": str(crop_path.relative_to(instance)).replace("\\", "/"),
+                            "class_name": str(box_detail.get("class_name") or "problem"),
+                            "detector_box": dict(box_detail),
+                        }
+                    )
             payload = {
                 "schema_version": "pdf_problem_boxes_source_v1",
                 "record_id": row.record_id,
@@ -274,6 +447,8 @@ class PdfProblemGoldenController:
                 "page_number": row.page_number,
                 "image_rel": str(row.image_path.relative_to(instance)).replace("\\", "/"),
                 "boxes_px": [list(box) for box in row.boxes],
+                "box_details": row.box_details,
+                "detector_detections": list(row.detector_detections or []),
                 "detector_source": row.detector_source,
                 "reviewed": row.reviewed,
                 "layout_mode": row.layout_mode,
@@ -324,13 +499,23 @@ class PdfProblemGoldenController:
             for old in row_crops.glob("*.png"):
                 old.unlink()
             crop_rows = []
+            row.box_details = _details_for_problem_boxes(row)
             with Image.open(row.image_path) as image:
                 for index, box in enumerate(row.boxes, start=1):
+                    box_detail = row.box_details[index - 1] if index - 1 < len(row.box_details) else {}
                     crop_file = compact_id(row.record_id, f"problem_{index:02d}", prefix="pr", max_len=32)
                     crop_path = row_crops / f"{crop_file}.png"
                     crop_path.parent.mkdir(parents=True, exist_ok=True)
                     image.crop(box).save(crop_path, format="PNG")
-                    crop_rows.append({"idx": index, "bbox_px": list(box), "crop_rel": str(crop_path.relative_to(instance)).replace("\\", "/")})
+                    crop_rows.append(
+                        {
+                            "idx": index,
+                            "bbox_px": list(box),
+                            "crop_rel": str(crop_path.relative_to(instance)).replace("\\", "/"),
+                            "class_name": str(box_detail.get("class_name") or "problem"),
+                            "detector_box": dict(box_detail),
+                        }
+                    )
             payload = {
                 "schema_version": "pdf_problem_boxes_source_v1",
                 "record_id": row.record_id,
@@ -339,6 +524,8 @@ class PdfProblemGoldenController:
                 "page_number": row.page_number,
                 "image_rel": str(row.image_path.relative_to(instance)).replace("\\", "/"),
                 "boxes_px": [list(box) for box in row.boxes],
+                "box_details": row.box_details,
+                "detector_detections": list(row.detector_detections or []),
                 "detector_source": row.detector_source,
                 "reviewed": row.reviewed,
                 "layout_mode": row.layout_mode,
@@ -381,13 +568,15 @@ class PdfProblemGoldenController:
         rows: list[ProblemPageRecord],
         *,
         return_crop_ids: bool = False,
+        persist_source_instance: bool = True,
         session_path: Path | None = None,
         book_code: str = "",
         instance_type: str = "",
         project_name: str = "",
         pdf_path: str = "",
     ):
-        instance = self.save_instance(name, rows)
+        if persist_source_instance:
+            self.save_instance(name, rows)
         target = DEFAULT_PROBLEM_CROPS_LIVE_ROOT
         records_dir = target / "records"
         images_dir = target / "images"
@@ -406,8 +595,11 @@ class PdfProblemGoldenController:
             return (page_number, str(row.record_id or ""))
 
         for row in sorted(rows or [], key=page_sort_key):
+            row.box_details = _details_for_problem_boxes(row)
             with Image.open(row.image_path) as image:
                 for index, box in enumerate(row.boxes, start=1):
+                    box_detail = row.box_details[index - 1] if index - 1 < len(row.box_details) else {}
+                    bbox_px = [int(value) for value in box]
                     source_order += 1
                     crop_id = compact_id(source_prefix, row.record_id, f"problem_{index:02d}", prefix="crop", max_len=72)
                     session_source_label = compact_id(source_prefix, row.record_id, f"problem_{index:02d}", prefix="problem", max_len=62)
@@ -415,7 +607,6 @@ class PdfProblemGoldenController:
                     ordered_crop_ids.append(crop_id)
                     crop_path = images_dir / f"{crop_id}.png"
                     crop_path.parent.mkdir(parents=True, exist_ok=True)
-                    image.crop(box).save(crop_path, format="PNG")
                     record_path = records_dir / f"{crop_id}.json"
                     previous: dict = {}
                     if record_path.exists():
@@ -423,6 +614,15 @@ class PdfProblemGoldenController:
                             previous = json.loads(record_path.read_text(encoding="utf-8"))
                         except Exception:
                             previous = {}
+                    previous_bbox = [int(value) for value in list(previous.get("bbox_px") or [])[:4]]
+                    crop_unchanged = (
+                        crop_path.exists()
+                        and previous_bbox == bbox_px
+                        and str(previous.get("source_record_id") or "") == str(row.record_id or "")
+                        and str(previous.get("source_page_number") or "") == str(row.page_number or "")
+                    )
+                    if not crop_unchanged:
+                        image.crop(tuple(box)).save(crop_path, format="PNG", compress_level=1)
                     payload = {
                         "schema_version": "problem_crop_live_v1",
                         "crop_id": crop_id,
@@ -442,7 +642,9 @@ class PdfProblemGoldenController:
                         "box_index": index,
                         "page_problem_index": index,
                         "problem_index": source_order,
-                        "bbox_px": list(box),
+                        "bbox_px": bbox_px,
+                        "box_class_name": str(box_detail.get("class_name") or "problem"),
+                        "detector_box": dict(box_detail),
                         "crop_image_rel": str(crop_path.relative_to(target)).replace("\\", "/"),
                         "layout_mode": row.layout_mode,
                         "ocr_status": previous.get("ocr_status") or "pending_ocr",

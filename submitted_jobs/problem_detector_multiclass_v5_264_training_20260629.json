@@ -1,0 +1,20 @@
+{
+  "schema_version": "problem_detector_multiclass_training_job_v1",
+  "created_at": "2026-06-29T00:16:00-05:00",
+  "job_id": "6a42002681727949c74c507b",
+  "dataset_local_path": "E:/Github/Auditor-IA/.cache/transcriptor_runs/datasets/problem_detector_multiclass_reviewed_20260629_001321",
+  "dataset_repo_id": "Jhoan12/problem-detector-multiclass-reviewed-264-v5-20260629",
+  "model_repo_id": "Jhoan12/pdf-problem-detector-multiclass-v5-264",
+  "config_path": "submitted_jobs/problem_detector_multiclass_v5_264_config.json",
+  "base_model": "base/pdf_problem_detector_multiclass_julio_v4_258_best.pt",
+  "epochs": 45,
+  "batch": 4,
+  "imgsz": 768,
+  "flavor": "t4-small",
+  "timeout_seconds": 10800,
+  "notes": [
+    "Dataset incremental: v4 258 muestras + 6 paginas nuevas desde problem_detector_corrections.",
+    "Entrena YOLO multiclass: problem, problem_number, answer_block.",
+    "Al terminar, descargar best.pt y activar en la app como PDF_PROBLEM_MODEL."
+  ]
+}

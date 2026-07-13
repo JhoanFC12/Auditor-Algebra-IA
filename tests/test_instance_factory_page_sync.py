@@ -3,6 +3,8 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -19,6 +21,8 @@ class _FakeGolden:
     def __init__(self, rows: list[ProblemPageRecord]) -> None:
         self.rows = list(rows)
         self.upserted: list[ProblemPageRecord] = []
+        self.predict_calls: list[Path] = []
+        self.last_prediction_details: dict = {}
 
     def load_instance(self, _name: str) -> list[ProblemPageRecord]:
         return list(self.rows)
@@ -38,8 +42,106 @@ class _FakeGolden:
         self.rows = [row for row in self.rows if str(row.record_id) != str(record_id)]
         return list(self.rows)
 
+    def add_rendered_page(self, _name: str, *, pdf_path: Path, page_number: int, rendered_path: Path) -> ProblemPageRecord:
+        return ProblemPageRecord(
+            f"p{page_number:04d}",
+            str(pdf_path),
+            page_number,
+            rendered_path,
+            [],
+            reviewed=False,
+        )
+
+    def predict_boxes(self, image_path: Path, **_kwargs) -> list[tuple[int, int, int, int]]:
+        self.predict_calls.append(Path(image_path))
+        self.last_prediction_details = {
+            "problem_boxes": [{"bbox_px": [10, 10, 70, 70], "class_name": "problem", "class_key": "problem"}],
+            "detections": [{"bbox_px": [10, 10, 70, 70], "class_name": "problem", "class_key": "problem"}],
+        }
+        return [(10, 10, 70, 70)]
+
 
 class InstanceFactoryPageSyncTests(unittest.TestCase):
+    def test_detect_pdf_pages_preserves_reviewed_pages_and_only_predicts_pending(self) -> None:
+        import fitz
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pdf = root / "book.pdf"
+            document = fitz.open()
+            document.new_page()
+            document.new_page()
+            document.save(pdf)
+            document.close()
+            reviewed_image = root / "reviewed.png"
+            Image.new("RGB", (80, 80), "white").save(reviewed_image)
+            reviewed = ProblemPageRecord(
+                "reviewed_page",
+                str(pdf),
+                1,
+                reviewed_image,
+                [(1, 2, 60, 70)],
+                reviewed=True,
+            )
+            golden = _FakeGolden([reviewed])
+            context = InstancePipelineContext(book_code="ALG", instance_type="S1", pdf_path=str(pdf))
+            service = InstancePdfPipelineService(
+                context,
+                golden_controller=golden,  # type: ignore[arg-type]
+                staging_store=InstanceStagingStore(context, root=root / "staging"),
+            )
+
+            pages = service.detect_pdf_pages([1, 2], dpi=72)
+
+            first = next(page for page in pages if page.page_number == 1)
+            second = next(page for page in pages if page.page_number == 2)
+            self.assertEqual(first.record_id, "reviewed_page")
+            self.assertEqual(first.boxes, [(1, 2, 60, 70)])
+            self.assertTrue(first.reviewed)
+            self.assertFalse(second.reviewed)
+            self.assertEqual(len(golden.predict_calls), 1)
+            self.assertEqual(getattr(service, "_last_pages_detect_skipped_reviewed_pages"), [1])
+
+    def test_multiclass_detector_returns_only_problem_boxes_and_keeps_subboxes(self) -> None:
+        class _Array(list):
+            def tolist(self):
+                return list(self)
+
+        class _FakeModel:
+            names = {0: "problem", 1: "problem_number", 2: "answer_block"}
+
+            def predict(self, **_kwargs):
+                return [
+                    SimpleNamespace(
+                        boxes=SimpleNamespace(
+                            xyxy=_Array([[10, 20, 200, 180], [12, 22, 80, 44], [20, 140, 190, 176]]),
+                            conf=_Array([0.91, 0.88, 0.86]),
+                            cls=_Array([0, 1, 2]),
+                        )
+                    )
+                ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            image = Path(tmp) / "page.png"
+            Image.new("RGB", (240, 220), "white").save(image)
+            controller = PdfProblemGoldenController(golden_root=Path(tmp) / "golden")
+            controller._resolve_detector_weights = lambda _model="": "fake.pt"  # type: ignore[method-assign]
+            with patch(
+                "modulos.modulo13_laboratorio_pdf_segmentacion.controlador_laboratorio_pdf._load_yolo_model",
+                return_value=_FakeModel(),
+            ):
+                boxes = controller.predict_boxes(image, confidence=0.2)
+
+            self.assertEqual(boxes, [(10, 20, 200, 180)])
+            details = controller.last_prediction_details
+            self.assertTrue(details["model_is_multiclass"])
+            self.assertEqual(len(details["detections"]), 3)
+            self.assertEqual([row["class_name"] for row in details["problem_boxes"]], ["problem"])
+            self.assertEqual(
+                sorted(row["class_name"] for row in details["ignored_subboxes"]),
+                ["answer_block", "problem_number"],
+            )
+
     def test_service_exposes_one_record_per_pdf_page(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             image = Path(tmp) / "page.png"

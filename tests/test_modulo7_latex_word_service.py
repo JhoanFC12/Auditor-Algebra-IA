@@ -175,6 +175,33 @@ class LatexWordServiceTests(unittest.TestCase):
         self.assertEqual(payload["options"]["cursos"], ["Geometria"])
         self.assertEqual(payload["options"]["libros"][0]["label"], "LIB | Libro Geo")
 
+    def test_problem_payload_includes_image_urls_for_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / "img-5.png"
+            image.write_bytes(b"png")
+            service = LatexWordService(
+                controller=None,
+                file_url_resolver=lambda path: f"/file/{Path(path).name}",
+            )
+
+            payload = service._problem_payload(
+                {
+                    "id": 5,
+                    "numero_original": 5,
+                    "curso": "Geometria",
+                    "tema": "Circunferencias",
+                    "respuesta_correcta": "A",
+                    "imagenes": [str(image)],
+                    "ruta_carpeta": str(root),
+                    "enunciado_latex": r"\item[\textbf{5.}] Calcule $x$. [[Imagen=img-5]]",
+                }
+            )
+
+            self.assertEqual(payload["imagenes_count"], 1)
+            self.assertEqual(payload["imagenes"][0]["name"], "img-5.png")
+            self.assertEqual(payload["imagenes"][0]["url"], "/file/img-5.png")
+
     def test_converts_db_problems_with_fake_latex_to_word_script(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

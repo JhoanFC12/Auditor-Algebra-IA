@@ -1,0 +1,952 @@
+{
+  "generated_at": "2026-07-06T14:12:55.527429+00:00",
+  "auditor_root": "E:\\Github\\Auditor-IA",
+  "scan_math_db_root": "E:\\Github\\MathContentStudio\\scan-math-db",
+  "scan_math_db_exists": true,
+  "scan_math_required_files": [
+    {
+      "path": "app/main.py",
+      "exists": true
+    },
+    {
+      "path": "app/api/studio.py",
+      "exists": true
+    },
+    {
+      "path": "app/api/studio_factory.py",
+      "exists": true
+    },
+    {
+      "path": "app/api/health.py",
+      "exists": true
+    },
+    {
+      "path": "app/math_bank.py",
+      "exists": true
+    },
+    {
+      "path": "app/core/config.py",
+      "exists": true
+    },
+    {
+      "path": "app/factory_errors.py",
+      "exists": true
+    },
+    {
+      "path": "app/factory_bootstrap.py",
+      "exists": true
+    },
+    {
+      "path": "app/factory_storage.py",
+      "exists": true
+    },
+    {
+      "path": "app/web/studio-login.html",
+      "exists": true
+    },
+    {
+      "path": "app/web/studio-factory.html",
+      "exists": true
+    },
+    {
+      "path": "app/web/studio-dashboard.html",
+      "exists": true
+    },
+    {
+      "path": "app/web/studio-instances.html",
+      "exists": true
+    },
+    {
+      "path": "app/web/studio-problems.html",
+      "exists": true
+    },
+    {
+      "path": "app/web/studio-pdf-open.html",
+      "exists": true
+    },
+    {
+      "path": "app/web/studio-pdf-viewer.html",
+      "exists": true
+    }
+  ],
+  "auditor_required_files": [
+    {
+      "path": "modulos/instance_factory/library_web_server.py",
+      "exists": true
+    },
+    {
+      "path": "modulos/instance_factory/web_server.py",
+      "exists": true
+    },
+    {
+      "path": "modulos/instance_factory/pipeline.py",
+      "exists": true
+    },
+    {
+      "path": "modulos/instance_factory/staging.py",
+      "exists": true
+    },
+    {
+      "path": "modulos/instance_factory/server_jobs.py",
+      "exists": true
+    },
+    {
+      "path": "modulos/instance_factory/server_storage.py",
+      "exists": true
+    },
+    {
+      "path": "modulos/instance_factory/model_inventory.py",
+      "exists": true
+    },
+    {
+      "path": "modulos/instance_factory/hf_endpoint_manager.py",
+      "exists": true
+    },
+    {
+      "path": "modulos/instance_factory/web/app.js",
+      "exists": true
+    },
+    {
+      "path": "modulos/instance_factory/web/styles.css",
+      "exists": true
+    }
+  ],
+  "scan_math_routes": [
+    {
+      "method": "GET",
+      "path": "/",
+      "file": "app/main.py",
+      "line": 100
+    },
+    {
+      "method": "GET",
+      "path": "/studio",
+      "file": "app/main.py",
+      "line": 115
+    },
+    {
+      "method": "GET",
+      "path": "/studio/",
+      "file": "app/main.py",
+      "line": 116
+    },
+    {
+      "method": "GET",
+      "path": "/aula",
+      "file": "app/main.py",
+      "line": 121
+    },
+    {
+      "method": "GET",
+      "path": "/aula/",
+      "file": "app/main.py",
+      "line": 122
+    },
+    {
+      "method": "GET",
+      "path": "/studio/books",
+      "file": "app/api/studio.py",
+      "line": 183
+    },
+    {
+      "method": "GET",
+      "path": "/studio/books/{book_id}/cover",
+      "file": "app/api/studio.py",
+      "line": 200
+    },
+    {
+      "method": "GET",
+      "path": "/studio/books/{book_id}/pdf",
+      "file": "app/api/studio.py",
+      "line": 219
+    },
+    {
+      "method": "POST",
+      "path": "/studio/books/{book_id}/pdf-link",
+      "file": "app/api/studio.py",
+      "line": 247
+    },
+    {
+      "method": "GET",
+      "path": "/studio/books/{book_id}/pdf-native",
+      "file": "app/api/studio.py",
+      "line": 271
+    },
+    {
+      "method": "GET",
+      "path": "/studio/books/{book_id}/instances",
+      "file": "app/api/studio.py",
+      "line": 296
+    },
+    {
+      "method": "PATCH",
+      "path": "/studio/books/{book_id}",
+      "file": "app/api/studio.py",
+      "line": 318
+    },
+    {
+      "method": "GET",
+      "path": "/studio/instances/{instance_id}/problems",
+      "file": "app/api/studio.py",
+      "line": 333
+    },
+    {
+      "method": "POST",
+      "path": "/studio/instances/{instance_id}/problems",
+      "file": "app/api/studio.py",
+      "line": 355
+    },
+    {
+      "method": "GET",
+      "path": "/studio/collaborators",
+      "file": "app/api/studio.py",
+      "line": 376
+    },
+    {
+      "method": "POST",
+      "path": "/studio/collaborators",
+      "file": "app/api/studio.py",
+      "line": 384
+    },
+    {
+      "method": "GET",
+      "path": "/studio/assignments",
+      "file": "app/api/studio.py",
+      "line": 418
+    },
+    {
+      "method": "POST",
+      "path": "/studio/assignments",
+      "file": "app/api/studio.py",
+      "line": 426
+    },
+    {
+      "method": "DELETE",
+      "path": "/studio/assignments/{assignment_id}",
+      "file": "app/api/studio.py",
+      "line": 452
+    },
+    {
+      "method": "PATCH",
+      "path": "/studio/problems/{problem_id}",
+      "file": "app/api/studio.py",
+      "line": 465
+    },
+    {
+      "method": "GET",
+      "path": "/studio/factory/bootstrap",
+      "file": "app/api/studio_factory.py",
+      "line": 53
+    },
+    {
+      "method": "GET",
+      "path": "/studio/factory/books",
+      "file": "app/api/studio_factory.py",
+      "line": 71
+    },
+    {
+      "method": "GET",
+      "path": "/studio/factory/books/{book_id}/instances",
+      "file": "app/api/studio_factory.py",
+      "line": 109
+    },
+    {
+      "method": "GET",
+      "path": "/studio/factory/instances/{instance_id}/snapshot",
+      "file": "app/api/studio_factory.py",
+      "line": 151
+    },
+    {
+      "method": "POST",
+      "path": "/studio/factory/instances/{instance_id}/jobs",
+      "file": "app/api/studio_factory.py",
+      "line": 186
+    },
+    {
+      "method": "GET",
+      "path": "/studio/factory/jobs/{job_id}",
+      "file": "app/api/studio_factory.py",
+      "line": 225
+    },
+    {
+      "method": "POST",
+      "path": "/studio/factory/records/{record_id}/review",
+      "file": "app/api/studio_factory.py",
+      "line": 253
+    },
+    {
+      "method": "POST",
+      "path": "/studio/factory/word/selection",
+      "file": "app/api/studio_factory.py",
+      "line": 276
+    },
+    {
+      "method": "POST",
+      "path": "/studio/factory/word/generate",
+      "file": "app/api/studio_factory.py",
+      "line": 297
+    },
+    {
+      "method": "GET",
+      "path": "/studio/factory/word/jobs/{job_id}/download",
+      "file": "app/api/studio_factory.py",
+      "line": 318
+    },
+    {
+      "method": "GET",
+      "path": "/health",
+      "file": "app/api/health.py",
+      "line": 316
+    },
+    {
+      "method": "GET",
+      "path": "/runtime/status",
+      "file": "app/api/health.py",
+      "line": 674
+    },
+    {
+      "method": "GET",
+      "path": "/runtime/diagnostics.txt",
+      "file": "app/api/health.py",
+      "line": 679
+    },
+    {
+      "method": "GET",
+      "path": "/runtime/logs/recent.txt",
+      "file": "app/api/health.py",
+      "line": 684
+    }
+  ],
+  "auditor_factory_routes": [
+    {
+      "method": "POST",
+      "path": "/api/automation/cancel",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1269
+    },
+    {
+      "method": "GET",
+      "path": "/api/automation/instances",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1265
+    },
+    {
+      "method": "POST",
+      "path": "/api/automation/queue",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1267
+    },
+    {
+      "method": "POST",
+      "path": "/api/automation/retry-errors",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1268
+    },
+    {
+      "method": "GET",
+      "path": "/api/automation/schema",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1266
+    },
+    {
+      "method": "GET",
+      "path": "/api/automation/status",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1264
+    },
+    {
+      "method": "POST",
+      "path": "/api/endpoint/ocr/resume",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1260
+    },
+    {
+      "method": "POST",
+      "path": "/api/endpoint/ocr/scale-to-zero",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1261
+    },
+    {
+      "method": "GET",
+      "path": "/api/endpoint/ocr/status",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1259
+    },
+    {
+      "method": "GET",
+      "path": "/api/library/book",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1251
+    },
+    {
+      "method": "POST",
+      "path": "/api/library/book/create",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1252
+    },
+    {
+      "method": "GET",
+      "path": "/api/library/bootstrap",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1250
+    },
+    {
+      "method": "POST",
+      "path": "/api/library/cover/paste",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1253
+    },
+    {
+      "method": "POST",
+      "path": "/api/library/instance/create",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1254
+    },
+    {
+      "method": "POST",
+      "path": "/api/library/instance/factory",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1255
+    },
+    {
+      "method": "POST",
+      "path": "/api/ocr/jobs/start",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1263
+    },
+    {
+      "method": "GET",
+      "path": "/api/ocr/jobs/status",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1262
+    },
+    {
+      "method": "POST",
+      "path": "/api/pages/detect/jobs/start",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1258
+    },
+    {
+      "method": "GET",
+      "path": "/api/pages/detect/jobs/status",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1257
+    },
+    {
+      "method": "GET",
+      "path": "/api/training/status",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1256
+    },
+    {
+      "method": "POST",
+      "path": "/api/word/convert",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1272
+    },
+    {
+      "method": "POST",
+      "path": "/api/word/convert-instance",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1274
+    },
+    {
+      "method": "POST",
+      "path": "/api/word/convert-instances",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1275
+    },
+    {
+      "method": "POST",
+      "path": "/api/word/convert-problems",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1276
+    },
+    {
+      "method": "POST",
+      "path": "/api/word/open",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1273
+    },
+    {
+      "method": "GET",
+      "path": "/api/word/problems",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1271
+    },
+    {
+      "method": "GET",
+      "path": "/api/word/sessions",
+      "file": "modulos/instance_factory/library_web_server.py",
+      "line": 1270
+    },
+    {
+      "method": "POST",
+      "path": "/api/app/reload-signal",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3097
+    },
+    {
+      "method": "GET",
+      "path": "/api/app/version",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3096
+    },
+    {
+      "method": "POST",
+      "path": "/api/automation/cancel",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3125
+    },
+    {
+      "method": "POST",
+      "path": "/api/automation/queue",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3123
+    },
+    {
+      "method": "POST",
+      "path": "/api/automation/retry-errors",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3124
+    },
+    {
+      "method": "GET",
+      "path": "/api/automation/schema",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3107
+    },
+    {
+      "method": "GET",
+      "path": "/api/automation/status",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3106
+    },
+    {
+      "method": "GET",
+      "path": "/api/bootstrap",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3093
+    },
+    {
+      "method": "POST",
+      "path": "/api/endpoint/ocr/resume",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3118
+    },
+    {
+      "method": "POST",
+      "path": "/api/endpoint/ocr/scale-to-zero",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3119
+    },
+    {
+      "method": "GET",
+      "path": "/api/endpoint/ocr/status",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3102
+    },
+    {
+      "method": "POST",
+      "path": "/api/normalize",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3137
+    },
+    {
+      "method": "POST",
+      "path": "/api/normalize/ai",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3138
+    },
+    {
+      "method": "POST",
+      "path": "/api/normalize/ai/jobs/start",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3121
+    },
+    {
+      "method": "GET",
+      "path": "/api/normalize/ai/jobs/status",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3104
+    },
+    {
+      "method": "POST",
+      "path": "/api/ocr/jobs/start",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3120
+    },
+    {
+      "method": "GET",
+      "path": "/api/ocr/jobs/status",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3103
+    },
+    {
+      "method": "POST",
+      "path": "/api/ocr/raw",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3134
+    },
+    {
+      "method": "POST",
+      "path": "/api/ocr/run",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3133
+    },
+    {
+      "method": "POST",
+      "path": "/api/ocr/segments/boxes",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3135
+    },
+    {
+      "method": "POST",
+      "path": "/api/pages/boxes",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3127
+    },
+    {
+      "method": "POST",
+      "path": "/api/pages/delete",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3129
+    },
+    {
+      "method": "POST",
+      "path": "/api/pages/detect",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3126
+    },
+    {
+      "method": "POST",
+      "path": "/api/pages/detect/jobs/start",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3122
+    },
+    {
+      "method": "GET",
+      "path": "/api/pages/detect/jobs/status",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3105
+    },
+    {
+      "method": "POST",
+      "path": "/api/pages/training-capture",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3128
+    },
+    {
+      "method": "GET",
+      "path": "/api/pdf/page",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3098
+    },
+    {
+      "method": "GET",
+      "path": "/api/promotion",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3100
+    },
+    {
+      "method": "POST",
+      "path": "/api/promotion/upload",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3101
+    },
+    {
+      "method": "GET",
+      "path": "/api/record",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3099
+    },
+    {
+      "method": "GET",
+      "path": "/api/records",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3095
+    },
+    {
+      "method": "POST",
+      "path": "/api/review/save",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3139
+    },
+    {
+      "method": "POST",
+      "path": "/api/segments/boxes",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3136
+    },
+    {
+      "method": "GET",
+      "path": "/api/staging/continuations/candidates",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3131
+    },
+    {
+      "method": "POST",
+      "path": "/api/staging/continuations/candidates",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3131
+    },
+    {
+      "method": "POST",
+      "path": "/api/staging/continuations/merge",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3132
+    },
+    {
+      "method": "POST",
+      "path": "/api/staging/materialize",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3130
+    },
+    {
+      "method": "GET",
+      "path": "/api/summary",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3094
+    },
+    {
+      "method": "POST",
+      "path": "/api/training/cycle/reset",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3117
+    },
+    {
+      "method": "GET",
+      "path": "/api/training/normalizer/status",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3116
+    },
+    {
+      "method": "GET",
+      "path": "/api/training/status",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3115
+    },
+    {
+      "method": "POST",
+      "path": "/api/word/convert",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3110
+    },
+    {
+      "method": "POST",
+      "path": "/api/word/convert-instance",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3112
+    },
+    {
+      "method": "POST",
+      "path": "/api/word/convert-instances",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3113
+    },
+    {
+      "method": "POST",
+      "path": "/api/word/convert-problems",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3114
+    },
+    {
+      "method": "POST",
+      "path": "/api/word/open",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3111
+    },
+    {
+      "method": "GET",
+      "path": "/api/word/problems",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3109
+    },
+    {
+      "method": "GET",
+      "path": "/api/word/sessions",
+      "file": "modulos/instance_factory/web_server.py",
+      "line": 3108
+    }
+  ],
+  "expected_factory_routes": [
+    {
+      "method": "GET",
+      "path": "/studio/factory/bootstrap",
+      "purpose": "US1 bootstrap",
+      "present": true
+    },
+    {
+      "method": "GET",
+      "path": "/studio/factory/books",
+      "purpose": "US2 library",
+      "present": true
+    },
+    {
+      "method": "GET",
+      "path": "/studio/factory/books/{book_id}/instances",
+      "purpose": "US2 instances",
+      "present": true
+    },
+    {
+      "method": "GET",
+      "path": "/studio/factory/instances/{instance_id}/snapshot",
+      "purpose": "US2 instance snapshot",
+      "present": true
+    },
+    {
+      "method": "POST",
+      "path": "/studio/factory/instances/{instance_id}/jobs",
+      "purpose": "US3 start job",
+      "present": true
+    },
+    {
+      "method": "GET",
+      "path": "/studio/factory/jobs/{job_id}",
+      "purpose": "US3 job status",
+      "present": true
+    },
+    {
+      "method": "POST",
+      "path": "/studio/factory/records/{record_id}/review",
+      "purpose": "US4 review save",
+      "present": true
+    },
+    {
+      "method": "POST",
+      "path": "/studio/factory/word/selection",
+      "purpose": "US4 word selection",
+      "present": true
+    },
+    {
+      "method": "POST",
+      "path": "/studio/factory/word/generate",
+      "purpose": "US4 word generation",
+      "present": true
+    },
+    {
+      "method": "GET",
+      "path": "/studio/factory/word/jobs/{job_id}/download",
+      "purpose": "US4 word artifact download",
+      "present": true
+    }
+  ],
+  "web_assets": [
+    {
+      "file": "app/web/studio-assignments.html",
+      "references": [
+        "/web/favicon.ico?v=20260404-5",
+        "/web/favicon.ico?v=20260404-5",
+        "/web/favicon-jhoan-256.png?v=20260404-5",
+        "/web/styles.css?v=20260404-studio-library-38",
+        "/web/studio-dashboard.html",
+        "/web/common.js?v=20260705-role-router-1",
+        "/web/studio-problems.html?instance=${encodeURIComponent(item.instance_id)}"
+      ],
+      "local_path_refs": []
+    },
+    {
+      "file": "app/web/studio-dashboard.html",
+      "references": [
+        "/web/favicon.ico?v=20260404-5",
+        "/web/favicon.ico?v=20260404-5",
+        "/web/favicon-jhoan-256.png?v=20260404-5",
+        "/web/styles.css?v=20260705-studio-runtime-recovery-1",
+        "/web/studio-factory.html",
+        "/web/studio-assignments.html",
+        "/web/profile.html",
+        "/web/common.js?v=20260705-studio-runtime-recovery-2"
+      ],
+      "local_path_refs": []
+    },
+    {
+      "file": "app/web/studio-factory.html",
+      "references": [
+        "/web/favicon.ico?v=20260404-5",
+        "/web/favicon.ico?v=20260404-5",
+        "/web/favicon-jhoan-256.png?v=20260404-5",
+        "/web/styles.css?v=20260706-studio-factory-2",
+        "/web/studio-dashboard.html",
+        "/web/studio-assignments.html",
+        "#factory-home",
+        "/web/studio-dashboard.html",
+        "/web/landing.html#status",
+        "/web/common.js?v=20260706-studio-factory-2",
+        "/web/studio-factory.js?v=20260706-studio-factory-2"
+      ],
+      "local_path_refs": []
+    },
+    {
+      "file": "app/web/studio-instances.html",
+      "references": [
+        "/web/favicon.ico?v=20260404-5",
+        "/web/favicon.ico?v=20260404-5",
+        "/web/favicon-jhoan-256.png?v=20260404-5",
+        "/web/styles.css?v=20260705-studio-runtime-recovery-2",
+        "/web/studio-dashboard.html",
+        "/web/common.js?v=20260705-studio-runtime-recovery-2"
+      ],
+      "local_path_refs": []
+    },
+    {
+      "file": "app/web/studio-login.html",
+      "references": [
+        "/web/favicon.ico?v=20260404-5",
+        "/web/favicon.ico?v=20260404-5",
+        "/web/favicon-jhoan-256.png?v=20260404-5",
+        "/web/styles.css?v=20260404-studio-auth-7",
+        "/web/common.js?v=20260705-role-router-1"
+      ],
+      "local_path_refs": []
+    },
+    {
+      "file": "app/web/studio-pdf-open.html",
+      "references": [
+        "/web/favicon.ico?v=20260404-5",
+        "/web/favicon.ico?v=20260404-5",
+        "/web/favicon-jhoan-256.png?v=20260404-5",
+        "/web/styles.css?v=20260404-studio-library-35",
+        "/web/common.js?v=20260705-role-router-1"
+      ],
+      "local_path_refs": []
+    },
+    {
+      "file": "app/web/studio-pdf-viewer.html",
+      "references": [
+        "/web/favicon.ico?v=20260404-5",
+        "/web/favicon.ico?v=20260404-5",
+        "/web/favicon-jhoan-256.png?v=20260404-5",
+        "/web/styles.css?v=20260404-studio-library-35",
+        "/web/studio-dashboard.html",
+        "/web/common.js?v=20260705-role-router-1"
+      ],
+      "local_path_refs": []
+    },
+    {
+      "file": "app/web/studio-problems.html",
+      "references": [
+        "/web/favicon.ico?v=20260404-5",
+        "/web/favicon.ico?v=20260404-5",
+        "/web/favicon-jhoan-256.png?v=20260404-5",
+        "/web/styles.css?v=20260705-studio-runtime-recovery-2",
+        "/web/studio-dashboard.html",
+        "/web/common.js?v=20260705-studio-runtime-recovery-2"
+      ],
+      "local_path_refs": []
+    }
+  ],
+  "summary": {
+    "scan_math_required_missing": 0,
+    "auditor_required_missing": 0,
+    "scan_math_route_count": 34,
+    "auditor_factory_route_count": 75,
+    "expected_factory_routes_present": 10,
+    "expected_factory_routes_missing": 0,
+    "studio_web_files": 8,
+    "studio_web_files_with_local_paths": 0,
+    "scan_math_db_exists": true
+  },
+  "next_actions": [
+    "Proceed to Studio shell replacement and contract tests."
+  ]
+}

@@ -1,0 +1,588 @@
+{
+  "generated_at": "2026-07-06T07:50:02.638979+00:00",
+  "profile": "local_mirror",
+  "database": {
+    "profile": "local_mirror",
+    "host": "127.0.0.1",
+    "port": "5432",
+    "db_name": "mathcontentstudio_local_mirror",
+    "user": "postgres",
+    "sslmode": "disable"
+  },
+  "file_checks_enabled": false,
+  "table_counts": {
+    "problemas": 9769,
+    "libros_escaneo": 52,
+    "libro_instancias_escaneo": 518,
+    "libro_archivos_escaneo": 0,
+    "libro_archivos_avance": 0,
+    "libro_secciones_escaneo": 0,
+    "origenes": 43,
+    "problema_origen": 1774
+  },
+  "missing_core_tables": [],
+  "path_columns": [
+    {
+      "table": "instancia_artifacts_locales",
+      "column": "session_path_local",
+      "total_non_empty": 40,
+      "windows_or_unc": 40,
+      "server_absolute": 0,
+      "url": 0,
+      "sampled": 5
+    },
+    {
+      "table": "instancia_artifacts_locales",
+      "column": "pdf_path_local",
+      "total_non_empty": 1,
+      "windows_or_unc": 1,
+      "server_absolute": 0,
+      "url": 0,
+      "sampled": 1
+    },
+    {
+      "table": "libro_artifacts_locales",
+      "column": "session_path_local",
+      "total_non_empty": 1,
+      "windows_or_unc": 1,
+      "server_absolute": 0,
+      "url": 0,
+      "sampled": 1
+    },
+    {
+      "table": "libro_artifacts_locales",
+      "column": "cover_path_local",
+      "total_non_empty": 1,
+      "windows_or_unc": 1,
+      "server_absolute": 0,
+      "url": 0,
+      "sampled": 1
+    },
+    {
+      "table": "libro_instancias_escaneo",
+      "column": "pdf_path",
+      "total_non_empty": 110,
+      "windows_or_unc": 110,
+      "server_absolute": 0,
+      "url": 0,
+      "sampled": 5
+    },
+    {
+      "table": "libro_instancias_escaneo",
+      "column": "session_path",
+      "total_non_empty": 518,
+      "windows_or_unc": 518,
+      "server_absolute": 0,
+      "url": 0,
+      "sampled": 5
+    },
+    {
+      "table": "libros_escaneo",
+      "column": "pdf_path",
+      "total_non_empty": 52,
+      "windows_or_unc": 52,
+      "server_absolute": 0,
+      "url": 0,
+      "sampled": 5
+    },
+    {
+      "table": "libros_escaneo",
+      "column": "session_path",
+      "total_non_empty": 1,
+      "windows_or_unc": 1,
+      "server_absolute": 0,
+      "url": 0,
+      "sampled": 1
+    },
+    {
+      "table": "libros_escaneo",
+      "column": "cover_path",
+      "total_non_empty": 48,
+      "windows_or_unc": 48,
+      "server_absolute": 0,
+      "url": 0,
+      "sampled": 5
+    },
+    {
+      "table": "origenes",
+      "column": "pdf_path",
+      "total_non_empty": 43,
+      "windows_or_unc": 43,
+      "server_absolute": 0,
+      "url": 0,
+      "sampled": 5
+    },
+    {
+      "table": "origenes",
+      "column": "session_path",
+      "total_non_empty": 43,
+      "windows_or_unc": 43,
+      "server_absolute": 0,
+      "url": 0,
+      "sampled": 5
+    },
+    {
+      "table": "problema_pending_changes",
+      "column": "archivo_origen",
+      "total_non_empty": 9786,
+      "windows_or_unc": 5304,
+      "server_absolute": 0,
+      "url": 0,
+      "sampled": 5
+    },
+    {
+      "table": "problemas",
+      "column": "archivo_origen",
+      "total_non_empty": 9765,
+      "windows_or_unc": 5304,
+      "server_absolute": 0,
+      "url": 0,
+      "sampled": 5
+    },
+    {
+      "table": "problemas",
+      "column": "ruta_imagen_solucion",
+      "total_non_empty": 100,
+      "windows_or_unc": 100,
+      "server_absolute": 0,
+      "url": 0,
+      "sampled": 5
+    }
+  ],
+  "path_samples": [
+    {
+      "table": "instancia_artifacts_locales",
+      "column": "session_path_local",
+      "row_ref": "1",
+      "value": "K:\\Banco de Preguntas\\4. TRIGONOMETRIA\\12. Editorial_RODO\\1. Walter_Mori_Valverde\\s1-angulo-trigonometrico-sistemas-de-medicion-angular\\sessions\\S1-Angulo_trigonometrico_y_Sistemas_de_medidas_Angulares-Resueltos.json",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "instancia_artifacts_locales",
+      "column": "session_path_local",
+      "row_ref": "10",
+      "value": "K:\\Banco de Preguntas\\4. TRIGONOMETRIA\\12. Editorial_RODO\\1. Walter_Mori_Valverde\\s5-circunferencia-trigonometrica\\sessions\\propuestos.session.json",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "instancia_artifacts_locales",
+      "column": "session_path_local",
+      "row_ref": "11",
+      "value": "K:\\Banco de Preguntas\\4. TRIGONOMETRIA\\12. Editorial_RODO\\1. Walter_Mori_Valverde\\s6-identidades-trigonometricas\\sessions\\resueltos.session.json",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "instancia_artifacts_locales",
+      "column": "session_path_local",
+      "row_ref": "12",
+      "value": "K:\\Banco de Preguntas\\4. TRIGONOMETRIA\\12. Editorial_RODO\\1. Walter_Mori_Valverde\\s6-identidades-trigonometricas\\sessions\\propuestos.session.json",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "instancia_artifacts_locales",
+      "column": "session_path_local",
+      "row_ref": "13",
+      "value": "K:\\Banco de Preguntas\\4. TRIGONOMETRIA\\12. Editorial_RODO\\1. Walter_Mori_Valverde\\s7-arco-compuesto\\sessions\\resueltos.session.json",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "instancia_artifacts_locales",
+      "column": "pdf_path_local",
+      "row_ref": "1",
+      "value": "K:\\Banco de Preguntas\\4. TRIGONOMETRIA\\12. Editorial_RODO\\1. Walter_Mori_Valverde\\S1-Ángulo_trigonométrico-Sistemas_de_medición_angular.pdf",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "libro_artifacts_locales",
+      "column": "session_path_local",
+      "row_ref": "1",
+      "value": "K:\\Banco de Preguntas\\4. TRIGONOMETRIA\\12. Editorial_RODO\\1. Walter_Mori_Valverde\\S1-Angulo_trigonometrico_y_Sistemas_de_medidas_Angulares.json",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "libro_artifacts_locales",
+      "column": "cover_path_local",
+      "row_ref": "18",
+      "value": "E:\\Github\\Auditor-IA\\.cache\\instance_factory\\library_covers\\mathcontentstudio-local-mirror\\book-22-algebra-matematica-preuniversitaria\\cover.png",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "libro_instancias_escaneo",
+      "column": "pdf_path",
+      "row_ref": "1",
+      "value": "E:\\Banco de Preguntas\\4. TRIGONOMETRIA\\12. Editorial_RODO\\1. Walter_Mori_Valverde\\S1-Ángulo_trigonométrico-Sistemas_de_medición_angular.pdf",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "libro_instancias_escaneo",
+      "column": "pdf_path",
+      "row_ref": "4719",
+      "value": "E:\\Banco de Preguntas\\1. ALGEBRA\\19. Vesalius\\01_ALGEBRA\\01_LEYES DE EXPONENTES I-POTENCIACIÓN\\ALG. (01)TEORIA-DE-EXPONENTES 75-------80.pdf",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "libro_instancias_escaneo",
+      "column": "pdf_path",
+      "row_ref": "4720",
+      "value": "E:\\Banco de Preguntas\\1. ALGEBRA\\19. Vesalius\\01_ALGEBRA\\02_LEYES DE EXPONENTES II-RADICACIÓN\\ALG. (02) RADICALES_81-------86.pdf",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "libro_instancias_escaneo",
+      "column": "pdf_path",
+      "row_ref": "4721",
+      "value": "E:\\Banco de Preguntas\\1. ALGEBRA\\19. Vesalius\\01_ALGEBRA\\03_LEYES DE EXPONENTES III_ECUACIONES EXPONENCIALES Y TRASCENDENTES\\ALG. (03)ECUAC.-EXPONENCIALES 87------92 (1).pdf",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "libro_instancias_escaneo",
+      "column": "pdf_path",
+      "row_ref": "4722",
+      "value": "E:\\Banco de Preguntas\\1. ALGEBRA\\19. Vesalius\\01_ALGEBRA\\04_EXPRESIONES ALGEBRAICAS I-CLASIFICACIÓN Y GRADOS\\ALG. (04) EXPRESIONES-ALGEBRAICAS_93-------98.pdf",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "libro_instancias_escaneo",
+      "column": "session_path",
+      "row_ref": "1",
+      "value": "E:\\Banco de Preguntas\\4. TRIGONOMETRIA\\12. Editorial_RODO\\1. Walter_Mori_Valverde\\s1-angulo-trigonometrico-sistemas-de-medicion-angular\\sessions\\S1-Angulo_trigonometrico_y_Sistemas_de_medidas_Angulares-Resueltos.json",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "libro_instancias_escaneo",
+      "column": "session_path",
+      "row_ref": "1207",
+      "value": "E:\\Banco de Preguntas\\4. TRIGONOMETRIA\\12. Editorial_RODO\\1. Walter_Mori_Valverde\\s5-circunferencia-trigonometrica\\sessions\\resueltos.session.json",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "libro_instancias_escaneo",
+      "column": "session_path",
+      "row_ref": "1208",
+      "value": "E:\\Banco de Preguntas\\4. TRIGONOMETRIA\\12. Editorial_RODO\\1. Walter_Mori_Valverde\\s5-circunferencia-trigonometrica\\sessions\\propuestos.session.json",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "libro_instancias_escaneo",
+      "column": "session_path",
+      "row_ref": "1303",
+      "value": "E:\\Banco de Preguntas\\4. TRIGONOMETRIA\\12. Editorial_RODO\\1. Walter_Mori_Valverde\\s6-identidades-trigonometricas\\sessions\\resueltos.session.json",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "libro_instancias_escaneo",
+      "column": "session_path",
+      "row_ref": "1304",
+      "value": "E:\\Banco de Preguntas\\4. TRIGONOMETRIA\\12. Editorial_RODO\\1. Walter_Mori_Valverde\\s6-identidades-trigonometricas\\sessions\\propuestos.session.json",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "libros_escaneo",
+      "column": "pdf_path",
+      "row_ref": "10",
+      "value": "E:/Github/MathContentStudio/scan-math-db/storage/math_bank_local_mirror/library/s6-identidades-trigonometricas/source.pdf",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "libros_escaneo",
+      "column": "pdf_path",
+      "row_ref": "11",
+      "value": "E:/Github/MathContentStudio/scan-math-db/storage/math_bank_local_mirror/library/s7-arco-compuesto/source.pdf",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "libros_escaneo",
+      "column": "pdf_path",
+      "row_ref": "12",
+      "value": "E:/Github/MathContentStudio/scan-math-db/storage/math_bank_local_mirror/library/s8-arcos-multiples/source.pdf",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "libros_escaneo",
+      "column": "pdf_path",
+      "row_ref": "13",
+      "value": "E:/Github/MathContentStudio/scan-math-db/storage/math_bank_local_mirror/library/s9-transformaciones-trigonometricas/source.pdf",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "libros_escaneo",
+      "column": "pdf_path",
+      "row_ref": "14",
+      "value": "E:/Github/MathContentStudio/scan-math-db/storage/math_bank_local_mirror/library/s10-funciones-trigonometricas/source.pdf",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "libros_escaneo",
+      "column": "session_path",
+      "row_ref": "5",
+      "value": "E:\\Banco de Preguntas\\4. TRIGONOMETRIA\\12. Editorial_RODO\\1. Walter_Mori_Valverde\\S1-Angulo_trigonometrico_y_Sistemas_de_medidas_Angulares.json",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "libros_escaneo",
+      "column": "cover_path",
+      "row_ref": "10",
+      "value": "E:\\Github\\Auditor-IA\\.cache\\instance_factory\\library_covers\\mathcontentstudio-local-mirror\\book-10-s6-identidades-trigonometricas\\cover.png",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "libros_escaneo",
+      "column": "cover_path",
+      "row_ref": "11",
+      "value": "E:\\Github\\Auditor-IA\\.cache\\instance_factory\\library_covers\\mathcontentstudio-local-mirror\\book-11-s7-arco-compuesto\\cover.png",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "libros_escaneo",
+      "column": "cover_path",
+      "row_ref": "12",
+      "value": "E:\\Github\\Auditor-IA\\.cache\\instance_factory\\library_covers\\mathcontentstudio-local-mirror\\book-12-s8-arcos-multiples\\cover.png",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "libros_escaneo",
+      "column": "cover_path",
+      "row_ref": "13",
+      "value": "E:\\Github\\Auditor-IA\\.cache\\instance_factory\\library_covers\\mathcontentstudio-local-mirror\\book-13-s9-transformaciones-trigonometricas\\cover.png",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "libros_escaneo",
+      "column": "cover_path",
+      "row_ref": "14",
+      "value": "E:\\Github\\Auditor-IA\\.cache\\instance_factory\\library_covers\\mathcontentstudio-local-mirror\\book-14-s10-funciones-trigonometricas\\cover.png",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "origenes",
+      "column": "pdf_path",
+      "row_ref": "102",
+      "value": "E:\\Banco de Preguntas\\2. GEOMETRIA\\19. IMPECUS\\José Meza Barcena\\CONSTRUCCIONES EN TRIÁNGULOS.pdf",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "origenes",
+      "column": "pdf_path",
+      "row_ref": "1020",
+      "value": "E:\\Banco de Preguntas\\2. GEOMETRIA\\17. Otras Academias\\ACADEMIA NOSTRADAMUS SEMESTRAL 2022 - I\\ACADEMIA NOSTRADAMUS SEMESTRAL 2022 - I.pdf",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "origenes",
+      "column": "pdf_path",
+      "row_ref": "1050",
+      "value": "E:\\Banco de Preguntas\\2. GEOMETRIA\\17. Otras Academias\\ACADEMIA NOSTRADAMUS SEMESTRAL 2022 - I\\ACADEMIA NOSTRADAMUS SEMESTRAL 2022 - I.pdf",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "origenes",
+      "column": "pdf_path",
+      "row_ref": "1080",
+      "value": "E:\\Banco de Preguntas\\2. GEOMETRIA\\17. Otras Academias\\ACADEMIA NOSTRADAMUS SEMESTRAL 2022 - I\\ACADEMIA NOSTRADAMUS SEMESTRAL 2022 - I.pdf",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "origenes",
+      "column": "pdf_path",
+      "row_ref": "1110",
+      "value": "E:\\Banco de Preguntas\\2. GEOMETRIA\\17. Otras Academias\\ACADEMIA NOSTRADAMUS SEMESTRAL 2022 - I\\ACADEMIA NOSTRADAMUS SEMESTRAL 2022 - I.pdf",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "origenes",
+      "column": "session_path",
+      "row_ref": "102",
+      "value": "E:\\Banco de Preguntas\\2. GEOMETRIA\\19. IMPECUS\\José Meza Barcena\\CONSTRUCCIONES EN TRIÁNGULOS\\construcciones-en-triangulos\\sessions\\problemas_propuestos.session.json",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "origenes",
+      "column": "session_path",
+      "row_ref": "1020",
+      "value": "D:\\Banco de Preguntas\\2. GEOMETRIA\\17. Otras Academias\\ACADEMIA NOSTRADAMUS SEMESTRAL 2022 - I\\sessions\\semana_n_09_-_circunferencia_ii.session.json",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "origenes",
+      "column": "session_path",
+      "row_ref": "1050",
+      "value": "D:\\Banco de Preguntas\\2. GEOMETRIA\\17. Otras Academias\\ACADEMIA NOSTRADAMUS SEMESTRAL 2022 - I\\sessions\\semana_n_10_-_puntos_notables.session.json",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "origenes",
+      "column": "session_path",
+      "row_ref": "1080",
+      "value": "D:\\Banco de Preguntas\\2. GEOMETRIA\\17. Otras Academias\\ACADEMIA NOSTRADAMUS SEMESTRAL 2022 - I\\sessions\\semana_n_11_-_proporcionalidad_de_segmentos.session.json",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "origenes",
+      "column": "session_path",
+      "row_ref": "1110",
+      "value": "E:\\Banco de Preguntas\\2. GEOMETRIA\\17. Otras Academias\\ACADEMIA NOSTRADAMUS SEMESTRAL 2022 - I\\sessions\\semana_n_12_-_semejanza_de_triangulos.session.json",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "problema_pending_changes",
+      "column": "archivo_origen",
+      "row_ref": "(0,1)",
+      "value": "E:\\Banco de Preguntas\\1. ALGEBRA\\19. Vesalius\\01_ALGEBRA\\ALGEBRA_OTROS_PDFS_UNIDOS.pdf",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "problema_pending_changes",
+      "column": "archivo_origen",
+      "row_ref": "(0,2)",
+      "value": "E:\\Banco de Preguntas\\1. ALGEBRA\\19. Vesalius\\01_ALGEBRA\\ALGEBRA_OTROS_PDFS_UNIDOS.pdf",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "problema_pending_changes",
+      "column": "archivo_origen",
+      "row_ref": "(0,3)",
+      "value": "E:\\Banco de Preguntas\\1. ALGEBRA\\19. Vesalius\\01_ALGEBRA\\ALGEBRA_OTROS_PDFS_UNIDOS.pdf",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "problema_pending_changes",
+      "column": "archivo_origen",
+      "row_ref": "(0,4)",
+      "value": "E:\\Banco de Preguntas\\1. ALGEBRA\\19. Vesalius\\01_ALGEBRA\\ALGEBRA_OTROS_PDFS_UNIDOS.pdf",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "problema_pending_changes",
+      "column": "archivo_origen",
+      "row_ref": "(0,5)",
+      "value": "E:\\Banco de Preguntas\\1. ALGEBRA\\19. Vesalius\\01_ALGEBRA\\ALGEBRA_OTROS_PDFS_UNIDOS.pdf",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "problemas",
+      "column": "archivo_origen",
+      "row_ref": "2817",
+      "value": "K:\\Banco de Preguntas\\1. ALGEBRA\\10. Espinoza_Ramos\\ALGEBRA 6 PREUN VOLUMEN 1.pdf",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "problemas",
+      "column": "archivo_origen",
+      "row_ref": "2818",
+      "value": "K:\\Banco de Preguntas\\1. ALGEBRA\\10. Espinoza_Ramos\\ALGEBRA 6 PREUN VOLUMEN 1.pdf",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "problemas",
+      "column": "archivo_origen",
+      "row_ref": "2819",
+      "value": "K:\\Banco de Preguntas\\1. ALGEBRA\\10. Espinoza_Ramos\\ALGEBRA 6 PREUN VOLUMEN 1.pdf",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "problemas",
+      "column": "archivo_origen",
+      "row_ref": "2820",
+      "value": "K:\\Banco de Preguntas\\1. ALGEBRA\\10. Espinoza_Ramos\\ALGEBRA 6 PREUN VOLUMEN 1.pdf",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "problemas",
+      "column": "archivo_origen",
+      "row_ref": "2821",
+      "value": "K:\\Banco de Preguntas\\1. ALGEBRA\\10. Espinoza_Ramos\\ALGEBRA 6 PREUN VOLUMEN 1.pdf",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "problemas",
+      "column": "ruta_imagen_solucion",
+      "row_ref": "204",
+      "value": "K:\\Banco de Preguntas\\4. TRIGONOMETRIA\\12. Editorial_RODO\\1. Walter_Mori_Valverde\\s1-angulo-trigonometrico-sistemas-de-medicion-angular\\solutions\\resueltos\\s1-angulo-trigonometrico-sistemas-de-medicion-angular_resueltos_item1_20260302_235617.png",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "problemas",
+      "column": "ruta_imagen_solucion",
+      "row_ref": "205",
+      "value": "K:\\Banco de Preguntas\\4. TRIGONOMETRIA\\12. Editorial_RODO\\1. Walter_Mori_Valverde\\s1-angulo-trigonometrico-sistemas-de-medicion-angular\\solutions\\resueltos\\s1-angulo-trigonometrico-sistemas-de-medicion-angular_resueltos_item2_20260302_235642.png",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "problemas",
+      "column": "ruta_imagen_solucion",
+      "row_ref": "206",
+      "value": "K:\\Banco de Preguntas\\4. TRIGONOMETRIA\\12. Editorial_RODO\\1. Walter_Mori_Valverde\\s1-angulo-trigonometrico-sistemas-de-medicion-angular\\solutions\\resueltos\\s1-angulo-trigonometrico-sistemas-de-medicion-angular_resueltos_item3_20260302_235658.png",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "problemas",
+      "column": "ruta_imagen_solucion",
+      "row_ref": "207",
+      "value": "K:\\Banco de Preguntas\\4. TRIGONOMETRIA\\12. Editorial_RODO\\1. Walter_Mori_Valverde\\s1-angulo-trigonometrico-sistemas-de-medicion-angular\\solutions\\resueltos\\s1-angulo-trigonometrico-sistemas-de-medicion-angular_resueltos_item4_20260303_003757.png",
+      "category": "windows_drive",
+      "exists_locally": null
+    },
+    {
+      "table": "problemas",
+      "column": "ruta_imagen_solucion",
+      "row_ref": "208",
+      "value": "K:\\Banco de Preguntas\\4. TRIGONOMETRIA\\12. Editorial_RODO\\1. Walter_Mori_Valverde\\s1-angulo-trigonometrico-sistemas-de-medicion-angular\\solutions\\resueltos\\s1-angulo-trigonometrico-sistemas-de-medicion-angular_resueltos_item5_20260303_003816.png",
+      "category": "windows_drive",
+      "exists_locally": null
+    }
+  ],
+  "missing_local_files": [],
+  "warnings": []
+}

@@ -656,7 +656,7 @@ class Launcher(BaseTk):
         self._add_workflow_card(
             self.productive_grid,
             row=1,
-            col=1,
+            col=2,
             title="Avance de libros",
             description="Registra libros y archivos fuente para medir el progreso real de escaneo por problemas.",
             button_text="Abrir modulo",

@@ -1,0 +1,13 @@
+{
+  "dataset_repo_id": "Jhoan12/problem-detector-multiclass-reviewed-200-v3-20260626",
+  "model_repo_id": "Jhoan12/pdf-problem-detector-multiclass-julio-v3-200",
+  "job_name": "problem_detector_multiclass_julio_v3_200",
+  "base_model": "base/pdf_problem_detector_multiclass_julio_v2_best.pt",
+  "epochs": 40,
+  "batch": 4,
+  "imgsz": 768,
+  "workers": 2,
+  "flavor": "t4-small",
+  "timeout_seconds": 7200,
+  "image": "ultralytics/ultralytics:latest"
+}

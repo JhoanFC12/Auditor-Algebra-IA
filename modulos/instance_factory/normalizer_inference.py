@@ -25,8 +25,11 @@ NORMALIZER_SYSTEM_PROMPT = (
     "Usa el formato: \\item[\\textbf{n.}] [[curso=...]] [[tema=...]] "
     "[[Estado=sin_revisar]] [[Clave=...]] enunciado [[Imagen=img-n]] "
     "\u00a3A)...\u00e6B)...\u00e6C)...\u00a3D)...\u00e6\u00e6E)...\u00a3. "
+    "Respeta exactamente los separadores de alternativas \u00a3 y \u00e6; no los cambies por listas A) B) C) D) E). "
     "Usa [[Imagen=img-n]] solo cuando la segmentacion indique grafico o el humano lo haya marcado. "
-    "No describas graficos. Fusiona continuaciones [CONT.] en el problema padre."
+    "No describas graficos. Si el JSON trae continuations o imagen OCR fusionada, integra ese contenido en el problema padre. "
+    "No uses [CONT.] como contrato: puede no existir, no debes pedirlo y nunca debe aparecer en la salida final. "
+    "Si procesas un lote externo, conserva cada separador ----nombre_imagen.png----- antes de su item LaTeX."
 )
 
 MOJIBAKE_RE = re.compile(r"(?:Ã.|Â.|â.|Ð.|�)")
@@ -97,7 +100,7 @@ def _compact_figure(figure: dict[str, Any]) -> dict[str, Any]:
 
 
 def _strip_continuation_marker(value: str) -> str:
-    return re.sub(r"^\s*\[CONT\.?\]\s*", "", str(value or ""), flags=re.IGNORECASE).strip()
+    return re.sub(r"^\s*\[CONT(?:\.\s*|\s+\d+\s*|\s*\.\s*\d+\s*)?\]\s*", "", str(value or ""), flags=re.IGNORECASE).strip()
 
 
 def _record_ocr_text_for_normalizer(record: StagingProblemRecord) -> str:
@@ -159,7 +162,7 @@ def normalizer_input_from_record(
         )
     raw_parts = [str(record.raw_ocr or "").strip()]
     raw_parts.extend(
-        f"[CONT. {index}] {entry['raw_ocr']}".strip()
+        f"Continuacion fusionada {index}: {entry['raw_ocr']}".strip()
         for index, entry in enumerate(continuation_entries, start=1)
         if str(entry.get("raw_ocr") or "").strip()
     )
@@ -201,6 +204,7 @@ def normalizer_input_from_record(
 
 def sanitize_final_latex(value: str) -> str:
     text = _repair_mojibake_text(str(value or "")).strip()
+    text = text.translate(str.maketrans({chr(0x0141): chr(0x00A3), chr(0x0142): chr(0x00A3), chr(0x0106): chr(0x00E6), chr(0x0107): chr(0x00E6)}))
     if text.startswith("```"):
         text = re.sub(r"^```(?:latex|tex|text)?\s*", "", text, flags=re.IGNORECASE).strip()
         text = re.sub(r"\s*```$", "", text).strip()
@@ -208,6 +212,109 @@ def sanitize_final_latex(value: str) -> str:
     if marker > 0:
         text = text[marker:].strip()
     return text
+
+
+_OPTION_LABEL_RE = re.compile(r"(?<![A-Za-z])([A-E])\)")
+_FINAL_OPTION_RE = re.compile(r"(?:\u00a3|\u00e6)[A-E]\)")
+
+
+def _extract_ocr_options(text: str) -> dict[str, str]:
+    matches = list(_OPTION_LABEL_RE.finditer(str(text or "")))
+    if not matches:
+        return {}
+    options: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        label = match.group(1)
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        value = str(text[start:end]).strip()
+        if label in "ABCDE" and value:
+            options[label] = value
+    return options
+
+
+def _text_before_options(text: str) -> str:
+    clean = _strip_continuation_marker(str(text or "")).strip()
+    match = _OPTION_LABEL_RE.search(clean)
+    if match:
+        clean = clean[: match.start()].strip()
+    return clean
+
+
+def _item_number_from_final(final_latex: str) -> str:
+    match = re.search(r"\\item\s*\[\s*\\textbf\{\s*([0-9]{1,4})\s*\.\s*\}\s*\]", str(final_latex or ""))
+    return match.group(1) if match else ""
+
+
+def _insert_before_options_or_end(final_latex: str, value: str) -> str:
+    value = str(value or "").strip()
+    if not value:
+        return final_latex
+    match = _FINAL_OPTION_RE.search(final_latex)
+    if match:
+        prefix = final_latex[: match.start()].rstrip()
+        suffix = final_latex[match.start() :].lstrip()
+        return f"{prefix} {value} {suffix}".strip()
+    return f"{final_latex.rstrip()} {value}".strip()
+
+
+def _option_block(options: dict[str, str]) -> str:
+    if any(not str(options.get(label) or "").strip() for label in "ABCDE"):
+        return ""
+    return (
+        f"\u00a3A) {options['A'].strip()}"
+        f"\u00e6B) {options['B'].strip()}"
+        f"\u00e6C) {options['C'].strip()}"
+        f"\u00a3D) {options['D'].strip()}"
+        f"\u00e6\u00e6E) {options['E'].strip()}\u00a3"
+    )
+
+
+def repair_final_latex_with_normalizer_input(final_latex: str, input_payload: dict[str, Any]) -> str:
+    """Deterministic guardrail for content already present in continuation OCR."""
+    text = sanitize_final_latex(final_latex)
+    if not text or not isinstance(input_payload, dict):
+        return text
+
+    continuation_texts = [
+        _strip_continuation_marker(str(item.get("raw_ocr") or ""))
+        for item in list(input_payload.get("continuations") or [])
+        if isinstance(item, dict) and str(item.get("raw_ocr") or "").strip()
+    ]
+    raw_ocr = str(input_payload.get("raw_ocr") or "")
+
+    for continuation_text in continuation_texts:
+        prefix = _text_before_options(continuation_text)
+        if prefix and prefix not in text:
+            text = _insert_before_options_or_end(text, prefix)
+
+    options = _extract_ocr_options("\n".join([raw_ocr, *continuation_texts]))
+    if options and not _FINAL_OPTION_RE.search(text):
+        block = _option_block(options)
+        if block:
+            text = f"{text.rstrip()} {block}".strip()
+
+    human_hints = input_payload.get("human_hints") if isinstance(input_payload.get("human_hints"), dict) else {}
+    has_figure = bool(human_hints.get("has_figure"))
+    if not has_figure:
+        main_figure = input_payload.get("figure_segmentation") if isinstance(input_payload.get("figure_segmentation"), dict) else {}
+        has_figure = bool(main_figure.get("has_figure")) or int(main_figure.get("segments_total") or 0) > 0
+    if not has_figure:
+        for item in list(input_payload.get("continuations") or []):
+            if not isinstance(item, dict):
+                continue
+            figure = item.get("figure_segmentation") if isinstance(item.get("figure_segmentation"), dict) else {}
+            if bool(figure.get("has_figure")) or int(figure.get("segments_total") or 0) > 0:
+                has_figure = True
+                break
+    if has_figure and "[[Imagen=" not in text:
+        number = _item_number_from_final(text) or str(
+            dict(input_payload.get("source") or {}).get("problem_number") or ""
+        ).strip()
+        figure_tag = str(human_hints.get("figure_tag") or "").strip() or (f"img-{number}" if number else "img-n")
+        text = _insert_before_options_or_end(text, f"[[Imagen={figure_tag}]]")
+
+    return text.strip()
 
 
 class HfOcrNormalizerClient:

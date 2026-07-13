@@ -7,6 +7,14 @@ const STAGES = [
   { id: "candidate", title: "BD final", action: "Subir problemas revisados" },
 ];
 
+const CROP_VISUAL_FILTERS = [
+  { id: "all", label: "Todos" },
+  { id: "complete", label: "Completos" },
+  { id: "number_only", label: "Solo numeracion" },
+  { id: "alternatives_only", label: "Solo alternativas" },
+  { id: "unmarked", label: "Sin marcas" },
+];
+
 const state = {
   view: "boot",
   snapshot: null,
@@ -20,6 +28,8 @@ const state = {
     selectedInstanceId: "",
     screen: "books",
     query: "",
+    course: "all",
+    bookSort: "recent",
     status: "all",
     error: "",
     loading: false,
@@ -134,10 +144,18 @@ const state = {
   selectedRecordId: "",
   selectedReviewBatchIds: new Set(),
   ocrQueueIds: new Set(),
+  cropVisualFilter: "all",
+  continuationCandidates: [],
+  continuationScanSummary: null,
+  continuationCandidatesLoading: false,
+  continuationCandidatesApplying: false,
+  pageDetectJobId: "",
+  pageDetectJobPolling: false,
   ocrJobId: "",
   normalizerJobId: "",
   selectedOcrIndex: 0,
   boxes: [],
+  detectorBoxes: [],
   boxMode: "select",
   selectedBox: -1,
   drag: null,
@@ -166,6 +184,7 @@ const state = {
   normalizerTraining: null,
   normalizerTrainingFetchedAt: 0,
   recordLookup: { recordsRef: null, byId: new Map(), indexById: new Map() },
+  recordHydration: { pendingKeys: new Set() },
   taskProgress: null,
   promotionUploadReport: null,
 };
@@ -217,7 +236,7 @@ const COVER_UPLOAD_JPEG_QUALITY = 0.86;
 const PAGE_PICKER_FULL_LIMIT = 180;
 const PAGE_PICKER_WINDOW_RADIUS = 24;
 const SELECTED_PAGE_LIST_LIMIT = 80;
-const CROP_GALLERY_FULL_LIMIT = 90;
+const CROP_GALLERY_FULL_LIMIT = 400;
 const CROP_GALLERY_WINDOW_RADIUS = 24;
 const LIBRARY_BOOKS_INITIAL_LIMIT = 60;
 const LIBRARY_BOOKS_LIMIT_STEP = 60;
@@ -341,7 +360,13 @@ async function recoverStableLibraryServer({ forceRedirect = false } = {}) {
 function currentFactoryInstanceId() {
   if (state.view !== "factory" && state.view !== "boot") return "";
   const instance = state.currentInstance || {};
-  return String(instance.id || instance.instance_id || "").trim();
+  const context = state.snapshot?.context || {};
+  return String(
+    instance.id
+    || instance.instance_id
+    || context.instance_id
+    || ""
+  ).trim();
 }
 
 function currentFactoryRequestParams() {
@@ -497,7 +522,9 @@ async function checkAppVersionChanged() {
     if (next?.backend_restart_required) {
       state.appVersion = next;
       syncAppReloadButton();
-      setStatus("El backend cambio. Reinicia Biblioteca/Fabrica para cargar el codigo Python nuevo.");
+      if (!hasActiveBusyMessage()) {
+        setStatus("El backend cambio. Reinicia Biblioteca/Fabrica para cargar el codigo Python nuevo.");
+      }
       scheduleAppVersionPoll();
       return;
     }
@@ -573,6 +600,7 @@ async function refresh(message = "") {
   render();
   refreshNormalizerTrainingStatusLater({ silent: true, renderNotice: true });
   setStatus(message || "Listo para trabajar.");
+  resumePageDetectJobIfRunning({ silent: true });
   resumeOcrJobIfRunning({ silent: true });
   resumeNormalizerJobIfRunning({ silent: true });
 }
@@ -924,6 +952,8 @@ function persistFactoryUiState() {
       selectedRecordId: state.selectedRecordId,
       selectedReviewBatchIds: [...state.selectedReviewBatchIds].sort(),
       ocrQueueIds: [...state.ocrQueueIds].sort(),
+      cropVisualFilter: cropVisualFilterId(),
+      pageDetectJobId: state.pageDetectJobId,
       ocrJobId: state.ocrJobId,
       normalizerJobId: state.normalizerJobId,
       selectedOcrIndex: state.selectedOcrIndex,
@@ -946,8 +976,13 @@ function restoreFactoryUiState({ preserveCurrentStage = false } = {}) {
   state.selectedReviewBatchIds = new Set(
     persistedReviewBatchIds.map((id) => String(id || "")).filter((id) => reviewRecordIds.has(id)),
   );
+  state.pageDetectJobId = String(persisted.pageDetectJobId || state.pageDetectJobId || "").trim();
   state.ocrJobId = String(persisted.ocrJobId || state.ocrJobId || "").trim();
   state.normalizerJobId = String(persisted.normalizerJobId || state.normalizerJobId || "").trim();
+  const persistedCropFilter = String(persisted.cropVisualFilter || state.cropVisualFilter || "all");
+  state.cropVisualFilter = CROP_VISUAL_FILTERS.some((item) => item.id === persistedCropFilter)
+    ? persistedCropFilter
+    : "all";
   const detectedPages = detectedPageNumbers(pages);
   const persistedPages = sortedPageNumbers(persisted.selectedPages || []).filter((page) => !pageCount || page <= pageCount);
   const legacyDefaultPageOne = persistedPages.length === 1
@@ -1051,13 +1086,36 @@ function shouldPreferOcrOverReview(stage) {
   const errors = Number(summary.errors || 0);
   const hasOcrData = ocrDone > 0 || records.some((record) => hasText(record.raw_ocr));
   if (!hasOcrData) return false;
-  return errors > 0 || ready === 0 || ocrDone < recordsTotal;
+  return errors > 0 || ready === 0 || ocrDone < problemsTotal;
 }
 
 function recordPageNumber(record) {
   const source = record?.source || {};
   const page = Number(source.page_number || source.source_page_number || record?.page_number || 0);
   return Number.isFinite(page) ? page : 0;
+}
+
+function recordReadingOrderValue(record, key) {
+  const source = record?.source || {};
+  const value = Number(source[key] ?? record?.[key] ?? 0);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function compareRecordsByReadingOrder(a, b) {
+  const boxA = Array.isArray(a?.source?.bbox_px) ? a.source.bbox_px : [];
+  const boxB = Array.isArray(b?.source?.bbox_px) ? b.source.bbox_px : [];
+  const yA = Number(boxA[1] ?? 0);
+  const yB = Number(boxB[1] ?? 0);
+  const xA = Number(boxA[0] ?? 0);
+  const xB = Number(boxB[0] ?? 0);
+  return (
+    recordPageNumber(a) - recordPageNumber(b)
+    || recordReadingOrderValue(a, "source_order") - recordReadingOrderValue(b, "source_order")
+    || recordReadingOrderValue(a, "box_index") - recordReadingOrderValue(b, "box_index")
+    || (Number.isFinite(yA) ? yA : 0) - (Number.isFinite(yB) ? yB : 0)
+    || (Number.isFinite(xA) ? xA : 0) - (Number.isFinite(xB) ? xB : 0)
+    || String(a?.record_id || "").localeCompare(String(b?.record_id || ""))
+  );
 }
 
 function hasObjectData(value) {
@@ -1079,12 +1137,32 @@ function recordSourceStale(record) {
   return Boolean(record?.source_stale || record?.source_state === "stale");
 }
 
+function recordMergedIntoParent(record) {
+  if (!record) return false;
+  if (String(record.replaced_by_record_id || "").trim()) return true;
+  if (String(record.merged_into_record_id || "").trim()) return true;
+  if (String(record.ocr_input_mode || "").trim() === "replaced_by_merged_crop") return true;
+  const source = record.source && typeof record.source === "object" ? record.source : {};
+  if (String(source.replaced_by_record_id || "").trim()) return true;
+  if (String(source.merged_into_record_id || "").trim()) return true;
+  if (String(source.ocr_input_mode || "").trim() === "replaced_by_merged_crop") return true;
+  const normalized = record.normalized && typeof record.normalized === "object" ? record.normalized : {};
+  const continuation = normalized.continuacion && typeof normalized.continuacion === "object"
+    ? normalized.continuacion
+    : {};
+  return Boolean(
+    truthyText(continuation.es_continuacion)
+    || truthyText(continuation.fusionar_con_anterior)
+    || truthyText(continuation.ocr_input_fusionado)
+  );
+}
+
 function recordDownstreamInvalidated(record) {
   return Boolean(record?.downstream_invalidated || record?.downstream_state?.status === "invalidated");
 }
 
 function recordCanRunOcr(record) {
-  return Boolean(record && !recordSourceStale(record) && record.crop_url);
+  return Boolean(record && !recordMergedIntoParent(record) && !recordSourceStale(record) && (record.crop_url || record.crop_exists));
 }
 
 function recordHasOcrOutput(record) {
@@ -1252,6 +1330,80 @@ function recordLabelById(recordId) {
   if (!record) return String(recordId || "");
   const index = findRecordIndexById(recordId, records);
   return recordOptionLabel(record, Math.max(0, index));
+}
+
+function recordIsCompact(record) {
+  return String(record?.record_detail_level || "").toLowerCase() === "compact";
+}
+
+function mergeRecordPayload(existing, update) {
+  if (!existing || !update) return update || existing;
+  return {
+    ...existing,
+    ...update,
+    source: { ...(existing.source || {}), ...(update.source || {}) },
+    normalized: { ...(existing.normalized || {}), ...(update.normalized || {}) },
+    structured_ocr: { ...(existing.structured_ocr || {}), ...(update.structured_ocr || {}) },
+    figure_segmentation: { ...(existing.figure_segmentation || {}), ...(update.figure_segmentation || {}) },
+  };
+}
+
+async function fetchRecords({ ids = [], detail = "full", media = true } = {}) {
+  const params = currentFactoryRequestParams();
+  params.set("detail", detail);
+  params.set("media", media ? "1" : "0");
+  const uniqueIds = [...new Set((ids || []).map((id) => String(id || "").trim()).filter(Boolean))];
+  if (uniqueIds.length) params.set("record_ids", uniqueIds.join(","));
+  return api(`/api/records?${params.toString()}`);
+}
+
+function recordsFromPayload(payload) {
+  return Array.isArray(payload?.records) ? payload.records : [];
+}
+
+async function hydrateRecordsByIds(ids, { detail = "full", media = true, rerender = false } = {}) {
+  const uniqueIds = [...new Set((ids || []).map((id) => String(id || "").trim()).filter(Boolean))];
+  if (!state.snapshot || !uniqueIds.length) return [];
+  const key = `${detail}:${media ? 1 : 0}:${uniqueIds.join("|")}`;
+  if (state.recordHydration.pendingKeys.has(key)) return [];
+  state.recordHydration.pendingKeys.add(key);
+  try {
+    const payload = await fetchRecords({ ids: uniqueIds, detail, media });
+    const updates = recordsFromPayload(payload);
+    mergeRecordsIntoSnapshot(updates);
+    if (updates.some((record) => String(record.record_detail_level || "") === "full")) {
+      state.snapshot.records_compact = (state.snapshot.records || []).some(recordIsCompact);
+    }
+    if (rerender) renderStage();
+    return updates;
+  } finally {
+    state.recordHydration.pendingKeys.delete(key);
+  }
+}
+
+function hydrateVisibleCropWindowSoon(records = state.snapshot?.records || []) {
+  if (!state.snapshot?.records_compact || state.stage !== "crops") return;
+  const rows = cropGalleryRenderState(records).rows || [];
+  const ids = rows
+    .map((row) => row.record)
+    .filter((record) => record?.crop_exists && !record.crop_url)
+    .map((record) => record.record_id);
+  if (!ids.length) return;
+  hydrateRecordsByIds(ids, { detail: "compact", media: true, rerender: false })
+    .then((updates) => {
+      if (!updates.length || state.stage !== "crops") return;
+      const activeRecords = stagingWorkRecords(state.snapshot.records || []);
+      const displayRecords = cropVisualFilteredRecords(activeRecords);
+      refreshCropGalleryWindow(displayRecords, { force: true });
+      updateSelectedCropUi(displayRecords);
+    })
+    .catch((err) => setStatus(`No se pudieron cargar miniaturas: ${err.message}`));
+}
+
+function hydrateSelectedRecordDetailSoon(record, { rerender = true } = {}) {
+  if (!recordIsCompact(record)) return;
+  hydrateRecordsByIds([record.record_id], { detail: "full", media: true, rerender })
+    .catch((err) => setStatus(`No se pudo cargar el detalle del crop: ${err.message}`));
 }
 
 function recordErrorComment(record) {
@@ -1485,6 +1637,7 @@ function normalizeLibraryBooks(payload) {
       editorial: book.editorial || "",
       edition: book.edition || book.edicion || "",
       subject: book.subject || book.curso || "",
+      course: book.course || book.curso || book.subject || "",
       pdfName: book.pdf_name || book.pdfName || book.filename || "",
       pdfPath: book.pdf_path || book.pdfPath || "",
       workspaceDir: book.workspace_dir || book.workspaceDir || "",
@@ -1493,6 +1646,8 @@ function normalizeLibraryBooks(payload) {
       notes: book.notes || book.notas || "",
       status: normalizeStatus(book.status || book.estado || "pendiente"),
       active: book.active ?? book.activo ?? true,
+      created_at: book.created_at || book.createdAt || book.fecha_creacion || "",
+      updated_at: book.updated_at || book.updatedAt || book.fecha_actualizacion || "",
       indicators: normalizeBookIndicators(normalizedBook),
       instances,
     };
@@ -1516,10 +1671,69 @@ function buildLibrarySearchKey(book) {
     book?.title,
     book?.code,
     book?.author,
+    book?.course,
     book?.subject,
     book?.pdfName,
     book?.editorial,
   ].filter(Boolean).join(" "));
+}
+
+function libraryBookCourseLabel(book) {
+  const value = String(book?.course || book?.subject || book?.curso || book?.area || "").trim();
+  return value || "Sin curso";
+}
+
+function libraryCourseKey(value) {
+  return normalizeLibrarySearchText(value).replace(/\s+/g, "-") || "sin-curso";
+}
+
+function libraryCourseSortRank(label) {
+  const key = normalizeLibrarySearchText(label);
+  const order = [
+    "algebra",
+    "geometria",
+    "trigonometria",
+    "geometria analitica",
+    "geometria del espacio",
+    "aritmetica",
+    "razonamiento matematico",
+    "varios",
+    "sin curso",
+  ];
+  const index = order.indexOf(key);
+  return index >= 0 ? index : order.length;
+}
+
+function libraryCourseOptions() {
+  const cache = libraryComputedCache();
+  const key = `courses:${Number(state.library.dataVersion || 0)}`;
+  if (Array.isArray(cache[key])) return cache[key];
+  const byCourse = new Map();
+  for (const book of state.library.books || []) {
+    const label = libraryBookCourseLabel(book);
+    const courseKey = libraryCourseKey(label);
+    const current = byCourse.get(courseKey) || { key: courseKey, label, count: 0, active: 0, lastTouched: 0 };
+    const rank = libraryBookWorkRank(book);
+    current.count += 1;
+    if (rank.bucket <= 1) current.active += 1;
+    current.lastTouched = Math.max(current.lastTouched || 0, rank.lastTouched || 0);
+    if (String(label).length < String(current.label || "").length || !current.label) current.label = label;
+    byCourse.set(courseKey, current);
+  }
+  const options = [...byCourse.values()].sort((a, b) => (
+    libraryCourseSortRank(a.label) - libraryCourseSortRank(b.label)
+    || b.active - a.active
+    || b.lastTouched - a.lastTouched
+    || String(a.label || "").localeCompare(String(b.label || ""), "es", { numeric: true, sensitivity: "base" })
+  ));
+  cache[key] = options;
+  return options;
+}
+
+function selectedLibraryCourseLabel() {
+  const selected = String(state.library.course || "all");
+  if (selected === "all") return "Todos los cursos";
+  return libraryCourseOptions().find((item) => item.key === selected)?.label || "Curso";
 }
 
 function queueBookDetailLoad(bookId) {
@@ -1586,6 +1800,8 @@ function renderLibraryContent() {
 
 function renderLibraryFilters() {
   const counts = libraryCounts();
+  const courseOptions = libraryCourseOptions();
+  const selectedCourse = String(state.library.course || "all");
   return `
     <div class="library-sidebar">
       <div class="timeline-heading">
@@ -1601,6 +1817,25 @@ function renderLibraryFilters() {
       <label class="library-search">
         <span class="muted">Buscar</span>
         <input id="librarySearch" value="${escapeAttr(state.library.query)}" placeholder="Titulo, codigo, curso" />
+      </label>
+      <label class="library-search">
+        <span class="muted">Curso / carpeta</span>
+        <select id="libraryCourseFilter">
+          <option value="all" ${selectedCourse === "all" ? "selected" : ""}>Todos los cursos</option>
+          ${courseOptions.map((course) => `
+            <option value="${escapeAttr(course.key)}" ${selectedCourse === course.key ? "selected" : ""}>
+              ${escapeHtml(course.label)} (${Number(course.count || 0)})
+            </option>
+          `).join("")}
+        </select>
+      </label>
+      <label class="library-search">
+        <span class="muted">Orden</span>
+        <select id="libraryBookSort">
+          <option value="recent" ${state.library.bookSort === "recent" ? "selected" : ""}>Recientes primero</option>
+          <option value="work" ${state.library.bookSort === "work" ? "selected" : ""}>Trabajo pendiente</option>
+          <option value="name" ${state.library.bookSort === "name" ? "selected" : ""}>Nombre A-Z</option>
+        </select>
       </label>
       <div class="filter-stack" aria-label="Vistas de biblioteca">
         <button class="filter-chip ${["books", "book"].includes(state.library.screen) ? "active" : ""}" data-library-screen="books" type="button">
@@ -2002,7 +2237,7 @@ function renderWordProblemSelection() {
         </div>
         <div class="word-problem-stats">
           <span>${Number(result.total || 0)} disponibles</span>
-          <strong>${selected.size} seleccionados</strong>
+          <strong id="wordProblemSelectedCount">${selected.size} seleccionados acumulados</strong>
         </div>
       </div>
       <div class="word-problem-controls">
@@ -2070,7 +2305,7 @@ function renderWordProblemSelection() {
         </label>
         <label>
           <span class="muted">Salida .docx</span>
-          <input id="wordProblemOutput" value="${escapeAttr(ps.outputDocx || "")}" placeholder="Vacio = archivo automatico" ${disabled ? "disabled" : ""} />
+          <input id="wordProblemOutput" value="${escapeAttr(ps.outputDocx || "")}" placeholder="Se pedira al convertir" ${disabled ? "disabled" : ""} />
         </label>
       </div>
       <details class="word-problem-structure">
@@ -2177,6 +2412,7 @@ function renderWordProblemPreview(problem) {
   const key = String(problem.respuesta_correcta || "-").trim() || "-";
   const latex = String(problem.enunciado_latex || problem.preview || "").trim();
   const readableLatex = wordProblemReadableLatex(latex || problem.preview || "");
+  const images = wordProblemImages(problem);
   return `
     <aside class="word-problem-preview">
       <div class="word-preview-head">
@@ -2191,6 +2427,16 @@ function renderWordProblemPreview(problem) {
         <span>ID ${id}</span>
         <span>${Number(problem.imagenes_count || 0)} imagen(es)</span>
       </div>
+      ${images.length ? `
+        <div class="word-preview-images">
+          ${images.map((image, index) => `
+            <figure class="word-preview-image">
+              <img src="${escapeAttr(image.url)}" alt="${escapeAttr(image.name || image.marker || `Imagen ${index + 1}`)}" loading="lazy" decoding="async" />
+              <figcaption>${escapeHtml(image.marker || image.name || `Imagen ${index + 1}`)}</figcaption>
+            </figure>
+          `).join("")}
+        </div>
+      ` : ""}
       <div id="wordProblemPreview" class="word-preview-render math-preview">
         ${formatPreviewText(readableLatex || latex || problem.preview || "")}
       </div>
@@ -2200,6 +2446,17 @@ function renderWordProblemPreview(problem) {
       </details>
     </aside>
   `;
+}
+
+function wordProblemImages(problem) {
+  const images = Array.isArray(problem?.imagenes) ? problem.imagenes : [];
+  return images
+    .map((image) => ({
+      url: String(image?.url || "").trim(),
+      name: String(image?.name || "").trim(),
+      marker: String(image?.marker || "").trim(),
+    }))
+    .filter((image) => image.url);
 }
 
 function wordProblemReadableLatex(value) {
@@ -2311,6 +2568,7 @@ function renderWordInstanceRow(book, row) {
 
 function renderLibraryBooksStage() {
   const books = filteredBooks();
+  const courseOptions = libraryCourseOptions();
   const windowed = windowLibraryRows(books, state.library.visibleBooksLimit, state.library.selectedBookId, LIBRARY_BOOKS_INITIAL_LIMIT);
   return `
     <div class="stage-header library-header">
@@ -2321,11 +2579,42 @@ function renderLibraryBooksStage() {
       <button id="showBookFormBtn" class="secondary" type="button">Registrar libro</button>
     </div>
     ${state.library.showBookForm ? renderBookForm(libraryEditingBook()) : ""}
+    ${renderLibraryCourseStrip(courseOptions)}
+    <div class="library-active-context">
+      <span>${escapeHtml(selectedLibraryCourseLabel())}</span>
+      <strong>${books.length} libro(s) visibles</strong>
+      <small>${escapeHtml(librarySortDescription())}</small>
+    </div>
     <div class="library-books-page">
       <section class="library-books library-books-grid" aria-label="Libros disponibles">
         ${books.length ? windowed.rows.map(bookCardHtml).join("") : renderLibraryEmptyState()}
       </section>
       ${windowed.hiddenCount ? renderLibraryLoadMore("loadMoreBooks", windowed, LIBRARY_BOOKS_LIMIT_STEP, "libro(s)") : ""}
+    </div>
+  `;
+}
+
+function librarySortDescription() {
+  const mode = String(state.library.bookSort || "recent");
+  if (mode === "work") return "Orden: errores y trabajo activo primero; completos al final.";
+  if (mode === "name") return "Orden: nombre del libro.";
+  return "Orden: libros agregados recientemente primero.";
+}
+
+function renderLibraryCourseStrip(courseOptions) {
+  const selected = String(state.library.course || "all");
+  const total = Number((state.library.books || []).length || 0);
+  return `
+    <div class="library-course-strip" aria-label="Carpetas por curso">
+      <button class="library-course-chip ${selected === "all" ? "active" : ""}" data-library-course="all" type="button">
+        <span>Todos</span><strong>${total}</strong>
+      </button>
+      ${(courseOptions || []).map((course) => `
+        <button class="library-course-chip ${selected === course.key ? "active" : ""}" data-library-course="${escapeAttr(course.key)}" type="button">
+          <span>${escapeHtml(course.label)}</span>
+          <strong>${Number(course.count || 0)}</strong>
+        </button>
+      `).join("")}
     </div>
   `;
 }
@@ -3293,6 +3582,7 @@ function bindLibrarySidebarEvents() {
       state.library.selectedBookId = "";
       state.library.selectedInstanceId = "";
       state.library.screen = "books";
+      state.library.course = "all";
       state.library.semanticStatus = { loading: false, error: "", result: null };
       state.library.concepts = { ...state.library.concepts, loading: false, error: "", result: null };
       state.library.word = {
@@ -3314,6 +3604,28 @@ function bindLibrarySidebarEvents() {
     state.library.screen = "books";
     state.library.showInstanceForm = false;
     scheduleLibrarySearchRender();
+  };
+  if ($("libraryCourseFilter")) $("libraryCourseFilter").onchange = (event) => {
+    cancelLibrarySearchRender();
+    state.library.course = event.target.value || "all";
+    state.library.screen = "books";
+    state.library.selectedBookId = "";
+    state.library.selectedInstanceId = "";
+    state.library.visibleBooksLimit = LIBRARY_BOOKS_INITIAL_LIMIT;
+    state.library.visibleInstancesLimit = LIBRARY_INSTANCES_INITIAL_LIMIT;
+    state.library.showInstanceForm = false;
+    ensureLibrarySelection();
+    renderLibrary();
+  };
+  if ($("libraryBookSort")) $("libraryBookSort").onchange = (event) => {
+    cancelLibrarySearchRender();
+    state.library.bookSort = event.target.value || "recent";
+    state.library.screen = "books";
+    state.library.selectedBookId = "";
+    state.library.selectedInstanceId = "";
+    state.library.visibleBooksLimit = LIBRARY_BOOKS_INITIAL_LIMIT;
+    ensureLibrarySelection();
+    renderLibrary();
   };
   document.querySelectorAll("[data-library-screen]").forEach((btn) => {
     btn.onclick = () => {
@@ -3384,6 +3696,20 @@ function bindLibraryContentEvents() {
   bindConceptEvents();
   bindRoadmapEvents();
   bindWordEvents();
+  document.querySelectorAll("[data-library-course]").forEach((btn) => {
+    btn.onclick = () => {
+      cancelLibrarySearchRender();
+      state.library.course = btn.dataset.libraryCourse || "all";
+      state.library.screen = "books";
+      state.library.selectedBookId = "";
+      state.library.selectedInstanceId = "";
+      state.library.visibleBooksLimit = LIBRARY_BOOKS_INITIAL_LIMIT;
+      state.library.showBookForm = false;
+      state.library.showInstanceForm = false;
+      ensureLibrarySelection();
+      renderLibrary();
+    };
+  });
   if ($("loadMoreBooks")) $("loadMoreBooks").onclick = () => {
     state.library.visibleBooksLimit = Math.max(state.library.visibleBooksLimit || 0, LIBRARY_BOOKS_INITIAL_LIMIT) + LIBRARY_BOOKS_LIMIT_STEP;
     renderLibraryContent();
@@ -3492,6 +3818,9 @@ function bindWordEvents() {
       }
       renderLibraryContent();
       setStatus(state.library.word.mode === "selection" ? "Modo Word: seleccion por filtros." : "Modo Word: instancias.");
+      if (state.library.word.mode === "selection") {
+        ensureWordProblemOptionsLoaded();
+      }
     };
   });
   const wordSearch = $("wordSearchInput");
@@ -3577,6 +3906,9 @@ function bindWordEvents() {
   });
   bindManualWordSessionEvents();
   bindWordProblemEvents();
+  if (state.library.word?.mode === "selection") {
+    ensureWordProblemOptionsLoaded();
+  }
   const selectVisibleBtn = $("selectVisibleWordBtn");
   if (selectVisibleBtn) {
     selectVisibleBtn.onclick = () => {
@@ -3742,17 +4074,21 @@ function bindWordProblemEvents() {
         const id = Number(problem.id || 0);
         if (id > 0) selected.add(id);
       });
-      if (!ps.previewProblemId && selected.size) {
+      const firstVisible = (ps.result?.problems || []).find((problem) => Number(problem.id || 0) > 0);
+      if (firstVisible) {
+        ps.previewProblemId = String(Number(firstVisible.id || 0));
+      } else if (!ps.previewProblemId && selected.size) {
         ps.previewProblemId = String([...selected][0]);
       }
-      renderLibraryContent();
+      updateWordProblemSelectionView();
     };
   }
   const clearBtn = $("clearWordProblemsBtn");
   if (clearBtn) {
     clearBtn.onclick = () => {
       wordProblemSelectionIds().clear();
-      renderLibraryContent();
+      ps.previewProblemId = "";
+      updateWordProblemSelectionView();
     };
   }
   const convertBtn = $("convertWordProblemsBtn");
@@ -3772,7 +4108,7 @@ function bindWordProblemEvents() {
       if (input.checked) selected.add(id);
       else selected.delete(id);
       ps.previewProblemId = String(id);
-      renderLibraryContent();
+      updateWordProblemSelectionView();
     };
   });
   document.querySelectorAll(".word-problem-row .word-row-check").forEach((label) => {
@@ -3786,8 +4122,52 @@ function bindWordProblemEvents() {
       if (selected.has(id)) selected.delete(id);
       else selected.add(id);
       ps.previewProblemId = String(id);
-      renderLibraryContent();
+      updateWordProblemSelectionView();
     };
+  });
+}
+
+function updateWordProblemSelectionView() {
+  const ps = wordProblemSelectionState();
+  const selected = wordProblemSelectionIds();
+  const problems = Array.isArray(ps.result?.problems) ? ps.result.problems : [];
+  const previewProblem = selectedWordProblemPreview(problems, ps, selected);
+  const previewId = Number(previewProblem?.id || 0);
+
+  document.querySelectorAll("[data-word-problem-row]").forEach((row) => {
+    const id = Number(row.dataset.wordProblemRow || 0);
+    row.classList.toggle("selected", selected.has(id));
+    row.classList.toggle("active", id > 0 && id === previewId);
+  });
+  document.querySelectorAll("[data-word-problem-select]").forEach((input) => {
+    const id = Number(input.dataset.wordProblemSelect || 0);
+    input.checked = selected.has(id);
+  });
+
+  const selectedCount = $("wordProblemSelectedCount");
+  if (selectedCount) selectedCount.textContent = `${selected.size} seleccionados acumulados`;
+
+  const disabled = ps.loading || ps.converting || state.library.word?.batchRunning;
+  const clearBtn = $("clearWordProblemsBtn");
+  if (clearBtn) clearBtn.disabled = Boolean(disabled || !selected.size);
+  const convertBtn = $("convertWordProblemsBtn");
+  if (convertBtn) convertBtn.disabled = Boolean(disabled || !selected.size);
+
+  const preview = document.querySelector(".word-problem-preview");
+  if (preview) {
+    preview.outerHTML = renderWordProblemPreview(previewProblem);
+    const mathPreview = $("wordProblemPreview");
+    if (mathPreview) window.setTimeout(() => typesetMath(mathPreview), 0);
+  }
+}
+
+function ensureWordProblemOptionsLoaded() {
+  const ps = wordProblemSelectionState();
+  if (ps.loading || ps.result?.schema_version) return;
+  loadWordProblems({ silent: true }).catch((err) => {
+    ps.error = err.message || "No se pudo cargar opciones para Word.";
+    if (state.view === "library" && state.library.screen === "word") renderLibraryContent();
+    setStatus(`Error cargando filtros Word: ${ps.error}`);
   });
 }
 
@@ -5117,29 +5497,45 @@ function renderErrorReportStage() {
 
 function activeModelPayload() {
   const models = state.snapshot?.models || {};
+  const serverStages = state.snapshot?.server_models?.stage_map || {};
   return {
-    pdf_detector: String(models.pdf_detector || models.stages?.pdf_detector?.model_id || ""),
+    pdf_detector: String(serverStages.pdf_detector?.resolved_path || serverStages.pdf_detector?.model_id || models.pdf_detector || models.stages?.pdf_detector?.model_id || ""),
     ocr: String(models.ocr || models.stages?.ocr?.model_id || ""),
-    figure_segmenter: String(models.figure_segmenter || models.stages?.figure_segmenter?.model_id || ""),
+    figure_segmenter: String(serverStages.figure_segmenter?.resolved_path || serverStages.figure_segmenter?.model_id || models.figure_segmenter || models.stages?.figure_segmenter?.model_id || ""),
+    number_alt_detector: String(serverStages.number_alt_detector?.resolved_path || serverStages.number_alt_detector?.model_id || models.pdf_detector || models.stages?.pdf_detector?.model_id || ""),
   };
 }
 
 function modelStageInfo(stage) {
   const models = state.snapshot?.models || {};
   const stages = models.stages || {};
+  const serverStages = state.snapshot?.server_models?.stage_map || {};
   const row = stages[stage] || {};
+  const serverRow = serverStages[stage] || {};
   const payload = activeModelPayload();
+  const isServerReady = serverRow.server_ready === true;
+  const hasServerStatus = Object.keys(serverRow).length > 0;
+  const isLocalReady = String(serverRow.provider || row.provider || "").trim() === "local"
+    && serverRow.exists === true;
   return {
     label: {
       pdf_detector: "Segmentacion de problemas",
       ocr: "OCR entrenado",
       figure_segmenter: "Segmentacion de graficos",
+      number_alt_detector: "Numeracion y alternativas",
     }[stage] || stage,
-    model_id: row.model_id || payload[stage] || "",
-    provider: row.provider || "",
-    source: row.source || "",
+    model_id: serverRow.model_id || row.model_id || payload[stage] || "",
+    resolved_path: serverRow.resolved_path || "",
+    provider: serverRow.provider || row.provider || "",
+    source: serverRow.source || row.source || "",
     confidence: row.confidence,
-    fallback: row.fallback || "",
+    fallback: serverRow.fallback || row.fallback || "",
+    server_ready: isServerReady,
+    local_ready: isLocalReady,
+    has_server_status: hasServerStatus,
+    action: serverRow.action || "",
+    path_category: serverRow.path_category || "",
+    exists: serverRow.exists,
   };
 }
 
@@ -5149,14 +5545,32 @@ function renderModelStrip(stages) {
   return `
     <div class="model-strip" aria-label="Modelos entrenados activos">
       ${rows.map((row) => `
-        <div class="model-chip">
+        <div class="model-chip ${row.has_server_status && !row.server_ready && !row.local_ready ? "is-missing" : ""}">
           <span>${escapeHtml(row.label)}</span>
           <strong title="${escapeAttr(row.model_id)}">${escapeHtml(compactModelName(row.model_id))}</strong>
           <small>${escapeHtml([row.provider, row.source].filter(Boolean).join(" | ") || "modelo activo")}</small>
+          ${row.has_server_status ? `<em>${escapeHtml(modelRuntimeStatusText(row))}</em>` : ""}
         </div>
       `).join("")}
     </div>
   `;
+}
+
+function modelRuntimeStatusText(row) {
+  if (row.server_ready) return "Servidor listo";
+  if (row.local_ready) return "Local listo";
+  return `Falta servidor: ${modelActionLabel(row.action)}`;
+}
+
+function modelActionLabel(action) {
+  const raw = String(action || "").trim();
+  return {
+    copy_model_to_server_storage_and_repoint_env: "copiar modelo al storage del servidor y actualizar env",
+    set_model_env_to_server_storage_path: "apuntar env a una ruta del storage del servidor",
+    server_model_file_missing: "archivo de modelo no encontrado en servidor",
+    download_or_mount_model_on_server_then_set_env: "descargar o montar modelo en servidor",
+    configure_model: "configurar modelo",
+  }[raw] || raw || "configurar";
 }
 
 function compactModelName(value) {
@@ -5358,7 +5772,8 @@ function renderPagesStage() {
       </label>
       <span class="selection-count">${state.selectedPages.size} seleccionada(s)</span>
     </div>
-    ${renderModelStrip(["pdf_detector"])}
+    ${renderModelStrip(["pdf_detector", "number_alt_detector"])}
+    ${renderTaskProgress("pages")}
     <div id="pagePicker" class="page-picker"></div>
     <div class="grid-two">
       <div class="canvas-wrap page-canvas ${state.selectedPages.has(state.pdfPage) ? "is-selected" : ""}">
@@ -5428,7 +5843,7 @@ function renderPagePicker(pageCount) {
   picker.innerHTML = `
     ${partial ? `<div class="muted page-picker-note">Mostrando ${pages.length} de ${pageCount} paginas. Usa Ir o rango para saltar rapido.</div>` : ""}
     ${pages.map((page) => `
-    <button class="page-chip ${page === state.pdfPage ? "current" : ""} ${state.selectedPages.has(page) ? "selected" : ""}" data-page="${page}" title="Pagina ${page}">
+    <button class="page-chip ${page === state.pdfPage ? "current" : ""} ${state.selectedPages.has(page) ? "selected" : ""}" data-page="${page}" title="Pagina ${page}: clic para ver, doble clic para seleccionar">
       ${page}
     </button>
   `).join("")}
@@ -5436,11 +5851,20 @@ function renderPagePicker(pageCount) {
   picker.onclick = (event) => {
     const item = event.target.closest("[data-page]");
     if (!item) return;
-    setPdfPage(Number(item.dataset.page));
+    window.clearTimeout(pagePickerClickTimer);
+    if (event.detail > 1) return;
+    const page = Number(item.dataset.page);
+    pagePickerClickTimer = window.setTimeout(() => {
+      pagePickerClickTimer = null;
+      setPdfPage(page);
+    }, 220);
   };
   picker.ondblclick = (event) => {
     const item = event.target.closest("[data-page]");
     if (!item) return;
+    event.preventDefault();
+    window.clearTimeout(pagePickerClickTimer);
+    pagePickerClickTimer = null;
     const page = Number(item.dataset.page);
     if (state.selectedPages.has(page)) state.selectedPages.delete(page);
     else state.selectedPages.add(page);
@@ -5451,6 +5875,8 @@ function renderPagePicker(pageCount) {
     updatePagesStageSelectionUi();
   };
 }
+
+let pagePickerClickTimer = null;
 
 function pagePickerRenderState(pageCount) {
   if (!pageCount) return { pages: [], signature: "0", partial: false };
@@ -5569,8 +5995,8 @@ function renderBoxesStage() {
       </div>
     </div>
     <div class="toolbar">
-      <button id="modeSelect" class="${state.boxMode === "select" ? "secondary" : ""}">Seleccionar/mover</button>
-      <button id="modeAdd" class="${state.boxMode === "add" ? "secondary" : ""}">Nuevo box</button>
+      <button id="modeSelect" class="${state.boxMode === "select" ? "secondary" : ""}" title="Atajo: D">Seleccionar/mover</button>
+      <button id="modeAdd" class="${state.boxMode === "add" ? "secondary" : ""}" title="Atajo: D">Nuevo box</button>
       <button id="deleteBox">Eliminar</button>
       <button id="deletePageRecord" class="danger" type="button" ${page ? "" : "disabled"}>Eliminar pagina detectada</button>
       <button id="sortBoxes">Reordenar lectura</button>
@@ -5583,10 +6009,16 @@ function renderBoxesStage() {
         <button id="boxZoomFit" type="button" title="Ajustar al panel">Ajustar</button>
         <button id="boxZoomActual" type="button" title="Ver a tamano real">100%</button>
       </div>
+      <div class="detector-legend" aria-label="Leyenda detector">
+        <span><i class="legend-problem"></i>Problema editable</span>
+        <span><i class="legend-number"></i>Numero</span>
+        <span><i class="legend-answer"></i>Alternativas</span>
+      </div>
       <select id="layoutMode" class="field">
         ${["auto", "una_columna", "dos_columnas"].map((value) => `<option value="${value}" ${page && page.layout_mode === value ? "selected" : ""}>${value}</option>`).join("")}
       </select>
       <button id="saveBoxes" class="primary">Guardar pagina revisada</button>
+      <button id="captureDetectorTraining" type="button">Agregar revisadas a entrenamiento</button>
     </div>
     <div class="grid-two boxes-editor-grid">
       <div class="canvas-wrap boxes-canvas-wrap"><canvas id="boxCanvas"></canvas></div>
@@ -5607,13 +6039,14 @@ function renderBoxesStage() {
   $("deletePageRecord").onclick = deleteSelectedDetectedPage;
   $("sortBoxes").onclick = () => {
     state.boxes.sort((a, b) => (a[1] - b[1]) || (a[0] - b[0]));
-    state.selectedBox = Math.min(state.selectedBox, state.boxes.length - 1);
+    state.selectedBox = Math.min(state.selectedBox, editableBoxCount() - 1);
     markBoxesDirty();
   };
   $("moveBoxUp").onclick = () => moveSelectedBox(-1);
   $("moveBoxDown").onclick = () => moveSelectedBox(1);
   $("layoutMode").onchange = () => { state.boxDirty = true; };
   $("saveBoxes").onclick = saveCurrentBoxes;
+  $("captureDetectorTraining").onclick = captureReviewedPagesForProblemDetectorTraining;
   bindBoxZoomControls();
   updateBoxesStageInspector(page);
 }
@@ -5621,7 +6054,8 @@ function renderBoxesStage() {
 function updateBoxesStageInspector(page) {
   setInspector(page ? {
     "Pagina": page.page_number,
-    "Boxes": state.boxes.length,
+    "Problemas": state.boxes.length,
+    "Numero/alternativas": state.detectorBoxes.length,
     "Modo": state.boxMode === "add" ? "Nuevo box" : "Seleccionar y ajustar",
     "Zoom": currentBoxZoomLabel(),
     "Cambios sin guardar": state.boxDirty ? "si" : "no",
@@ -5791,6 +6225,7 @@ function syncCurrentPageBoxes(page) {
   const shouldLoadPage = state._boxSource !== source || (!state.boxDirty && state._boxSourceSignature !== signature);
   if (shouldLoadPage) {
     state.boxes = page ? cloneBoxes(page.boxes) : [];
+    state.detectorBoxes = page ? cloneDetectorBoxes(page) : [];
     state._boxSource = source;
     state._boxSourceSignature = signature;
     state.selectedBox = -1;
@@ -5798,11 +6233,11 @@ function syncCurrentPageBoxes(page) {
     state.drag = null;
     boxCanvasState = null;
   }
-  if (state.selectedBox >= state.boxes.length) state.selectedBox = state.boxes.length - 1;
+  const total = editableBoxCount();
+  if (state.selectedBox >= total) state.selectedBox = total - 1;
 }
 
-function syncSelectedRecord() {
-  const records = state.snapshot?.records || [];
+function syncSelectedRecord(records = state.snapshot?.records || []) {
   if (!records.length) {
     state.selectedRecordId = "";
     state.selectedOcrIndex = 0;
@@ -5832,6 +6267,7 @@ function continuationRecordIdsFromParents(allRecords = state.snapshot?.records |
 
 function isReviewContinuationRecord(record, allRecords = state.snapshot?.records || [], continuationIds = null) {
   if (!record) return false;
+  if (recordMergedIntoParent(record)) return true;
   const ids = continuationIds || continuationRecordIdsFromParents(allRecords);
   if (ids.has(String(record.record_id || "").trim()) || ids.has(String(record.crop_id || "").trim())) return true;
   const normalized = record.normalized && typeof record.normalized === "object" ? record.normalized : {};
@@ -5848,6 +6284,87 @@ function isReviewContinuationRecord(record, allRecords = state.snapshot?.records
 function reviewRecords(allRecords = state.snapshot?.records || []) {
   const continuationIds = continuationRecordIdsFromParents(allRecords);
   return (allRecords || []).filter((record) => !isReviewContinuationRecord(record, allRecords, continuationIds));
+}
+
+function stagingWorkRecords(allRecords = state.snapshot?.records || []) {
+  return (Array.isArray(allRecords) ? allRecords : []).filter((record) => !recordMergedIntoParent(record));
+}
+
+function recordIsMergedCropReplacement(record) {
+  const source = record?.source && typeof record.source === "object" ? record.source : {};
+  return Boolean(
+    String(record?.ocr_input_mode || "").trim() === "merged_crops_replacement"
+    || String(source.ocr_input_mode || "").trim() === "merged_crops_replacement"
+    || (Array.isArray(record?.merged_from_record_ids) && record.merged_from_record_ids.length > 1)
+    || (Array.isArray(source.merged_from_record_ids) && source.merged_from_record_ids.length > 1)
+  );
+}
+
+function cropContinuityMarks(record) {
+  const source = record?.source && typeof record.source === "object" ? record.source : {};
+  if (recordIsMergedCropReplacement(record)) {
+    return {
+      hasNumber: true,
+      hasAlternatives: true,
+      complete: true,
+      checked: true,
+      merged: true,
+    };
+  }
+  const subboxes = Array.isArray(source.continuity_subboxes) ? source.continuity_subboxes : [];
+  let hasNumber = false;
+  let hasAlternatives = false;
+  subboxes.forEach((detail) => {
+    const key = canonicalDetectorClassKey(detail?.class_key || detail?.class_name || detail?.role || detail?.class);
+    if (key === "problem_number") hasNumber = true;
+    if (key === "answer_block") hasAlternatives = true;
+  });
+  return {
+    hasNumber,
+    hasAlternatives,
+    complete: hasNumber && hasAlternatives,
+    checked: Boolean(source.continuity_subboxes_checked || subboxes.length),
+  };
+}
+
+function cropVisualFilterId() {
+  const value = String(state.cropVisualFilter || "all");
+  return CROP_VISUAL_FILTERS.some((item) => item.id === value) ? value : "all";
+}
+
+function cropMatchesVisualFilter(record, filterId = cropVisualFilterId()) {
+  const marks = cropContinuityMarks(record);
+  if (filterId === "complete") return marks.hasNumber && marks.hasAlternatives;
+  if (filterId === "number_only") return marks.hasNumber && !marks.hasAlternatives;
+  if (filterId === "alternatives_only") return !marks.hasNumber && marks.hasAlternatives;
+  if (filterId === "unmarked") return !marks.hasNumber && !marks.hasAlternatives;
+  return true;
+}
+
+function cropVisualFilteredRecords(records = stagingWorkRecords(state.snapshot?.records || [])) {
+  const filterId = cropVisualFilterId();
+  const rows = Array.isArray(records) ? records : [];
+  if (filterId === "all") return rows;
+  return rows.filter((record) => cropMatchesVisualFilter(record, filterId));
+}
+
+function cropVisualFilterCounts(records = stagingWorkRecords(state.snapshot?.records || [])) {
+  const counts = {
+    all: 0,
+    complete: 0,
+    number_only: 0,
+    alternatives_only: 0,
+    unmarked: 0,
+  };
+  (records || []).forEach((record) => {
+    counts.all += 1;
+    const marks = cropContinuityMarks(record);
+    if (marks.hasNumber && marks.hasAlternatives) counts.complete += 1;
+    else if (marks.hasNumber) counts.number_only += 1;
+    else if (marks.hasAlternatives) counts.alternatives_only += 1;
+    else counts.unmarked += 1;
+  });
+  return counts;
 }
 
 function reviewBatchSelectionIds() {
@@ -5883,6 +6400,7 @@ function batchModeUsesReviewSelection(mode = state.batchMode) {
 
 function batchRecordsForMode(mode = state.batchMode) {
   const allRecords = state.snapshot?.records || [];
+  if (String(mode || "") === "raw_ocr") return stagingWorkRecords(allRecords);
   if (!batchModeUsesReviewSelection(mode)) return allRecords;
   const visibleRecords = reviewRecords(allRecords);
   if (state.batchReviewScope === "all") return visibleRecords;
@@ -5892,6 +6410,7 @@ function batchRecordsForMode(mode = state.batchMode) {
 }
 
 function batchRecordsSelectionLabel(mode = state.batchMode) {
+  if (String(mode || "") === "raw_ocr") return "todos los crops disponibles de staging";
   if (!batchModeUsesReviewSelection(mode)) return "todos los crops de staging";
   if (state.batchReviewScope === "all") return "todos los problemas principales";
   if (state.batchReviewScope === "selection") {
@@ -5948,6 +6467,8 @@ function pageBoxesSignature(page) {
     page.layout_mode || "",
     page.reviewed ? "1" : "0",
     JSON.stringify(page.boxes || []),
+    JSON.stringify(page.detector_detections || []),
+    JSON.stringify(page.box_details || []),
   ].join("|");
 }
 
@@ -5962,6 +6483,7 @@ function selectBoxPage(recordId) {
   state._boxSource = "";
   state._boxSourceSignature = "";
   state.boxes = [];
+  state.detectorBoxes = [];
   state.selectedBox = -1;
   state.boxDirty = false;
   state.drag = null;
@@ -5988,13 +6510,20 @@ function refreshSelectedBoxPage({ preservePagesScroll = false, resetCanvasScroll
 function renderBoxList() {
   const list = $("boxesList");
   if (!list) return;
-  list.innerHTML = state.boxes.length ? state.boxes.map((box, index) => {
-    const [x1, y1, x2, y2] = box;
+  const items = editableBoxItems();
+  list.innerHTML = items.length ? items.map((item, index) => {
+    const [x1, y1, x2, y2] = item.box;
+    const type = canonicalDetectorClassKey(item.class_key);
     return `
       <div class="row-card box-row ${index === state.selectedBox ? "active" : ""}" data-box="${index}">
         <div>
-          <strong>Box ${index + 1}</strong>
+          <strong>${escapeHtml(editableBoxTitle(item))}</strong>
           <div class="muted" data-box-coords="${index}">${x1},${y1} -> ${x2},${y2}</div>
+          <select class="box-type-select" data-box-type="${index}" aria-label="Tipo de box">
+            <option value="problem" ${type === "problem" ? "selected" : ""}>Problema</option>
+            <option value="problem_number" ${type === "problem_number" ? "selected" : ""}>Numero</option>
+            <option value="answer_block" ${type === "answer_block" ? "selected" : ""}>Alternativas</option>
+          </select>
         </div>
         <button data-delete-box="${index}" title="Eliminar box">X</button>
       </div>
@@ -6015,22 +6544,120 @@ function renderBoxList() {
       deleteSelectedBox();
     };
   });
+  list.querySelectorAll("[data-box-type]").forEach((select) => {
+    select.onclick = (event) => event.stopPropagation();
+    select.onchange = (event) => {
+      event.stopPropagation();
+      const index = Number(select.dataset.boxType);
+      state.selectedBox = index;
+      changeEditableBoxType(index, select.value);
+    };
+  });
 }
 
 function deleteSelectedBox() {
-  if (state.selectedBox < 0 || state.selectedBox >= state.boxes.length) return;
-  state.boxes.splice(state.selectedBox, 1);
-  state.selectedBox = Math.min(state.selectedBox, state.boxes.length - 1);
+  const item = editableBoxItemAt(state.selectedBox);
+  if (!item) return;
+  if (item.kind === "problem") state.boxes.splice(item.localIndex, 1);
+  else state.detectorBoxes.splice(item.localIndex, 1);
+  state.selectedBox = Math.min(state.selectedBox, editableBoxCount() - 1);
   markBoxesDirty();
 }
 
+function changeEditableBoxType(index, rawType) {
+  const item = editableBoxItemAt(index);
+  if (!item) return false;
+  const nextType = canonicalDetectorClassKey(rawType);
+  const currentType = canonicalDetectorClassKey(item.class_key);
+  if (nextType === currentType) {
+    syncBoxEditorUi();
+    return true;
+  }
+  const box = clampBoxToImage(normalizeBox(item.box));
+  if (item.kind === "detector" && nextType !== "problem") {
+    const detail = state.detectorBoxes[item.localIndex];
+    if (!detail) return false;
+    state.detectorBoxes[item.localIndex] = {
+      ...detail,
+      bbox_px: box,
+      class_name: detectorClassNameForKey(nextType),
+      class_key: nextType,
+      role: nextType,
+      conf: 1,
+      source: "human_review",
+    };
+    state.selectedBox = index;
+    markBoxesDirty();
+    return true;
+  }
+  if (item.kind === "problem") {
+    state.boxes.splice(item.localIndex, 1);
+  } else {
+    state.detectorBoxes.splice(item.localIndex, 1);
+  }
+  if (nextType === "problem") {
+    state.boxes.push(box);
+    state.selectedBox = state.boxes.length - 1;
+  } else {
+    const detail = normalizeDetectorBoxDetail(
+      {
+        bbox_px: box,
+        class_name: detectorClassNameForKey(nextType),
+        class_key: nextType,
+        role: nextType,
+        conf: 1,
+        source: "human_review",
+      },
+      state.detectorBoxes.length,
+    );
+    if (detail) state.detectorBoxes.push(detail);
+    state.selectedBox = state.boxes.length + state.detectorBoxes.length - 1;
+  }
+  markBoxesDirty();
+  return true;
+}
+
+function isEditableKeyboardTarget(target) {
+  const element = target instanceof Element ? target : document.activeElement;
+  if (!element) return false;
+  const tag = String(element.tagName || "").toLowerCase();
+  return Boolean(
+    element.isContentEditable
+    || ["input", "textarea", "select", "option"].includes(tag)
+    || element.closest("[contenteditable='true']")
+  );
+}
+
+function handleBoxEditorKeyDown(event) {
+  if (state.stage !== "boxes") return;
+  if (isEditableKeyboardTarget(event.target)) return;
+  if (
+    String(event.key || "").toLowerCase() === "d"
+    && !event.ctrlKey
+    && !event.metaKey
+    && !event.altKey
+  ) {
+    event.preventDefault();
+    setBoxMode(state.boxMode === "add" ? "select" : "add");
+    return;
+  }
+  const key = String(event.key || "").toLowerCase();
+  if (!["delete", "del", "supr", "suprimir"].includes(key)) return;
+  if (!editableBoxItemAt(state.selectedBox)) return;
+  event.preventDefault();
+  deleteSelectedBox();
+}
+
 function moveSelectedBox(delta) {
-  const from = state.selectedBox;
+  const item = editableBoxItemAt(state.selectedBox);
+  if (!item) return;
+  const rows = item.kind === "problem" ? state.boxes : state.detectorBoxes;
+  const from = item.localIndex;
   const to = from + delta;
-  if (from < 0 || to < 0 || from >= state.boxes.length || to >= state.boxes.length) return;
-  const [box] = state.boxes.splice(from, 1);
-  state.boxes.splice(to, 0, box);
-  state.selectedBox = to;
+  if (from < 0 || to < 0 || from >= rows.length || to >= rows.length) return;
+  const [box] = rows.splice(from, 1);
+  rows.splice(to, 0, box);
+  state.selectedBox = item.kind === "problem" ? to : state.boxes.length + to;
   markBoxesDirty();
 }
 
@@ -6118,16 +6745,23 @@ function prefetchBoxPageImages(centerPage) {
 function syncBoxListSelectionAndCoords() {
   const list = $("boxesList");
   if (!list) return;
+  const items = editableBoxItems();
   list.querySelectorAll("[data-box]").forEach((item) => {
     const index = Number(item.dataset.box || 0);
     item.classList.toggle("active", index === state.selectedBox);
   });
   list.querySelectorAll("[data-box-coords]").forEach((item) => {
     const index = Number(item.dataset.boxCoords || 0);
-    const box = state.boxes[index];
-    if (!box) return;
+    const box = items[index]?.box;
+    if (!Array.isArray(box)) return;
     const [x1, y1, x2, y2] = box;
     item.textContent = `${x1},${y1} -> ${x2},${y2}`;
+  });
+  list.querySelectorAll("[data-box-type]").forEach((select) => {
+    const index = Number(select.dataset.boxType || 0);
+    const item = items[index];
+    if (!item) return;
+    select.value = canonicalDetectorClassKey(item.class_key);
   });
 }
 
@@ -6222,22 +6856,192 @@ function onBoxCanvasWheel(event) {
   setBoxZoom(state.boxZoom * (event.deltaY > 0 ? 1 / 1.12 : 1.12));
 }
 
+function currentBoxEditorPage() {
+  const pages = factoryPages();
+  return pages.find((row) => String(row.record_id || "") === String(state.selectedPageRecordId || "")) || pages[0] || null;
+}
+
+function detectorClassKey(value) {
+  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+function canonicalDetectorClassKey(value) {
+  const key = detectorClassKey(value);
+  if (key === "problem_number" || key === "numero" || key === "number") return "problem_number";
+  if (key === "answer_block" || key === "alternatives" || key === "alternativas" || key === "options") return "answer_block";
+  return "problem";
+}
+
+function detectorClassNameForKey(key) {
+  const normalized = canonicalDetectorClassKey(key);
+  if (normalized === "problem_number") return "problem_number";
+  if (normalized === "answer_block") return "answer_block";
+  return "problem";
+}
+
+function detectorClassLabel(key) {
+  const normalized = canonicalDetectorClassKey(key);
+  if (normalized === "problem_number") return "Numero";
+  if (normalized === "answer_block") return "Alternativas";
+  return "Problema";
+}
+
+function cloneDetectorBoxes(page) {
+  return (page?.detector_detections || [])
+    .map((detail, index) => normalizeDetectorBoxDetail(detail, index))
+    .filter((detail) => detail && canonicalDetectorClassKey(detail.class_key || detail.class_name) !== "problem");
+}
+
+function normalizeDetectorBoxDetail(detail, index = 0) {
+  if (!detail || typeof detail !== "object") return null;
+  const rawBox = detail.bbox_px || detail.xyxy || [];
+  if (!Array.isArray(rawBox) || rawBox.length < 4) return null;
+  const box = normalizeBox(rawBox);
+  if (!(box[2] > box[0] && box[3] > box[1])) return null;
+  const classKey = canonicalDetectorClassKey(detail.class_key || detail.class_name || detail.role);
+  return {
+    ...detail,
+    idx: Number(detail.idx || index + 1),
+    bbox_px: box,
+    class_name: detectorClassNameForKey(classKey),
+    class_key: classKey,
+    role: classKey,
+    conf: Number.isFinite(Number(detail.conf)) ? Number(detail.conf) : 1,
+    source: detail.source || "human_review",
+  };
+}
+
+function editableBoxItems() {
+  return [
+    ...state.boxes.map((box, localIndex) => ({
+      kind: "problem",
+      localIndex,
+      box,
+      class_key: "problem",
+    })),
+    ...state.detectorBoxes.map((detail, localIndex) => ({
+      kind: "detector",
+      localIndex,
+      box: detail.bbox_px || [],
+      class_key: canonicalDetectorClassKey(detail.class_key || detail.class_name),
+    })),
+  ].filter((item) => Array.isArray(item.box) && item.box.length >= 4);
+}
+
+function editableBoxCount() {
+  return editableBoxItems().length;
+}
+
+function editableBoxItemAt(index) {
+  const idx = Number(index);
+  if (!Number.isFinite(idx) || idx < 0) return null;
+  return editableBoxItems()[idx] || null;
+}
+
+function setEditableBoxAt(index, box) {
+  const item = editableBoxItemAt(index);
+  if (!item) return false;
+  const clean = clampBoxToImage(normalizeBox(box));
+  if (item.kind === "problem") {
+    state.boxes[item.localIndex] = clean;
+    return true;
+  }
+  const detail = state.detectorBoxes[item.localIndex];
+  if (!detail) return false;
+  state.detectorBoxes[item.localIndex] = {
+    ...detail,
+    bbox_px: clean,
+    source: "human_review",
+    conf: 1,
+  };
+  return true;
+}
+
+function editableBoxTitle(item) {
+  if (!item) return "Box";
+  if (item.kind === "problem") return `Problema ${item.localIndex + 1}`;
+  return `${detectorClassLabel(item.class_key)} ${item.localIndex + 1}`;
+}
+
+function editableBoxStyle(item, selected = false) {
+  const key = canonicalDetectorClassKey(item?.class_key);
+  const selectedLabel = key === "problem_number" ? "N" : (key === "answer_block" ? "A" : "E");
+  if (selected) return { stroke: "#2563eb", fill: "#2563eb", label: selectedLabel };
+  if (key === "problem_number") return { stroke: "#f59e0b", fill: "#f59e0b", label: "N" };
+  if (key === "answer_block") return { stroke: "#06b6d4", fill: "#06b6d4", label: "A" };
+  return { stroke: "#d92d20", fill: "#d92d20", label: "" };
+}
+
+function detectorBoxesPayload() {
+  return state.detectorBoxes
+    .map((detail, index) => normalizeDetectorBoxDetail({ ...detail, idx: index + 1 }, index))
+    .filter(Boolean);
+}
+
+function detectorOverlayStyle(detail) {
+  const key = detectorClassKey(detail?.class_key || detail?.class_name);
+  if (key === "problem_number" || key === "numero" || key === "number") {
+    return { stroke: "#f59e0b", fill: "rgba(245, 158, 11, .18)", label: "N" };
+  }
+  if (key === "answer_block" || key === "alternatives" || key === "alternativas" || key === "options") {
+    return { stroke: "#06b6d4", fill: "rgba(6, 182, 212, .16)", label: "A" };
+  }
+  return null;
+}
+
+function detectorOverlaysForPage(page) {
+  return (page?.detector_detections || []).filter((detail) => {
+    const style = detectorOverlayStyle(detail);
+    const box = detail?.bbox_px || [];
+    return style && Array.isArray(box) && box.length >= 4;
+  });
+}
+
+function drawDetectorOverlays(ctx, page, scale) {
+  const overlays = detectorOverlaysForPage(page);
+  if (!overlays.length) return;
+  ctx.save();
+  overlays.forEach((detail) => {
+    const style = detectorOverlayStyle(detail);
+    if (!style) return;
+    const [x1, y1, x2, y2] = (detail.bbox_px || []).slice(0, 4).map((value) => Math.round(Number(value) * scale));
+    if (!(x2 > x1 && y2 > y1)) return;
+    ctx.lineWidth = 3;
+    ctx.setLineDash([10, 5]);
+    ctx.strokeStyle = style.stroke;
+    ctx.fillStyle = style.fill;
+    ctx.fillRect(x1, y1, x2 - x1, y2 - y1);
+    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    ctx.setLineDash([]);
+    ctx.fillStyle = style.stroke;
+    ctx.fillRect(x1, y1, 22, 20);
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 12px Segoe UI";
+    ctx.fillText(style.label, x1 + 7, y1 + 14);
+  });
+  ctx.restore();
+}
+
 function redrawBoxes() {
   if (!boxCanvasState) return;
   const { canvas, ctx, img, scale } = boxCanvasState;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-  state.boxes.forEach((box, idx) => {
+  editableBoxItems().forEach((item, idx) => {
+    const box = item.box;
     const [x1, y1, x2, y2] = box.map((v) => Math.round(v * scale));
+    const selected = idx === state.selectedBox;
+    const style = editableBoxStyle(item, selected);
     ctx.lineWidth = idx === state.selectedBox ? 4 : 3;
-    ctx.strokeStyle = idx === state.selectedBox ? "#2563eb" : "#d92d20";
+    ctx.strokeStyle = style.stroke;
     ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
-    ctx.fillStyle = idx === state.selectedBox ? "#2563eb" : "#d92d20";
+    ctx.fillStyle = style.fill;
     ctx.fillRect(x1, y1, 25, 23);
     ctx.fillStyle = "white";
     ctx.font = "bold 13px Segoe UI";
-    ctx.fillText(String(idx + 1), x1 + 8, y1 + 16);
-    if (idx === state.selectedBox) drawHandles(ctx, x1, y1, x2, y2);
+    const label = item.kind === "problem" ? String(item.localIndex + 1) : style.label;
+    ctx.fillText(label, x1 + 8, y1 + 16);
+    if (selected) drawHandles(ctx, x1, y1, x2, y2);
   });
 }
 
@@ -6280,17 +7084,19 @@ function imagePoint(event) {
 
 function findBoxAt(point) {
   const scale = boxCanvasState.scale;
-  for (let i = state.boxes.length - 1; i >= 0; i -= 1) {
-    const [x1, y1, x2, y2] = state.boxes[i].map((v) => v * scale);
+  const items = editableBoxItems();
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    const [x1, y1, x2, y2] = items[i].box.map((v) => v * scale);
     if (point.x >= x1 && point.x <= x2 && point.y >= y1 && point.y <= y2) return i;
   }
   return -1;
 }
 
 function findHandleAt(point) {
-  if (state.selectedBox < 0 || state.selectedBox >= state.boxes.length) return null;
+  const selected = editableBoxItemAt(state.selectedBox);
+  if (!selected) return null;
   const scale = boxCanvasState.scale;
-  const box = state.boxes[state.selectedBox].map((value) => value * scale);
+  const box = selected.box.map((value) => value * scale);
   const hitSize = 9;
   for (const handle of boxHandlePoints(box)) {
     if (Math.abs(point.x - handle.x) <= hitSize && Math.abs(point.y - handle.y) <= hitSize) {
@@ -6310,18 +7116,20 @@ function onBoxMouseDown(event) {
   }
   const handleHit = findHandleAt(canvasP);
   if (handleHit) {
+    const item = editableBoxItemAt(handleHit.index);
     state.drag = {
       type: "resize",
       handle: handleHit.handle,
       start: imageP,
-      original: [...state.boxes[handleHit.index]],
+      original: [...(item?.box || [])],
     };
     return;
   }
   const hit = findBoxAt(canvasP);
   state.selectedBox = hit;
   if (hit >= 0) {
-    state.drag = { type: "move", start: imageP, original: [...state.boxes[hit]] };
+    const item = editableBoxItemAt(hit);
+    state.drag = { type: "move", start: imageP, original: [...(item?.box || [])] };
   }
   redrawBoxes();
   syncBoxEditorUi();
@@ -6341,11 +7149,11 @@ function onBoxMouseMove(event) {
     const dx = p.x - state.drag.start.x;
     const dy = p.y - state.drag.start.y;
     const box = state.drag.original;
-    state.boxes[state.selectedBox] = moveBoxWithinImage(box, dx, dy);
+    setEditableBoxAt(state.selectedBox, moveBoxWithinImage(box, dx, dy));
     state.boxDirty = true;
     scheduleBoxEditorFrame({ updateRows: true });
   } else if (state.drag.type === "resize" && state.selectedBox >= 0) {
-    state.boxes[state.selectedBox] = resizeBoxFromHandle(state.drag.original, state.drag.handle, p);
+    setEditableBoxAt(state.selectedBox, resizeBoxFromHandle(state.drag.original, state.drag.handle, p));
     state.boxDirty = true;
     scheduleBoxEditorFrame({ updateRows: true });
   }
@@ -6431,6 +7239,7 @@ async function saveCurrentBoxes() {
       body: {
         record_id: page.record_id,
         boxes: state.boxes,
+        detector_detections: detectorBoxesPayload(),
         layout_mode: $("layoutMode").value,
         reviewed: true,
         compact: true,
@@ -6443,6 +7252,7 @@ async function saveCurrentBoxes() {
       state.snapshot = payload;
       resetRecordLookup();
       state.boxes = [];
+      state.detectorBoxes = [];
       state._boxSource = "";
       state._boxSourceSignature = "";
       state.boxDirty = false;
@@ -6454,6 +7264,43 @@ async function saveCurrentBoxes() {
       ? `Boxes guardados. ${invalidated} registro(s) downstream quedaron pendientes de regenerar.`
       : "Boxes guardados.";
   }, "Boxes guardados.");
+}
+
+async function captureReviewedPagesForProblemDetectorTraining() {
+  const pages = factoryPages();
+  const reviewedPages = pages.filter((page) => {
+    const segmentCount = (page.detector_detections || []).length + (page.box_details || []).length + (page.boxes || []).length;
+    return page.reviewed && segmentCount > 0;
+  });
+  if (!reviewedPages.length) {
+    setStatus("No hay paginas revisadas con segmentos para agregar al entrenamiento.");
+    return;
+  }
+  if (state.boxDirty) {
+    const shouldContinue = window.confirm("Hay cambios sin guardar en la pagina actual. Guarda primero si quieres incluir esos ajustes. Continuar con las paginas ya guardadas?");
+    if (!shouldContinue) return;
+  }
+  await runAction("Agregando paginas revisadas al banco de entrenamiento...", async () => {
+    const params = currentFactoryRequestParams();
+    const payload = await api(`/api/pages/training-capture?${params.toString()}`, {
+      method: "POST",
+      body: {
+        record_ids: reviewedPages.map((page) => page.record_id),
+        reviewed_only: true,
+        instance_id: params.get("instance_id") || "",
+        book_id: params.get("book_id") || "",
+        db_name: params.get("db_name") || "",
+      },
+    });
+    if (payload?.schema_version !== "pdf_factory_web_problem_detector_training_capture_v1") {
+      throw new Error("Respuesta inesperada al agregar paginas a entrenamiento.");
+    }
+    const errorRows = (payload.results || []).filter((row) => String(row.status || "") === "error");
+    const errorDetail = errorRows.length
+      ? ` Detalle: ${errorRows.slice(0, 3).map((row) => `pag. ${row.page_number || "-"}: ${row.error || "error"}`).join(" | ")}${errorRows.length > 3 ? " | ..." : ""}`
+      : "";
+    return `Entrenamiento detector: ${payload.saved || 0} pagina(s) agregada(s), ${payload.skipped || 0} omitida(s), ${payload.errors || 0} error(es).${errorDetail}`;
+  }, "Paginas agregadas al entrenamiento.");
 }
 
 function applySavedPagePayload(payload) {
@@ -6479,9 +7326,10 @@ function applySavedPagePayload(payload) {
 
   state.selectedPageRecordId = String(page.record_id || state.selectedPageRecordId || "");
   state.boxes = cloneBoxes(page.boxes || []);
+  state.detectorBoxes = cloneDetectorBoxes(page);
   state._boxSource = String(page.record_id || "");
   state._boxSourceSignature = pageBoxesSignature(page);
-  state.selectedBox = Math.min(state.selectedBox, state.boxes.length - 1);
+  state.selectedBox = Math.min(state.selectedBox, editableBoxCount() - 1);
   state.boxDirty = false;
   state.drag = null;
 
@@ -6546,6 +7394,7 @@ function applyDeletedPagePayload(payload, fallbackRecordId = "", scrollState = n
   state._boxSource = "";
   state._boxSourceSignature = "";
   state.boxes = [];
+  state.detectorBoxes = [];
   state.selectedBox = -1;
   state.boxDirty = false;
   state.drag = null;
@@ -6562,10 +7411,13 @@ function applyDeletedPagePayload(payload, fallbackRecordId = "", scrollState = n
 }
 
 function renderCropsStage() {
-  const records = state.snapshot.records || [];
+  const allRecords = state.snapshot.records || [];
+  const records = stagingWorkRecords(allRecords);
+  const displayRecords = cropVisualFilteredRecords(records);
+  const replacedHiddenCount = Math.max(0, allRecords.length - records.length);
   syncOcrQueueSelection(records);
-  syncSelectedRecord();
-  const record = selectedRecord();
+  syncSelectedRecord(displayRecords);
+  const record = selectedRecord(displayRecords);
   const queuedCount = queuedOcrRecordIds(records).length;
   const queueBusy = isTaskRunning("ocr");
   const invalidatedCount = invalidatedRecords(records).length;
@@ -6573,11 +7425,13 @@ function renderCropsStage() {
   const missingOcrCount = ocrMissingRecordIds(records).length;
   const completedOcrCount = Math.max(0, records.filter(recordCanRunOcr).length - missingOcrCount);
   const queuePrimaryLabel = missingOcrCount ? `Seleccionar faltantes (${missingOcrCount})` : "Seleccionar todo";
+  const suggestedContinuationCount = suggestedContinuationCandidates().length;
+  const continuationControlsDisabled = queueBusy || state.continuationCandidatesLoading || state.continuationCandidatesApplying;
   $("stageHost").innerHTML = `
     <div class="stage-header">
       <div>
         <h2>Crops y staging</h2>
-        <p class="muted">Elige las imagenes que entraran a la cola de OCR y segmentacion grafica.</p>
+        <p class="muted">Elige los problemas efectivos que entraran a la cola de OCR y segmentacion grafica.</p>
       </div>
       <span id="cropsQueueBadge" class="status-pill status-${queuedCount ? "procesando" : (records.length ? "listo" : "pendiente")}">${queuedCount ? `${queuedCount} en cola` : `${records.length} crop(s)`}</span>
     </div>
@@ -6591,28 +7445,39 @@ function renderCropsStage() {
       <div>
         <h3>Cola OCR + segmentacion</h3>
         <p id="cropsQueueHint" class="muted">${queuedCount ? `${queuedCount} imagen(es) seleccionada(s).` : ocrQueueIdleHint(records)}</p>
+        ${replacedHiddenCount ? `<p class="muted">${replacedHiddenCount} crop(s) original(es) reemplazado(s) por imagenes fusionadas quedan fuera de la cola OCR.</p>` : ""}
       </div>
       <div class="queue-actions">
+        <button id="detectContinuations" type="button" ${records.length > 1 && !continuationControlsDisabled ? "" : "disabled"} title="Clasifica los crops disponibles con el detector de numeracion y alternativas para encontrar cortes y continuaciones.">Detector continuidad</button>
+        <button id="detectAndMergeContinuations" class="primary-soft" type="button" ${records.length > 1 && !continuationControlsDisabled ? "" : "disabled"} title="Primero clasifica los crops disponibles con el detector y luego fusiona solo las recomendaciones fuertes.">Detector + fusionar</button>
+        <button id="toolbarMergeSuggestedContinuations" type="button" ${suggestedContinuationCount && !continuationControlsDisabled ? "" : "disabled"}>Fusionar sugeridas (${suggestedContinuationCount})</button>
         <button id="queueAllCrops" type="button" ${records.length && !queueBusy ? "" : "disabled"} title="${missingOcrCount ? `Prioriza los ${missingOcrCount} crop(s) sin OCR. ${completedOcrCount} ya tienen OCR.` : "Selecciona todos los crops ejecutables para una pasada manual."}">${queuePrimaryLabel}</button>
         <button id="queueErrorCrops" type="button" ${errorCount && !queueBusy ? "" : "disabled"}>Seleccionar errores${errorCount ? ` (${errorCount})` : ""}</button>
         <button id="clearOcrQueue" type="button" ${queuedCount && !queueBusy ? "" : "disabled"}>Limpiar cola</button>
         <button id="runOcrQueue" class="primary" type="button" ${queuedCount && !queueBusy ? "" : "disabled"}>Ejecutar cola</button>
       </div>
     </div>
+    ${renderContinuationCandidatesPanel()}
+    ${renderCropVisualFilterBar(records, displayRecords)}
     ${renderTaskProgress("ocr")}
     <div class="crops-layout">
       <div id="cropGallery" class="thumb-grid crop-gallery">
-        ${renderCropGallery(records)}
+        ${renderCropGallery(displayRecords)}
       </div>
       <div id="cropPreviewPanel" class="panel sticky-preview">
         ${record ? renderCropPreview(record) : `<p class="muted">Selecciona un crop para ver su trazabilidad.</p>`}
       </div>
     </div>
   `;
-  bindCropGalleryControls(records);
+  bindCropGalleryControls(displayRecords);
   bindOcrQueueControls(records);
+  bindCropVisualFilterControls(records);
+  bindContinuationCandidateControls();
+  hydrateVisibleCropWindowSoon(displayRecords);
   setInspector(record ? cropInspectorData(record, records.length) : {
     "Problemas en staging": records.length,
+    "Crops mostrados": displayRecords.length,
+    "Crops reemplazados": replacedHiddenCount,
     "Siguiente paso": "Crear staging desde boxes revisados.",
   });
 }
@@ -6695,7 +7560,11 @@ function cropGalleryRenderState(records = state.snapshot.records || []) {
 
 function renderCropGallery(records = state.snapshot.records || []) {
   const { rows, hiddenCount, signature, partial } = cropGalleryRenderState(records);
-  if (!rows.length) return `<div class="panel muted">Crea staging desde los boxes revisados.</div>`;
+  if (!rows.length) {
+    return cropVisualFilterId() === "all"
+      ? `<div class="panel muted">Crea staging desde los boxes revisados.</div>`
+      : `<div class="panel muted">No hay crops disponibles para este filtro.</div>`;
+  }
   return `
     ${partial ? `
       <div class="crop-gallery-window panel" data-crop-window-signature="${escapeAttr(signature)}">
@@ -6713,12 +7582,327 @@ function renderCropGallery(records = state.snapshot.records || []) {
   `;
 }
 
-function refreshCropGalleryWindow(records = state.snapshot.records || []) {
+function renderCropVisualFilterBar(records = stagingWorkRecords(state.snapshot?.records || []), displayRecords = cropVisualFilteredRecords(records)) {
+  const counts = cropVisualFilterCounts(records);
+  const active = cropVisualFilterId();
+  return `
+    <section class="panel crop-filter-bar" aria-label="Filtros de crops por marcas internas">
+      <div>
+        <h3>Visualizador de crops</h3>
+        <p class="muted">${displayRecords.length} de ${records.length} crop(s) disponible(s). Los crops reemplazados por fusion no entran en estos filtros.</p>
+      </div>
+      <div class="crop-filter-actions">
+        ${CROP_VISUAL_FILTERS.map((item) => `
+          <button type="button" class="filter-chip compact ${active === item.id ? "active" : ""}" data-crop-filter="${escapeAttr(item.id)}">
+            ${escapeHtml(item.label)} <strong>${Number(counts[item.id] || 0)}</strong>
+          </button>
+        `).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function bindCropVisualFilterControls(records = stagingWorkRecords(state.snapshot?.records || [])) {
+  document.querySelectorAll("[data-crop-filter]").forEach((button) => {
+    button.onclick = () => {
+      const next = String(button.dataset.cropFilter || "all");
+      state.cropVisualFilter = CROP_VISUAL_FILTERS.some((item) => item.id === next) ? next : "all";
+      const displayRecords = cropVisualFilteredRecords(records);
+      syncSelectedRecord(displayRecords);
+      persistFactoryUiState();
+      renderCropsStage();
+    };
+  });
+}
+
+function renderContinuationCandidatesPanel() {
+  const candidates = Array.isArray(state.continuationCandidates) ? state.continuationCandidates : [];
+  const scan = state.continuationScanSummary && typeof state.continuationScanSummary === "object"
+    ? state.continuationScanSummary
+    : null;
+  const totalCrops = continuationDisplayCropTotal(scan);
+  const suggestedCount = suggestedContinuationCandidates(candidates).length;
+  const reviewCount = Math.max(0, candidates.length - suggestedCount);
+  if (state.continuationCandidatesLoading) {
+    return `
+      <section class="panel continuation-candidates">
+        <strong>Aplicando detector de continuidad a ${totalCrops || "todos los"} crop(s)...</strong>
+        <p class="muted">Esta pasada analiza toda la instancia para detectar numeracion y alternativas; la galeria virtualizada solo afecta lo que se ve en pantalla.</p>
+        ${scan ? renderContinuationScanSummary(scan) : ""}
+      </section>
+    `;
+  }
+  if (state.continuationCandidatesApplying) {
+    return `
+      <section class="panel continuation-candidates">
+        <strong>Fusionando continuaciones sugeridas...</strong>
+        <p class="muted">La fusion usa las sugerencias detectadas en toda la instancia, no solo los crops visibles.</p>
+        ${scan ? renderContinuationScanSummary(scan) : ""}
+      </section>
+    `;
+  }
+  if (!candidates.length) {
+    return `
+      <section class="panel continuation-candidates muted">
+        <div>Ejecuta el detector de continuidad antes del OCR entrenado. El listado muestra ${totalCrops || "todos los"} crop(s) disponible(s); los originales reemplazados quedan fuera.</div>
+        ${scan ? renderContinuationScanSummary(scan) : ""}
+      </section>
+    `;
+  }
+  return `
+    <section class="panel continuation-candidates">
+      <div class="panel-heading-row">
+        <div>
+          <h3>Continuaciones sugeridas</h3>
+          <p class="muted">${candidates.length} candidato(s): ${suggestedCount} para fusion automatica, ${reviewCount} para revision manual.</p>
+        </div>
+        <div class="continuation-panel-actions">
+          <button id="mergeSuggestedContinuations" class="primary" type="button" ${suggestedCount ? "" : "disabled"}>Fusionar sugeridas (${suggestedCount})</button>
+          <button id="clearContinuationCandidates" type="button">Limpiar sugerencias</button>
+        </div>
+      </div>
+      <div class="continuation-summary">
+        <span><strong>${suggestedCount}</strong> fusion fuerte</span>
+        <span><strong>${reviewCount}</strong> revisar</span>
+        <span><strong>${candidates.length}</strong> total</span>
+      </div>
+      ${scan ? renderContinuationScanSummary(scan) : ""}
+      <div class="continuation-candidate-list">
+        ${candidates.map((candidate, index) => renderContinuationCandidateCard(candidate, index)).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderContinuationScanSummary(scan) {
+  const totalPairs = Number(scan.candidate_pairs_total ?? scan.candidate_pairs ?? 0);
+  const returnedPairs = Number(scan.candidate_pairs_returned ?? scan.candidate_pairs ?? 0);
+  const limited = Boolean(scan.candidate_pairs_limited);
+  const auxMissing = Number(scan.auxiliary_ocr_missing || 0);
+  const totalCrops = continuationDisplayCropTotal(scan);
+  return `
+    <div class="continuation-summary continuation-scan-summary">
+      <span><strong>${totalCrops}</strong> crops disponibles</span>
+      <span><strong>${Number(scan.complete_discarded || 0)}</strong> completos descartados</span>
+      <span><strong>${Number(scan.possible_parents || 0)}</strong> posibles padres</span>
+      <span><strong>${Number(scan.possible_continuations || 0)}</strong> posibles continuaciones</span>
+      <span><strong>${Number(scan.detector_available || 0)}</strong> con detector</span>
+      ${Number(scan.detector_subbox_informative || 0) ? `<span><strong>${Number(scan.detector_subbox_informative || 0)}</strong> con numeracion/alternativas</span>` : ""}
+      ${auxMissing ? `<span><strong>${auxMissing}</strong> sin OCR local auxiliar</span>` : ""}
+      <span><strong>${returnedPairs}${limited ? `/${totalPairs}` : ""}</strong> pares candidatos</span>
+    </div>
+  `;
+}
+
+function continuationDisplayCropTotal(scan = null) {
+  const available = stagingWorkRecords(state.snapshot?.records || []).length;
+  const scanned = Number(scan?.total_crops || 0);
+  if (!available) return scanned || 0;
+  if (!scanned) return available;
+  return Math.min(scanned, available);
+}
+
+function renderContinuationCandidateCard(candidate, index) {
+  const parent = candidate.parent || findRecordById(candidate.parent_record_id);
+  const continuation = candidate.continuation || findRecordById(candidate.continuation_record_id);
+  const confidence = Math.round(Number(candidate.confidence || 0) * 100);
+  const reasons = Array.isArray(candidate.reasons) ? candidate.reasons : [];
+  const warnings = Array.isArray(candidate.warnings) ? candidate.warnings : [];
+  const recommendation = candidate.recommendation === "merge" ? "merge" : "review";
+  return `
+    <article class="continuation-candidate-card recommendation-${recommendation}" data-continuation-candidate="${index}">
+      <div class="continuation-candidate-images">
+        ${parent?.crop_url ? `<img src="${parent.crop_url}" alt="Principal" loading="lazy" decoding="async" />` : `<div class="empty-state">Principal sin imagen</div>`}
+        ${continuation?.crop_url ? `<img src="${continuation.crop_url}" alt="Continuacion" loading="lazy" decoding="async" />` : `<div class="empty-state">Continuacion sin imagen</div>`}
+      </div>
+      <div class="continuation-candidate-body">
+        <strong>${escapeHtml(parent?.crop_name || candidate.parent_record_id || "-")} + ${escapeHtml(continuation?.crop_name || candidate.continuation_record_id || "-")}</strong>
+        <span class="status-pill status-${recommendation === "merge" ? "listo" : "requiere_revision"}">${confidence}% ${recommendation === "merge" ? "fusion sugerida" : "revisar"}</span>
+        <p class="muted">${reasons.length ? escapeHtml(reasons.join("; ")) : "Candidato consecutivo."}</p>
+        ${warnings.length ? `<p class="meta-error-comment"><strong>Advertencia:</strong> ${escapeHtml(warnings.join("; "))}</p>` : ""}
+        <div class="candidate-actions">
+          <button type="button" class="primary" data-merge-continuation="${index}">Fusionar para OCR</button>
+          <button type="button" data-dismiss-continuation="${index}">Omitir</button>
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function bindContinuationCandidateControls() {
+  const detectBtn = $("detectContinuations");
+  if (detectBtn) detectBtn.onclick = detectContinuationCandidates;
+  const detectAndMergeBtn = $("detectAndMergeContinuations");
+  if (detectAndMergeBtn) detectAndMergeBtn.onclick = detectAndMergeContinuations;
+  const clearBtn = $("clearContinuationCandidates");
+  if (clearBtn) clearBtn.onclick = () => {
+    state.continuationCandidates = [];
+    state.continuationScanSummary = null;
+    renderCropsStage();
+  };
+  const mergeSuggestedBtn = $("mergeSuggestedContinuations");
+  if (mergeSuggestedBtn) mergeSuggestedBtn.onclick = mergeSuggestedContinuations;
+  const toolbarMergeSuggestedBtn = $("toolbarMergeSuggestedContinuations");
+  if (toolbarMergeSuggestedBtn) toolbarMergeSuggestedBtn.onclick = mergeSuggestedContinuations;
+  document.querySelectorAll("[data-merge-continuation]").forEach((button) => {
+    button.onclick = () => mergeContinuationCandidate(Number(button.dataset.mergeContinuation || 0));
+  });
+  document.querySelectorAll("[data-dismiss-continuation]").forEach((button) => {
+    button.onclick = () => {
+      const index = Number(button.dataset.dismissContinuation || 0);
+      state.continuationCandidates.splice(index, 1);
+      renderCropsStage();
+    };
+  });
+}
+
+async function detectContinuationCandidates(options = {}) {
+  const silent = Boolean(options && options.silent);
+  const records = stagingWorkRecords(state.snapshot?.records || []);
+  const totalRecords = Array.isArray(records) ? records.length : 0;
+  const maxCandidates = Math.min(5000, Math.max(500, totalRecords * 2));
+  const minConfidence = Number.isFinite(Number(options.minConfidence))
+    ? Number(options.minConfidence)
+    : 0.1;
+  state.continuationCandidatesLoading = true;
+  renderCropsStage();
+  try {
+    const payload = await api("/api/staging/continuations/candidates", {
+      method: "POST",
+      body: { min_confidence: minConfidence, max_candidates: maxCandidates },
+    });
+    state.continuationCandidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
+    state.continuationScanSummary = payload?.scan_summary && typeof payload.scan_summary === "object"
+      ? payload.scan_summary
+      : null;
+    if (!silent) {
+      const scan = state.continuationScanSummary || {};
+      const total = continuationDisplayCropTotal(scan) || totalRecords || 0;
+      const complete = Number(scan.complete_discarded || 0);
+      const strong = Number(scan.merge_recommended || 0);
+      const reviewed = Math.max(0, Number(scan.candidate_pairs_returned ?? state.continuationCandidates.length) - strong);
+      setStatus(state.continuationCandidates.length
+        ? `Detector reviso ${total} crop(s): ${complete} completo(s) descartado(s), ${strong} fusion(es) fuerte(s), ${reviewed} para revisar.`
+        : `Detector reviso ${total} crop(s): ${complete} completo(s) descartado(s). No se encontraron continuaciones probables.`);
+    }
+    return state.continuationCandidates;
+  } catch (err) {
+    setStatus(`Error buscando continuaciones: ${err.message}`);
+    state.continuationScanSummary = null;
+    return [];
+  } finally {
+    state.continuationCandidatesLoading = false;
+    renderCropsStage();
+  }
+}
+
+async function detectAndMergeContinuations() {
+  const candidates = await detectContinuationCandidates({ silent: true, minConfidence: 0.1 });
+  const suggestedCount = suggestedContinuationCandidates(candidates).length;
+  if (!suggestedCount) {
+    setStatus(candidates.length
+      ? `${candidates.length} candidato(s) encontrados, pero ninguno cumple fusion automatica. Revisa manualmente.`
+      : "No se encontraron continuaciones probables para fusionar.");
+    return;
+  }
+  await mergeSuggestedContinuations();
+}
+
+function suggestedContinuationCandidates(candidates = state.continuationCandidates) {
+  return (Array.isArray(candidates) ? candidates : [])
+    .filter((candidate) => candidate?.recommendation === "merge")
+    .filter((candidate) => String(candidate.parent_record_id || "").trim() && String(candidate.continuation_record_id || "").trim());
+}
+
+function groupedContinuationMerges(candidates = suggestedContinuationCandidates()) {
+  const byParent = new Map();
+  for (const candidate of candidates || []) {
+    const parentId = String(candidate.parent_record_id || "").trim();
+    const childId = String(candidate.continuation_record_id || "").trim();
+    if (!parentId || !childId) continue;
+    if (!byParent.has(parentId)) byParent.set(parentId, new Set());
+    byParent.get(parentId).add(childId);
+  }
+  return [...byParent.entries()].map(([parentId, childIds]) => ({
+    parentId,
+    childIds: [...childIds],
+  }));
+}
+
+async function mergeSuggestedContinuations() {
+  const groups = groupedContinuationMerges();
+  const totalContinuations = groups.reduce((total, group) => total + group.childIds.length, 0);
+  if (!groups.length || !totalContinuations) {
+    setStatus("No hay continuaciones con recomendacion fuerte para fusionar.");
+    return;
+  }
+  state.continuationCandidatesApplying = true;
+  renderCropsStage();
+  await runAction("Fusionando continuaciones sugeridas...", async () => {
+    const mergedChildIds = new Set();
+    for (let index = 0; index < groups.length; index += 1) {
+      const group = groups[index];
+      setBusy(`Fusionando continuaciones sugeridas... ${index + 1} de ${groups.length}`);
+      const payload = await api("/api/staging/continuations/merge", {
+        method: "POST",
+        body: {
+          record_id: group.parentId,
+          continuation_record_ids: group.childIds,
+          compact: true,
+          include_summary: index === groups.length - 1,
+        },
+      });
+      if (Array.isArray(payload.updated_records)) mergeRecordsIntoSnapshot(payload.updated_records);
+      if (payload.summary) state.snapshot.summary = payload.summary;
+      if (Array.isArray(payload.timeline)) state.snapshot.timeline = payload.timeline;
+      group.childIds.forEach((id) => mergedChildIds.add(String(id)));
+    }
+    state.continuationCandidates = state.continuationCandidates.filter((candidate) => (
+      !mergedChildIds.has(String(candidate.continuation_record_id || ""))
+    ));
+    if (state.continuationScanSummary) {
+      state.continuationScanSummary = {
+        ...state.continuationScanSummary,
+        merge_recommended: Math.max(0, Number(state.continuationScanSummary.merge_recommended || 0) - mergedChildIds.size),
+        candidate_pairs: Math.max(0, Number(state.continuationScanSummary.candidate_pairs || 0) - mergedChildIds.size),
+      };
+    }
+    if (groups[0]?.parentId) state.selectedRecordId = groups[0].parentId;
+    render();
+    return `Fusionadas ${mergedChildIds.size} continuacion(es) sugeridas para OCR.`;
+  }, "Continuaciones sugeridas fusionadas.");
+  state.continuationCandidatesApplying = false;
+  renderCropsStage();
+}
+
+async function mergeContinuationCandidate(index) {
+  const candidate = state.continuationCandidates[index];
+  if (!candidate) return;
+  await runAction("Fusionando crops para OCR...", async () => {
+    const payload = await api("/api/staging/continuations/merge", {
+      method: "POST",
+      body: {
+        record_id: candidate.parent_record_id,
+        continuation_record_ids: [candidate.continuation_record_id],
+        compact: true,
+      },
+    });
+    if (Array.isArray(payload.updated_records)) mergeRecordsIntoSnapshot(payload.updated_records);
+    if (payload.summary) state.snapshot.summary = payload.summary;
+    if (Array.isArray(payload.timeline)) state.snapshot.timeline = payload.timeline;
+    state.continuationCandidates.splice(index, 1);
+    state.selectedRecordId = candidate.parent_record_id;
+    render();
+    return "Crops fusionados para OCR.";
+  }, "Crops fusionados para OCR.");
+}
+
+function refreshCropGalleryWindow(records = state.snapshot.records || [], { force = false } = {}) {
   const gallery = $("cropGallery");
   if (!gallery) return false;
   const { signature } = cropGalleryRenderState(records);
   const current = gallery.querySelector("[data-crop-window-signature]")?.dataset.cropWindowSignature || `full:${records.length}`;
-  if (current === signature) return false;
+  if (!force && current === signature) return false;
   gallery.innerHTML = renderCropGallery(records);
   bindCropGalleryControls(records);
   return true;
@@ -6758,7 +7942,9 @@ function renderCropPreview(record) {
     ${recordSourceStale(record) ? `<div class="library-notice">Este crop viene de un box modificado. Regenera staging antes de correr OCR.</div>` : ""}
     ${!recordSourceStale(record) && recordDownstreamInvalidated(record) ? `<div class="library-notice">El crop ya fue regenerado; vuelve a ejecutar OCR/segmentacion para actualizar la cadena.</div>` : ""}
     ${errorComment ? `<div class="library-notice error-notice"><strong>Error:</strong> ${escapeHtml(errorComment)}</div>` : ""}
-    ${record.crop_url ? `<img class="preview-img" src="${record.crop_url}" alt="Crop seleccionado" loading="lazy" decoding="async" />` : `<p class="muted">Imagen no encontrada.</p>`}
+    ${record.crop_url
+      ? `<img class="preview-img" src="${record.crop_url}" alt="Crop seleccionado" loading="lazy" decoding="async" />`
+      : `<p class="muted">${record.crop_exists ? "Cargando imagen..." : "Imagen no encontrada."}</p>`}
     <div class="metadata-grid">
       <span class="muted">Registro</span><strong>${escapeHtml(record.record_id)}</strong>
       <span class="muted">Pagina</span><strong>${escapeHtml(source.page_number || "-")}</strong>
@@ -6914,20 +8100,20 @@ function bindOcrQueueControls(records = state.snapshot.records || []) {
   });
 }
 
-function bindRecordCards() {
+function bindRecordCards(records = state.snapshot.records || []) {
   document.querySelectorAll("[data-record]").forEach((item) => {
     item.onclick = () => {
       state.selectedRecordId = item.dataset.record;
       state.selectedOcrIndex = 0;
       state.reviewDraft = null;
       persistFactoryUiState();
-      updateSelectedCropUi();
+      updateSelectedCropUi(records);
     };
   });
 }
 
 function bindCropGalleryControls(records = state.snapshot.records || []) {
-  bindRecordCards();
+  bindRecordCards(records);
   document.querySelectorAll("[data-crop-window-offset]").forEach((btn) => {
     btn.onclick = (event) => {
       event.stopPropagation();
@@ -6996,7 +8182,7 @@ function updateSelectedCropUi(records = state.snapshot.records || []) {
     bindOcrQueueControls(records);
     updateCropsQueueUi(records);
   }
-  const record = selectedRecord();
+  const record = selectedRecord(records);
   document.querySelectorAll("[data-record]").forEach((card) => {
     card.classList.toggle("active", String(card.dataset.record || "") === String(state.selectedRecordId || ""));
   });
@@ -7013,7 +8199,7 @@ function updateSelectedCropUi(records = state.snapshot.records || []) {
 
 function recordIndex(records = state.snapshot?.records || []) {
   if (!records.length) return 0;
-  const currentId = selectedRecord()?.record_id || state.selectedRecordId;
+  const currentId = selectedRecord(records)?.record_id || state.selectedRecordId;
   const index = findRecordIndexById(currentId, records);
   return index >= 0 ? index : 0;
 }
@@ -7087,9 +8273,9 @@ function recordOptionLabel(record, index) {
 
 function renderOcrStage() {
   resetLazyTechnicalDetails();
-  syncSelectedRecord();
-  const record = selectedRecord();
-  const records = state.snapshot.records || [];
+  const records = stagingWorkRecords(state.snapshot.records || []);
+  syncSelectedRecord(records);
+  const record = selectedRecord(records);
   const currentRecordIndex = recordIndex(records);
   $("stageHost").innerHTML = `
     <div class="stage-header">
@@ -7104,8 +8290,9 @@ function renderOcrStage() {
     ${renderModelStrip(["ocr", "figure_segmenter"])}
     ${renderOcrEndpointCard()}
     ${renderTaskProgress("ocr")}
-    ${record ? renderOcrRecord(record) : `<div class="panel muted">Selecciona un crop de staging.</div>`}
+  ${record ? renderOcrRecord(record, records) : `<div class="panel muted">Selecciona un crop de staging.</div>`}
   `;
+  if (record) hydrateSelectedRecordDetailSoon(record);
   bindRecordCards();
   const rawBatchBtn = $("openRawOcrBatch");
   if (rawBatchBtn) rawBatchBtn.onclick = () => openBatchMode("raw_ocr");
@@ -7113,7 +8300,7 @@ function renderOcrStage() {
   if (!state.ocrEndpoint && !state.ocrEndpointLoading) {
     refreshOcrEndpointStatus({ silent: true });
   }
-  bindRecordNavigation();
+  bindRecordNavigation(records);
   bindOcrNavigation(record);
   bindFigureSegmentEditor(record);
   bindRawOcrActions(record);
@@ -7137,8 +8324,7 @@ function renderOcrStage() {
   } : "");
 }
 
-function renderOcrRecord(record) {
-  const records = state.snapshot.records || [];
+function renderOcrRecord(record, records = stagingWorkRecords(state.snapshot.records || [])) {
   const currentRecordIndex = recordIndex(records);
   const totalRecords = records.length;
   const segments = record.figure_segments_web || [];
@@ -7208,7 +8394,8 @@ function renderOcrRecord(record) {
 }
 
 function syncFigureSegments(record, segments) {
-  const signature = `${record?.record_id || ""}|${JSON.stringify((segments || []).map((seg) => seg.bbox_px || []))}`;
+  const imageUrl = record?.ocr_input_crop_url || record?.crop_url || "";
+  const signature = `${record?.record_id || ""}|${imageUrl}|${JSON.stringify((segments || []).map((seg) => seg.bbox_px || []))}`;
   if (state._figureSegmentSource === signature && state.figureSegmentDirty) return;
   if (state._figureSegmentSource !== signature || !state.figureSegmentDirty) {
     state.figureSegments = (segments || []).map((seg) => normalizeBox((seg.bbox_px || []).slice(0, 4).map((value) => Number(value))));
@@ -7222,6 +8409,7 @@ function syncFigureSegments(record, segments) {
 }
 
 function renderFigureSegmentEditor(record) {
+  const editorImageUrl = record?.ocr_input_crop_url || record?.crop_url || "";
   return `
     <div class="figure-segment-editor">
       <div class="segment-editor-toolbar">
@@ -7232,7 +8420,7 @@ function renderFigureSegmentEditor(record) {
         <span id="figSegmentCount" class="selection-count">${state.figureSegments.length} segmento(s)${state.figureSegmentDirty ? " | sin guardar" : ""}</span>
       </div>
       <div class="figure-canvas-wrap">
-        ${record.crop_url ? `<canvas id="figureCanvas"></canvas>` : `<div class="empty-state">Sin crop disponible para editar segmentos.</div>`}
+        ${editorImageUrl ? `<canvas id="figureCanvas"></canvas>` : `<div class="empty-state">Sin crop disponible para editar segmentos.</div>`}
       </div>
     </div>
   `;
@@ -7306,7 +8494,7 @@ function setupFigureCanvas(record) {
     ctx.font = "600 14px Segoe UI";
     ctx.fillText("No se pudo cargar el crop para editar segmentos.", 16, 38);
   };
-  img.src = record.crop_url;
+  img.src = record.ocr_input_crop_url || record.crop_url;
   canvas.onmousedown = onFigureMouseDown;
   canvas.onmousemove = onFigureMouseMove;
   canvas.onmouseup = onFigureMouseUp;
@@ -7677,9 +8865,25 @@ function batchModeConfig(mode = state.batchMode) {
 function openBatchMode(mode, options = {}) {
   state.batchMode = mode;
   state.batchReviewScope = String(options.reviewScope || "auto");
-  state.batchText = buildBatchText(mode);
   state.batchResults = [];
   state.taskProgress = null;
+  if (mode !== "raw_ocr" && (state.snapshot?.records || []).some(recordIsCompact)) {
+    state.batchText = "";
+    render();
+    setStatus("Cargando detalles completos para el lote...");
+    hydrateRecordsByIds(
+      (state.snapshot.records || []).map((record) => record.record_id),
+      { detail: "full", media: true, rerender: false },
+    )
+      .then(() => {
+        state.batchText = buildBatchText(mode);
+        render();
+        setStatus(batchModeConfig(mode).title);
+      })
+      .catch((err) => setStatus(`Error cargando lote: ${err.message}`));
+    return;
+  }
+  state.batchText = buildBatchText(mode);
   render();
   setStatus(batchModeConfig(mode).title);
 }
@@ -7729,6 +8933,7 @@ function renderBatchEditor() {
     </section>
   `;
   bindBatchEditorActions(config.mode);
+  bindBatchResultActions();
   setInspector({
     "Modo": config.title,
     "Registros": records.length,
@@ -7889,7 +9094,7 @@ function mergedRawOcrForNormalizer(record, continuationInputs = normalizerContin
   const parts = [String(record?.raw_ocr || "").trim()];
   (continuationInputs || []).forEach((item, index) => {
     const text = String(item?.raw_ocr || "").trim();
-    if (text) parts.push(`[CONT. ${index + 1}] ${text}`);
+    if (text) parts.push(`Continuacion fusionada ${index + 1}: ${text}`);
   });
   return parts.filter(Boolean).join("\n\n");
 }
@@ -8086,15 +9291,30 @@ function normalizedForBatchRecord(record) {
   };
 }
 
-function batchRecordTitle(record, index) {
-  const name = String(record?.crop_name || "").trim()
-    || String(record?.crop_path || "").split(/[\\/]/).filter(Boolean).pop()
-    || String(record?.record_id || "").trim()
-    || `imagen_${index + 1}`;
-  return name.replace(/\s+/g, " ").trim();
+function isGenericBatchImageName(name) {
+  const basename = String(name || "").split(/[\\/]/).filter(Boolean).pop().trim().toLowerCase();
+  return ["crop.png", "crop.jpg", "crop.jpeg", "crop.webp", "image.png", "output.png"].includes(basename);
 }
 
-function parseBatchBlocks(text) {
+function extensionFromFilename(name, fallback = ".png") {
+  const match = String(name || "").match(/(\.[a-z0-9]{2,5})$/i);
+  return match ? match[1] : fallback;
+}
+
+function batchRecordTitle(record, index) {
+  const cropName = String(record?.crop_name || "").trim();
+  const pathName = String(record?.crop_path || "").split(/[\\/]/).filter(Boolean).pop() || "";
+  const recordId = String(record?.record_id || "").trim();
+  const cropId = String(record?.crop_id || "").trim();
+  const stableId = recordId || cropId;
+  const title = [cropName, pathName].find((item) => item && !isGenericBatchImageName(item))
+    || (stableId ? `${stableId}${extensionFromFilename(pathName)}` : "")
+    || pathName
+    || `imagen_${index + 1}.png`;
+  return title.replace(/\s+/g, " ").trim();
+}
+
+function parseBatchBlocks(text, options = {}) {
   let cleanText = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   cleanText = cleanText
     .replace(/^\s*```(?:text|txt|latex|json)?\s*\n/i, "")
@@ -8114,6 +9334,23 @@ function parseBatchBlocks(text) {
     else if (line.trim()) preamble.push(line);
   });
   if (current) blocks.push({ ...current, body: current.lines.join("\n").trim() });
+  if (!blocks.length && options.allowLatexItemsFallback) {
+    const itemMatches = [...cleanText.matchAll(/\\item\s*\[\s*\\textbf\s*\{\s*\d+\s*\.?\s*\}\s*\]/g)];
+    if (itemMatches.length) {
+      const fallbackBlocks = itemMatches.map((match, index) => {
+        const start = match.index || 0;
+        const end = itemMatches[index + 1]?.index ?? cleanText.length;
+        return {
+          title: `item_${index + 1}`,
+          body: cleanText.slice(start, end).trim(),
+          generatedTitle: true,
+        };
+      }).filter((block) => block.body);
+      if (fallbackBlocks.length) {
+        return { blocks: fallbackBlocks, preamble: "", fallback: "latex_items" };
+      }
+    }
+  }
   return { blocks, preamble: preamble.join("\n").trim() };
 }
 
@@ -8234,8 +9471,16 @@ function renderBatchResults() {
   if (!results.length) {
     return `<div id="batchResults" class="batch-results muted">Sin resultados todavia.</div>`;
   }
+  const errorCount = results.filter((row) => String(row.status || "") === "error").length;
   return `
     <div id="batchResults" class="batch-results">
+      ${errorCount ? `
+        <div class="batch-result info">
+          <strong>${errorCount} error(es)</strong>
+          <span>Usa este reporte para pegar aqui exactamente que fallo.</span>
+          <button id="copyBatchErrors" type="button">Copiar errores</button>
+        </div>
+      ` : ""}
       ${results.map((row) => `
         <div class="batch-result ${escapeAttr(row.status || "info")}">
           <strong>${escapeHtml(row.title || row.record_id || "-")}</strong>
@@ -8246,10 +9491,37 @@ function renderBatchResults() {
   `;
 }
 
+function batchResultsReportText({ errorsOnly = true } = {}) {
+  const rows = (state.batchResults || []).filter((row) => !errorsOnly || String(row.status || "") === "error");
+  return rows.map((row, index) => {
+    const status = String(row.status || "info").toUpperCase();
+    const title = String(row.title || row.record_id || "-").trim();
+    const message = String(row.message || "").trim();
+    return `${index + 1}. [${status}] ${title}\n${message}`;
+  }).join("\n\n");
+}
+
+async function copyBatchErrors() {
+  const text = batchResultsReportText({ errorsOnly: true });
+  if (!text.trim()) return setStatus("No hay errores de lote para copiar.");
+  try {
+    await navigator.clipboard.writeText(text);
+    setStatus("Errores del lote copiados.");
+  } catch (_) {
+    setStatus("No se pudo copiar automaticamente el reporte de errores.");
+  }
+}
+
+function bindBatchResultActions() {
+  const copyErrorsBtn = $("copyBatchErrors");
+  if (copyErrorsBtn) copyErrorsBtn.onclick = copyBatchErrors;
+}
+
 function updateBatchResultsInline() {
   const host = $("batchResults");
   if (!host) return;
   host.outerHTML = renderBatchResults();
+  bindBatchResultActions();
 }
 
 function updateBatchProgressInline({ current, total, ok, failed, skipped, active }) {
@@ -8281,16 +9553,20 @@ function mergeRecordsIntoSnapshot(updates = []) {
     if (!record?.record_id) continue;
     const records = state.snapshot.records;
     const index = findRecordIndexById(record.record_id, records);
-    if (index >= 0) records[index] = record;
+    if (index >= 0) records[index] = mergeRecordPayload(records[index], record);
     else records.push(record);
     changed = true;
   }
-  if (changed) resetRecordLookup();
+  if (changed) {
+    state.snapshot.records.sort(compareRecordsByReadingOrder);
+    resetRecordLookup();
+  }
 }
 
 function applyRecordSavedPayload(payload) {
   const validSchema = payload?.schema_version === "pdf_factory_web_record_saved_v1"
-    || payload?.schema_version === "pdf_factory_web_ai_normalized_v1";
+    || payload?.schema_version === "pdf_factory_web_ai_normalized_v1"
+    || payload?.schema_version === "pdf_factory_web_review_saved_v1";
   if (!payload || !validSchema) return null;
   const updated = payload.record || null;
   if (updated) replaceRecordInSnapshot(updated);
@@ -8321,8 +9597,9 @@ function applyOcrJobRecordUpdates(job) {
     renderMetrics();
     renderTimeline();
     if (state.stage === "crops") {
-      updateCropsQueueUi();
-      updateSelectedCropUi();
+      const activeRecords = stagingWorkRecords(state.snapshot.records || []);
+      updateCropsQueueUi(activeRecords);
+      updateSelectedCropUi(activeRecords);
     }
   }
   return maxSeq;
@@ -8359,19 +9636,21 @@ function recomputeFactorySummaryLocally() {
     const reviewStatus = normalizeStatus(record.review?.review_status || "");
     const isContinuation = isReviewContinuationRecord(record);
     if (!isContinuation) {
+      acc.records_total += 1;
       acc.problems_total += 1;
       acc.primary_records_total += 1;
     }
-    if (record.crop_url || (record.crop_path && !recordSourceStale(record))) acc.crops_found += 1;
-    if (hasText(record.raw_ocr)) acc.ocr_done += 1;
-    if (hasObjectData(record.figure_segmentation)) acc.segments_done += 1;
+    if (!isContinuation && (record.crop_url || (record.crop_path && !recordSourceStale(record)))) acc.crops_found += 1;
+    if (!isContinuation && hasText(record.raw_ocr)) acc.ocr_done += 1;
+    if (!isContinuation && hasObjectData(record.figure_segmentation)) acc.segments_done += 1;
     if (!isContinuation && hasObjectData(record.normalized)) acc.normalized_done += 1;
     if (!isContinuation && (status === "listo" || reviewStatus === "listo")) acc.ready += 1;
     else if (!isContinuation && (status === "requiere_revision" || reviewStatus === "requiere_revision")) acc.needs_review += 1;
-    if (status === "error" || (record.errors || []).some((item) => String(item || "").trim())) acc.errors += 1;
+    if (!isContinuation && (status === "error" || (record.errors || []).some((item) => String(item || "").trim()))) acc.errors += 1;
     return acc;
   }, {
-    records_total: records.length,
+    raw_records_total: records.length,
+    records_total: 0,
     problems_total: 0,
     primary_records_total: 0,
     crops_found: 0,
@@ -8457,7 +9736,7 @@ async function saveBatchEditor(mode = state.batchMode) {
   if (!records.length) return setStatus("No hay registros de staging para guardar.");
   const editor = $("batchEditor");
   state.batchText = editor?.value || state.batchText || "";
-  const parsed = parseBatchBlocks(state.batchText);
+  const parsed = parseBatchBlocks(state.batchText, { allowLatexItemsFallback: mode === "final_latex" });
   const total = Math.max(records.length, parsed.blocks.length);
   const results = [];
   let ok = 0;
@@ -8469,8 +9748,12 @@ async function saveBatchEditor(mode = state.batchMode) {
   setBusy(batchModeConfig(mode).saving);
   try {
     if (parsed.preamble) {
-      failed += 1;
-      results.push({ status: "error", title: "Texto sin separador", message: "Hay texto antes del primer separador; no se guardo." });
+      if (mode === "final_latex" && parsed.blocks.length) {
+        results.push({ status: "info", title: "Texto fuera de bloques", message: "Se ignoro texto antes del primer separador y se guardaron los bloques detectados." });
+      } else {
+        failed += 1;
+        results.push({ status: "error", title: "Texto sin separador", message: "Hay texto antes del primer separador; no se guardo." });
+      }
       state.batchResults = results.slice();
       updateBatchResultsInline();
     }
@@ -8974,18 +10257,16 @@ function continuationRecordsForParent(parent, allRecords = state.snapshot?.recor
 }
 
 function renderReviewImageStack(record, allRecords = state.snapshot?.records || []) {
-  const images = [record, ...continuationRecordsForParent(record, allRecords)].filter(Boolean);
-  if (!images.length) return `<p class="muted">Imagen no encontrada.</p>`;
+  void allRecords;
+  if (!record) return `<p class="muted">Imagen no encontrada.</p>`;
   return `
     <div class="review-image-stack">
-      ${images.map((item, index) => `
-        <figure class="review-image-frame ${index > 0 ? "continuation" : "primary"}">
-          <figcaption>${index === 0 ? "Imagen principal" : `Continuacion ${index}`}</figcaption>
-          ${item.crop_url
-            ? `<img class="preview-img" src="${item.crop_url}" alt="${index === 0 ? "Problema" : "Continuacion"}" loading="lazy" decoding="async" />`
-            : `<p class="muted">Imagen no encontrada.</p>`}
-        </figure>
-      `).join("")}
+      <figure class="review-image-frame primary">
+        <figcaption>Imagen principal</figcaption>
+        ${record.crop_url
+          ? `<img class="preview-img" src="${record.crop_url}" alt="Problema" loading="lazy" decoding="async" />`
+          : `<p class="muted">${record.crop_exists ? "Cargando imagen..." : "Imagen no encontrada."}</p>`}
+      </figure>
     </div>
   `;
 }
@@ -9099,6 +10380,7 @@ function renderReviewStage() {
   const normalized = state.reviewDraft || (record ? record.normalized || {} : {});
   const finalLatexText = record ? finalReviewTextFromRecord(record) : "";
   const errorComment = recordErrorComment(record);
+  if (record) hydrateSelectedRecordDetailSoon(record);
   $("stageHost").innerHTML = `
     <div class="stage-header">
       <div>
@@ -10005,46 +11287,172 @@ function syncPrimaryAction() {
 }
 
 async function detectSelectedPages() {
-  const pages = selectedRangeText();
-  if (!pages) return setStatus("Selecciona al menos una pagina.");
+  const selectedPages = [...state.selectedPages].sort((a, b) => a - b);
+  if (!selectedPages.length) return setStatus("Selecciona al menos una pagina.");
+  const reviewedPages = new Set(
+    factoryPages()
+      .filter((page) => Boolean(page.reviewed))
+      .map((page) => Number(page.page_number || 0)),
+  );
+  const pendingPages = selectedPages.filter((page) => !reviewedPages.has(page));
+  if (!pendingPages.length) {
+    return setStatus("Todas las paginas seleccionadas ya fueron revisadas; sus boxes se conservaron sin cambios.");
+  }
+  const pages = compactPageRange(pendingPages);
+  const protectedCount = selectedPages.length - pendingPages.length;
   const models = activeModelPayload();
   await runAction("Detectando boxes con modelo entrenado...", async () => {
-    const payload = await api("/api/pages/detect", {
-      method: "POST",
-      body: {
-        pages,
-        dpi: 300,
-        confidence: 0.25,
-        detector_model: models.pdf_detector,
-        replace_existing: Boolean(state.syncDetectedPages),
-        compact: true,
-        include_summary: false,
-      },
-    });
-    if (payload?.schema_version === "pdf_factory_web_pages_detected_v1") {
-      applyDetectedPagesPayload(payload);
-    } else {
-      state.snapshot = payload;
-      resetRecordLookup();
+    const requestBody = {
+      pages,
+      dpi: 300,
+      confidence: 0.25,
+      detector_model: models.pdf_detector,
+      replace_existing: Boolean(state.syncDetectedPages),
+      preserve_reviewed: true,
+      compact: true,
+      include_summary: false,
+    };
+    try {
+      const job = await startPageDetectJob(requestBody);
+      const total = Number(job.total || pendingPages.length || 1);
+      state.pageDetectJobId = String(job.job_id || "");
+      state.taskProgress = {
+        type: "pages",
+        running: true,
+        label: "Segmentacion de paginas",
+        phase: "queued",
+        phaseLabel: "Cola preparada",
+        total,
+        current: 0,
+        activePosition: 0,
+        progressLabel: `0/${total}`,
+        ok: 0,
+        failed: 0,
+        message: `Detectando boxes 0/${total}`,
+        activeId: "",
+        activeName: pages || "Paginas pendientes",
+      };
+      state.stage = "pages";
+      persistFactoryUiState();
+      render();
+      const message = await pollPageDetectJob(job.job_id || "");
+      return protectedCount
+        ? `${message || "Boxes detectados."} ${protectedCount} pagina(s) revisada(s) se conservaron sin cambios.`
+        : message;
+    } catch (err) {
+      if (!String(err?.message || "").includes("Ruta API no encontrada")) throw err;
+      const payload = await api("/api/pages/detect", {
+        method: "POST",
+        body: requestBody,
+      });
+      return finishDetectedPagesPayload(payload);
     }
-    state.stage = "boxes";
-    state.selectedPageRecordId = "";
-    state.boxes = [];
-    state._boxSource = "";
-    state._boxSourceSignature = "";
-    state.selectedBox = -1;
-    state.boxDirty = false;
-    state.drag = null;
-    persistFactoryUiState();
-    render();
-    persistFactoryUiState();
-    const removed = Number(payload?.removed_pages || 0);
-    const invalidated = Number(payload?.invalidated_records || 0);
-    if (removed || invalidated) {
-      return `Boxes detectados. ${removed} pagina(s) quitadas y ${invalidated} registro(s) pendientes de regenerar.`;
-    }
-    return "Boxes detectados. Revisa antes de crear staging.";
   }, "Boxes detectados. Revisa antes de crear staging.");
+}
+
+async function startPageDetectJob(requestBody) {
+  return api("/api/pages/detect/jobs/start", {
+    method: "POST",
+    body: requestBody,
+  });
+}
+
+async function pollPageDetectJob(jobId = "") {
+  if (state.pageDetectJobPolling) return "";
+  state.pageDetectJobPolling = true;
+  state.pageDetectJobId = String(jobId || state.pageDetectJobId || "").trim();
+  persistFactoryUiState();
+  try {
+    while (true) {
+      const query = state.pageDetectJobId ? `?job_id=${encodeURIComponent(state.pageDetectJobId)}` : "";
+      const job = await api(`/api/pages/detect/jobs/status${query}`);
+      if (!job || job.status === "idle") return "";
+      if (job.job_id) state.pageDetectJobId = String(job.job_id || "");
+      const total = Number(job.total || 0);
+      const current = Number(job.current || 0);
+      state.taskProgress = {
+        type: "pages",
+        running: Boolean(job.running),
+        label: "Segmentacion de paginas",
+        phase: String(job.phase || ""),
+        phaseLabel: String(job.phase_label || ""),
+        total,
+        current,
+        activePosition: Number(job.active_position || 0),
+        progressLabel: String(job.progress_label || ""),
+        ok: Number(job.ok || 0),
+        failed: Number(job.failed || 0),
+        message: String(job.message || "Detectando boxes..."),
+        activeId: "",
+        activeName: selectedRangeText() || "Paginas seleccionadas",
+      };
+      setBusy(job.running ? `Detectando boxes ${current} de ${total}...` : "");
+      if (job.running && !updateTaskProgressDom("pages")) render();
+      if (!job.running) {
+        if (String(job.status || "") === "error") {
+          throw new Error(job.message || "Error detectando boxes.");
+        }
+        const message = finishDetectedPagesPayload(job.result || {});
+        state.taskProgress = null;
+        state.pageDetectJobId = "";
+        persistFactoryUiState();
+        render();
+        return message || "Boxes detectados. Revisa antes de crear staging.";
+      }
+      await sleep(1200);
+    }
+  } finally {
+    state.pageDetectJobPolling = false;
+  }
+}
+
+async function resumePageDetectJobIfRunning({ silent = true } = {}) {
+  if (state.view !== "factory" || state.pageDetectJobPolling) return;
+  try {
+    const savedJobId = String(state.pageDetectJobId || "").trim();
+    const savedQuery = savedJobId ? `?job_id=${encodeURIComponent(savedJobId)}` : "";
+    let job = await api(`/api/pages/detect/jobs/status${savedQuery}`);
+    if (!job?.running && savedJobId) {
+      state.pageDetectJobId = "";
+      persistFactoryUiState();
+      job = await api("/api/pages/detect/jobs/status");
+    }
+    if (!job?.running) return;
+    state.stage = "pages";
+    state.pageDetectJobId = String(job.job_id || state.pageDetectJobId || "").trim();
+    persistFactoryUiState();
+    if (!silent) setStatus("La deteccion de boxes sigue en segundo plano; reconectando progreso.");
+    pollPageDetectJob(job.job_id || "").catch((err) => setStatus(`Error consultando deteccion de boxes: ${err.message}`));
+  } catch (_) {
+    // Servidores anteriores no tienen jobs de deteccion; seguimos con la UI normal.
+  }
+}
+
+function finishDetectedPagesPayload(payload) {
+  if (payload?.schema_version === "pdf_factory_web_pages_detected_v1") {
+    applyDetectedPagesPayload(payload);
+  } else if (payload) {
+    state.snapshot = payload;
+    resetRecordLookup();
+  }
+  state.stage = "boxes";
+  state.selectedPageRecordId = "";
+  state.boxes = [];
+  state.detectorBoxes = [];
+  state._boxSource = "";
+  state._boxSourceSignature = "";
+  state.selectedBox = -1;
+  state.boxDirty = false;
+  state.drag = null;
+  persistFactoryUiState();
+  render();
+  persistFactoryUiState();
+  const removed = Number(payload?.removed_pages || 0);
+  const invalidated = Number(payload?.invalidated_records || 0);
+  if (removed || invalidated) {
+    return `Boxes detectados. ${removed} pagina(s) quitadas y ${invalidated} registro(s) pendientes de regenerar.`;
+  }
+  return "Boxes detectados. Revisa antes de crear staging.";
 }
 
 function applyDetectedPagesPayload(payload) {
@@ -10060,6 +11468,8 @@ function applyMaterializedStagingPayload(payload) {
   if (!payload || payload.schema_version !== "pdf_factory_web_staging_materialized_v1" || !state.snapshot) return false;
   state.snapshot.records = Array.isArray(payload.records) ? payload.records : [];
   resetRecordLookup();
+  state.continuationCandidates = [];
+  state.continuationScanSummary = null;
   if (payload.summary) state.snapshot.summary = payload.summary;
   if (Array.isArray(payload.timeline)) state.snapshot.timeline = payload.timeline;
   if (!payload.summary && !payload.timeline) recomputeFactorySummaryLocally();
@@ -10576,6 +11986,10 @@ function setBusy(text) {
   $("statusText").textContent = text;
 }
 
+function hasActiveBusyMessage() {
+  return Boolean(String($("busyText")?.textContent || "").trim());
+}
+
 function setStatus(text) {
   $("statusText").textContent = text;
   $("busyText").textContent = "";
@@ -10609,8 +12023,7 @@ function setInspector(text) {
   }).join("") : "Sin detalle.";
 }
 
-function selectedRecord() {
-  const records = state.snapshot?.records || [];
+function selectedRecord(records = state.snapshot?.records || []) {
   return findRecordById(state.selectedRecordId, records) || records[0];
 }
 
@@ -10628,22 +12041,129 @@ function libraryComputedCache() {
 
 function filteredBooks(applyStatus = true) {
   const query = normalizeLibrarySearchText(state.library.query);
+  const selectedCourse = String(state.library.course || "all");
+  const sortMode = String(state.library.bookSort || "recent");
   const cache = libraryComputedCache();
-  const key = `filtered:${Number(state.library.dataVersion || 0)}:${applyStatus ? "1" : "0"}:${state.library.status}:${query}`;
+  const key = `filtered:${Number(state.library.dataVersion || 0)}:${applyStatus ? "1" : "0"}:${state.library.status}:${selectedCourse}:${sortMode}:${query}`;
   if (Array.isArray(cache[key])) return cache[key];
   const rows = (state.library.books || []).filter((book) => {
     const haystack = book._searchKey || buildLibrarySearchKey(book);
     const matchesQuery = !query || haystack.includes(query);
+    const matchesCourse = selectedCourse === "all" || libraryCourseKey(libraryBookCourseLabel(book)) === selectedCourse;
     const instances = book.instances || [];
     const matchesStatus = !applyStatus
       || state.library.status === "all"
       || (instances.length
         ? instances.some((item) => instanceWorkflowStatus(item) === state.library.status)
         : bookWorkflowStatus(book) === state.library.status);
-    return matchesQuery && matchesStatus;
+    return matchesQuery && matchesCourse && matchesStatus;
   });
-  cache[key] = rows;
-  return rows;
+  cache[key] = sortLibraryBooks(rows, sortMode);
+  return cache[key];
+}
+
+function sortLibraryBooks(books, mode = "recent") {
+  if (mode === "name") {
+    return [...(books || [])].sort((a, b) => String(a?.title || "").localeCompare(String(b?.title || ""), "es", { numeric: true, sensitivity: "base" }));
+  }
+  if (mode === "work") return sortLibraryBooksForWork(books);
+  return sortLibraryBooksByRecent(books);
+}
+
+function sortLibraryBooksByRecent(books) {
+  return [...(books || [])].sort((a, b) => {
+    const recentA = libraryBookRecentScore(a);
+    const recentB = libraryBookRecentScore(b);
+    const rankA = libraryBookWorkRank(a);
+    const rankB = libraryBookWorkRank(b);
+    return (
+      recentB - recentA
+      || rankA.bucket - rankB.bucket
+      || rankA.missing - rankB.missing
+      || String(a?.title || "").localeCompare(String(b?.title || ""), "es", { numeric: true, sensitivity: "base" })
+    );
+  });
+}
+
+function sortLibraryBooksForWork(books) {
+  return [...(books || [])].sort((a, b) => {
+    const rankA = libraryBookWorkRank(a);
+    const rankB = libraryBookWorkRank(b);
+    return (
+      rankA.bucket - rankB.bucket
+      || rankB.lastTouched - rankA.lastTouched
+      || rankB.activity - rankA.activity
+      || rankA.missing - rankB.missing
+      || String(a?.title || "").localeCompare(String(b?.title || ""), "es", { numeric: true, sensitivity: "base" })
+    );
+  });
+}
+
+function libraryDateScore(value) {
+  if (value === undefined || value === null || value === "") return 0;
+  if (typeof value === "number" && Number.isFinite(value)) return value > 100000000000 ? value : value * 1000;
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function libraryBookLastTouched(book) {
+  const dateFields = [
+    book?.last_activity_at,
+    book?.lastActivityAt,
+    book?.updated_at,
+    book?.updatedAt,
+    book?.modified_at,
+    book?.modifiedAt,
+    book?.created_at,
+    book?.createdAt,
+    book?.fecha_actualizacion,
+    book?.fecha_creacion,
+  ];
+  let score = Math.max(...dateFields.map(libraryDateScore), 0);
+  for (const instance of book?.instances || []) {
+    score = Math.max(score, libraryDateScore(instance?.last_activity_at), libraryDateScore(instance?.updated_at), libraryDateScore(instance?.created_at));
+    const summary = instance?.summary && typeof instance.summary === "object" ? instance.summary : {};
+    score = Math.max(score, libraryDateScore(summary?.updated_at), libraryDateScore(summary?.last_activity_at));
+  }
+  return Number.isFinite(score) ? score : 0;
+}
+
+function libraryBookRecentScore(book) {
+  const created = Math.max(
+    libraryDateScore(book?.created_at),
+    libraryDateScore(book?.createdAt),
+    libraryDateScore(book?.fecha_creacion),
+    0,
+  );
+  if (created > 0) return created;
+  const updated = Math.max(
+    libraryDateScore(book?.updated_at),
+    libraryDateScore(book?.updatedAt),
+    libraryDateScore(book?.fecha_actualizacion),
+    0,
+  );
+  if (updated > 0) return updated;
+  const id = Number(book?.id || 0);
+  return Number.isFinite(id) ? id : 0;
+}
+
+function libraryBookWorkRank(book) {
+  const progress = bookProgressIndicators(book);
+  const visualStatus = bookVisualStatus(book, progress);
+  const rawIndicators = book?.indicators && typeof book.indicators === "object" ? book.indicators : {};
+  const scanned = Number(rawIndicators.escaneados_sesion_total || rawIndicators.escaneados_total || 0);
+  const db = Number(progress.inDb || 0);
+  const errors = Number(progress.errors || 0);
+  const missing = Number(progress.missing || 0);
+  const total = Number(progress.total || 0);
+  const activity = Math.max(scanned, db, errors, total - missing, 0);
+  const lastTouched = libraryBookLastTouched(book);
+  let bucket = 3;
+  if (errors > 0) bucket = 0;
+  else if (visualStatus === "in-progress" || scanned > 0 || (db > 0 && missing > 0)) bucket = 1;
+  else if (visualStatus === "untouched") bucket = 2;
+  else if (visualStatus === "complete") bucket = 4;
+  return { bucket, activity, missing, lastTouched };
 }
 
 function filteredInstances(instances) {
@@ -10678,22 +12198,13 @@ function wordProblemSelectionIds() {
 
 function pruneWordProblemSelection() {
   const ps = wordProblemSelectionState();
-  const problems = Array.isArray(ps.result?.problems) ? ps.result.problems : [];
-  if (!problems.length) return;
-  const valid = new Set(problems.map((problem) => Number(problem.id || 0)).filter((id) => id > 0));
-  let changed = false;
-  const previewId = Number(ps.previewProblemId || 0);
-  if (previewId > 0 && !valid.has(previewId)) {
-    ps.previewProblemId = "";
-    changed = true;
-  }
   [...ps.selectedIds].forEach((id) => {
-    if (!valid.has(id)) {
+    const numericId = Number(id || 0);
+    if (!Number.isFinite(numericId) || numericId <= 0) {
       ps.selectedIds.delete(id);
-      changed = true;
     }
   });
-  return changed;
+  return false;
 }
 
 async function loadWordProblems({ silent = false } = {}) {
@@ -10733,11 +12244,25 @@ async function convertWordProblems() {
   const ids = [...wordProblemSelectionIds()];
   if (!ids.length) return setStatus("Selecciona problemas para convertir a Word.");
   if (ps.converting) return setStatus("Ya hay una conversion de problemas en ejecucion.");
-  ps.converting = true;
   ps.error = "";
   ps.lastResult = null;
-  renderLibraryContent();
   try {
+    setStatus("Elige donde guardar el Word...");
+    const defaultName = String(ps.title || state.library.selectedDb || "practica_word").trim();
+    const saveResult = await api("/api/word/save-dialog", {
+      method: "POST",
+      body: {
+        suggested_name: defaultName,
+        initial_path: ps.outputDocx || "",
+      },
+    });
+    if (!saveResult?.selected || !saveResult?.word_path) {
+      setStatus("Conversion cancelada: no se eligio archivo de salida.");
+      return;
+    }
+    ps.outputDocx = saveResult.word_path;
+    ps.converting = true;
+    renderLibraryContent();
     const settings = wordConversionSettings();
     const result = await api("/api/word/convert-problems", {
       method: "POST",
@@ -10746,7 +12271,7 @@ async function convertWordProblems() {
         problem_ids: ids,
         title: ps.title || "",
         structure: ps.structure || "",
-        output_docx: ps.outputDocx || "",
+        output_docx: saveResult.word_path,
         repo: settings.repo || "",
         python: settings.python || "",
         template: settings.template || "",
@@ -11346,7 +12871,7 @@ function instanceNaturalSortKey(instance) {
 
 function selectedLibraryBook() {
   const cache = libraryComputedCache();
-  const key = `selectedBook:${Number(state.library.dataVersion || 0)}:${state.library.selectedBookId}:${normalizeLibrarySearchText(state.library.query)}`;
+  const key = `selectedBook:${Number(state.library.dataVersion || 0)}:${state.library.selectedBookId}:${state.library.course}:${normalizeLibrarySearchText(state.library.query)}`;
   if (Object.prototype.hasOwnProperty.call(cache, key)) return cache[key];
   const book = (state.library.books || []).find((row) => row.id === state.library.selectedBookId) || filteredBooks(false)[0] || null;
   if (!book) return null;
@@ -11843,7 +13368,12 @@ function parseRange(raw, total) {
 }
 
 function selectedRangeText() {
-  const pages = [...state.selectedPages].sort((a, b) => a - b);
+  return compactPageRange([...state.selectedPages]);
+}
+
+function compactPageRange(values) {
+  const pages = [...new Set((values || []).map(Number).filter((page) => Number.isFinite(page) && page >= 1))]
+    .sort((a, b) => a - b);
   if (!pages.length) return "";
   const ranges = [];
   let start = pages[0];
@@ -11867,6 +13397,7 @@ window.addEventListener("resize", () => {
   window.clearTimeout(boxCanvasResizeTimer);
   boxCanvasResizeTimer = window.setTimeout(() => resizeBoxCanvas({ preserveCenter: true }), 120);
 });
+document.addEventListener("keydown", handleBoxEditorKeyDown);
 
 function cloneBoxes(boxes) {
   return (boxes || []).map((box) => box.slice(0, 4).map((value) => Number(value)));
@@ -11907,6 +13438,7 @@ async function bootApp() {
     render();
     refreshNormalizerTrainingStatusLater({ silent: true, renderNotice: true });
     setStatus("Fabrica lista.");
+    resumePageDetectJobIfRunning({ silent: true });
     resumeOcrJobIfRunning({ silent: true });
     resumeNormalizerJobIfRunning({ silent: true });
     return;
@@ -11934,5 +13466,6 @@ if ($("themeToggle")) {
 document.addEventListener("toggle", handleLazyTechnicalDetailToggle, true);
 window.submitBookForm = submitBookForm;
 window.submitInstanceForm = submitInstanceForm;
-startAppVersionWatcher().catch(() => {});
-bootApp().catch((err) => setStatus(`Error inicial: ${err.message}`));
+bootApp()
+  .catch((err) => setStatus(`Error inicial: ${err.message}`))
+  .finally(() => startAppVersionWatcher().catch(() => {}));

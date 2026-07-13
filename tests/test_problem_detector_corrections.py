@@ -173,6 +173,144 @@ class ProblemDetectorCorrectionTests(unittest.TestCase):
             self.assertEqual(metadata["baseline_reviewed_before"], False)
             self.assertEqual(metadata["human_boxes"][0]["order"], 1)
 
+    def test_pipeline_update_page_boxes_persists_multiclass_auxiliary_boxes(self) -> None:
+        class FakeGolden:
+            def __init__(self, page_image: Path) -> None:
+                self.rows = [
+                    SimpleNamespace(
+                        record_id="page_001",
+                        page_number=1,
+                        boxes=[(10, 20, 100, 80)],
+                        reviewed=False,
+                        layout_mode="una_columna",
+                        detector_source="pdf_factory:test-model",
+                        image_path=page_image,
+                        pdf_path="E:/Banco/libro.pdf",
+                        box_details=[
+                            {"bbox_px": [10, 20, 100, 80], "class_name": "problem", "class_key": "problem"},
+                        ],
+                        detector_detections=[
+                            {"bbox_px": [10, 20, 100, 80], "class_name": "problem", "class_key": "problem"},
+                            {"bbox_px": [12, 22, 32, 34], "class_name": "problem_number", "class_key": "problem_number"},
+                            {"bbox_px": [20, 65, 95, 78], "class_name": "answer_block", "class_key": "answer_block"},
+                        ],
+                    )
+                ]
+
+            def load_instance(self, _name: str):
+                return self.rows
+
+            def upsert_instance_rows(self, _name: str, rows):
+                self.rows = list(rows)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            page = root / "page.png"
+            Image.new("RGB", (200, 100), "white").save(page)
+            context = InstancePipelineContext(
+                book_code="GEO01",
+                instance_type="semana_01",
+                pdf_path="E:/Banco/libro.pdf",
+                workspace_dir=str(workspace),
+            )
+            golden = FakeGolden(page)
+            service = InstancePdfPipelineService(context, golden_controller=golden, staging_store=InstanceStagingStore(context, root=root / "staging"))
+
+            service.update_page_boxes(
+                "page_001",
+                [[10, 20, 100, 80]],
+                detector_detections=[
+                    {"bbox_px": [20, 28, 44, 42], "class_name": "problem_number"},
+                    {"bbox_px": [30, 70, 120, 90], "class_name": "answer_block"},
+                ],
+                layout_mode="una_columna",
+                reviewed=True,
+            )
+
+            row = golden.rows[0]
+            self.assertEqual(row.boxes, [(10, 20, 100, 80)])
+            self.assertEqual([item["class_key"] for item in row.detector_detections], ["problem", "problem_number", "answer_block"])
+            self.assertEqual(row.detector_detections[1]["bbox_px"], [20, 28, 44, 42])
+            self.assertEqual(row.detector_detections[2]["bbox_px"], [30, 70, 120, 90])
+            corrections = workspace / "temporales" / "semana_01" / "datasets" / "problem_detector_corrections"
+            label = next((corrections / "labels").glob("*.txt")).read_text(encoding="utf-8")
+            self.assertIn("\n1 ", "\n" + label)
+            self.assertIn("\n2 ", "\n" + label)
+
+    def test_pipeline_can_capture_reviewed_pages_for_training_without_box_delta(self) -> None:
+        class FakeGolden:
+            def __init__(self, page_image: Path) -> None:
+                self.rows = [
+                    SimpleNamespace(
+                        record_id="page_001",
+                        page_number=1,
+                        boxes=[(10, 20, 100, 80)],
+                        reviewed=True,
+                        layout_mode="una_columna",
+                        detector_source="pdf_factory:test-model",
+                        image_path=page_image,
+                        pdf_path="E:/Banco/libro.pdf",
+                        box_details=[
+                            {"bbox_px": [10, 20, 100, 80], "class_name": "problem", "class_key": "problem"},
+                        ],
+                        detector_detections=[
+                            {"bbox_px": [10, 20, 100, 80], "class_name": "problem", "class_key": "problem"},
+                            {"bbox_px": [12, 22, 32, 34], "class_name": "problem_number", "class_key": "problem_number"},
+                            {"bbox_px": [20, 65, 95, 78], "class_name": "answer_block", "class_key": "answer_block"},
+                        ],
+                    ),
+                    SimpleNamespace(
+                        record_id="page_002",
+                        page_number=2,
+                        boxes=[(5, 10, 60, 50)],
+                        reviewed=False,
+                        layout_mode="una_columna",
+                        detector_source="pdf_factory:test-model",
+                        image_path=page_image,
+                        pdf_path="E:/Banco/libro.pdf",
+                    ),
+                ]
+
+            def load_instance(self, _name: str):
+                return self.rows
+
+            def upsert_instance_rows(self, _name: str, rows):
+                self.rows = list(rows)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            page = root / "page.png"
+            Image.new("RGB", (200, 100), "white").save(page)
+            context = InstancePipelineContext(
+                book_code="GEO01",
+                instance_type="semana_01",
+                pdf_path="E:/Banco/libro.pdf",
+                workspace_dir=str(workspace),
+            )
+            service = InstancePdfPipelineService(
+                context,
+                golden_controller=FakeGolden(page),
+                staging_store=InstanceStagingStore(context, root=root / "staging"),
+            )
+
+            result = service.capture_problem_detector_training_pages(reviewed_only=True)
+
+            self.assertEqual(result["saved"], 1)
+            self.assertEqual(result["skipped"], 1)
+            corrections = workspace / "temporales" / "semana_01" / "datasets" / "problem_detector_corrections"
+            metadata_files = list((corrections / "metadata").glob("*.json"))
+            self.assertEqual(len(metadata_files), 1)
+            metadata = json.loads(metadata_files[0].read_text(encoding="utf-8"))
+            self.assertEqual(metadata["forced_training_capture"], True)
+            self.assertEqual(metadata["capture_reason"], "manual_reviewed_pages_batch")
+            self.assertEqual(metadata["training_target"], "pdf_problem_detector_yolov8_multiclass_boxes")
+            label = next((corrections / "labels").glob("*.txt")).read_text(encoding="utf-8")
+            self.assertIn("\n0 ", "\n" + label)
+            self.assertIn("\n1 ", "\n" + label)
+            self.assertIn("\n2 ", "\n" + label)
+
 
 if __name__ == "__main__":
     unittest.main()

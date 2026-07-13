@@ -17,6 +17,16 @@ SCHEMA_VERSION = "problem_detector_correction_v1"
 MANIFEST_SCHEMA_VERSION = "problem_detector_corrections_manifest_v1"
 CLASS_ID_PROBLEM = 0
 CLASS_NAME_PROBLEM = "problem"
+CLASS_ID_PROBLEM_NUMBER = 1
+CLASS_NAME_PROBLEM_NUMBER = "problem_number"
+CLASS_ID_ANSWER_BLOCK = 2
+CLASS_NAME_ANSWER_BLOCK = "answer_block"
+CLASS_MAP = {
+    CLASS_ID_PROBLEM: CLASS_NAME_PROBLEM,
+    CLASS_ID_PROBLEM_NUMBER: CLASS_NAME_PROBLEM_NUMBER,
+    CLASS_ID_ANSWER_BLOCK: CLASS_NAME_ANSWER_BLOCK,
+}
+CLASS_NAME_TO_ID = {name: class_id for class_id, name in CLASS_MAP.items()}
 DEFAULT_SIGNIFICANT_DELTA_PX = 4
 
 
@@ -43,14 +53,20 @@ def maybe_write_problem_detector_correction(
     layout_mode: str,
     previous_boxes: list[Any],
     human_boxes: list[Any],
+    previous_detections: list[Any] | None = None,
+    human_detections: list[Any] | None = None,
     baseline_reviewed: bool = False,
     root: Path | None = None,
     significant_delta_px: int = DEFAULT_SIGNIFICANT_DELTA_PX,
+    force: bool = False,
+    capture_reason: str = "",
 ) -> dict[str, Any]:
     previous = _coerce_boxes(previous_boxes)
     human = _coerce_boxes(human_boxes)
-    change_summary = summarize_box_changes(previous, human, significant_delta_px=significant_delta_px)
-    if not _should_save(change_summary):
+    previous_labeled = _coerce_labeled_boxes(previous_detections) if previous_detections is not None else _labeled_problem_boxes(previous)
+    human_labeled = _coerce_labeled_boxes(human_detections) if human_detections is not None else _labeled_problem_boxes(human)
+    change_summary = summarize_labeled_box_changes(previous_labeled, human_labeled, significant_delta_px=significant_delta_px)
+    if not force and not _should_save(change_summary):
         return {
             "schema_version": SCHEMA_VERSION,
             "saved": False,
@@ -62,9 +78,9 @@ def maybe_write_problem_detector_correction(
     images_dir = dataset_root / "images"
     labels_dir = dataset_root / "labels"
     metadata_dir = dataset_root / "metadata"
-    images_dir.mkdir(parents=True, exist_ok=True)
-    labels_dir.mkdir(parents=True, exist_ok=True)
-    metadata_dir.mkdir(parents=True, exist_ok=True)
+    _mkdir(images_dir)
+    _mkdir(labels_dir)
+    _mkdir(metadata_dir)
 
     correction_id = compact_id(
         context.book_code,
@@ -77,16 +93,16 @@ def maybe_write_problem_detector_correction(
     source_image = Path(page_image).expanduser()
     image_target = images_dir / f"{correction_id}.png"
     width, height = _copy_page_image_as_png(source_image, image_target)
-    yolo_lines = [_to_yolo_line(box, width, height) for box in human]
+    yolo_lines = [_to_yolo_line(row["xyxy"], width, height, class_id=int(row["class_id"])) for row in human_labeled]
     yolo_lines = [line for line in yolo_lines if line]
     label_target = labels_dir / f"{correction_id}.txt"
-    label_target.write_text(("\n".join(yolo_lines) + "\n") if yolo_lines else "", encoding="utf-8")
+    _write_text(label_target, ("\n".join(yolo_lines) + "\n") if yolo_lines else "")
 
     metadata_target = metadata_dir / f"{correction_id}.json"
     existing: dict[str, Any] = {}
-    if metadata_target.exists():
+    if _path_exists(metadata_target):
         try:
-            existing = json.loads(metadata_target.read_text(encoding="utf-8"))
+            existing = json.loads(_read_text(metadata_target))
             existing = existing if isinstance(existing, dict) else {}
         except Exception:
             existing = {}
@@ -114,19 +130,21 @@ def maybe_write_problem_detector_correction(
         "label_rel": f"labels/{label_target.name}",
         "metadata_rel": f"metadata/{metadata_target.name}",
         "image_size": {"width": int(width), "height": int(height)},
-        "class_map": {str(CLASS_ID_PROBLEM): CLASS_NAME_PROBLEM},
+        "class_map": _class_map_for_rows(human_labeled),
         "model_name": _model_name_from_detector_source(detector_source),
         "detector_source": str(detector_source or ""),
         "baseline_reviewed_before": bool(baseline_reviewed),
+        "forced_training_capture": bool(force),
+        "capture_reason": str(capture_reason or ("manual_training_capture" if force else "human_correction")),
         "layout_mode": str(layout_mode or "auto"),
-        "model_boxes": _box_rows(previous),
-        "human_boxes": _box_rows(human, include_order=True),
+        "model_boxes": _labeled_box_rows(previous_labeled),
+        "human_boxes": _labeled_box_rows(human_labeled, include_order=True),
         "change_summary": change_summary,
         "correction_history": history,
-        "training_target": "pdf_problem_detector_yolov8_problem_boxes",
+        "training_target": "pdf_problem_detector_yolov8_multiclass_boxes" if _has_multiclass_rows(human_labeled) else "pdf_problem_detector_yolov8_problem_boxes",
         "excluded_future_scope": ["problem_vs_solution_classification"],
     }
-    metadata_target.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_text(metadata_target, json.dumps(metadata, ensure_ascii=False, indent=2))
     manifest = rewrite_manifest(dataset_root)
     return {
         "schema_version": SCHEMA_VERSION,
@@ -176,13 +194,48 @@ def summarize_box_changes(
     }
 
 
+def summarize_labeled_box_changes(
+    previous_boxes: list[dict[str, Any]],
+    human_boxes: list[dict[str, Any]],
+    *,
+    significant_delta_px: int = DEFAULT_SIGNIFICANT_DELTA_PX,
+) -> dict[str, Any]:
+    previous_by_class: dict[int, list[tuple[int, int, int, int]]] = {}
+    human_by_class: dict[int, list[tuple[int, int, int, int]]] = {}
+    for row in previous_boxes:
+        previous_by_class.setdefault(int(row["class_id"]), []).append(tuple(int(v) for v in row["xyxy"]))
+    for row in human_boxes:
+        human_by_class.setdefault(int(row["class_id"]), []).append(tuple(int(v) for v in row["xyxy"]))
+    totals = {
+        "added": 0,
+        "removed": 0,
+        "moved_or_resized": 0,
+        "reordered": 0,
+        "previous_total": len(previous_boxes),
+        "human_total": len(human_boxes),
+        "significant_delta_px": max(0, int(significant_delta_px)),
+        "by_class": {},
+    }
+    for class_id in sorted(set(previous_by_class) | set(human_by_class)):
+        summary = summarize_box_changes(
+            previous_by_class.get(class_id, []),
+            human_by_class.get(class_id, []),
+            significant_delta_px=significant_delta_px,
+        )
+        class_name = CLASS_MAP.get(class_id, str(class_id))
+        totals["by_class"][class_name] = summary
+        for key in ("added", "removed", "moved_or_resized", "reordered"):
+            totals[key] += int(summary.get(key) or 0)
+    return totals
+
+
 def rewrite_manifest(root: Path) -> dict[str, Any]:
     dataset_root = Path(root).expanduser().resolve()
     metadata_dir = dataset_root / "metadata"
     rows: list[dict[str, Any]] = []
-    for path in sorted(metadata_dir.glob("*.json"), key=lambda item: item.name.lower()) if metadata_dir.exists() else []:
+    for path in _iter_json_files(metadata_dir):
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(_read_text(path))
         except Exception:
             continue
         if isinstance(payload, dict):
@@ -202,35 +255,80 @@ def rewrite_manifest(root: Path) -> dict[str, Any]:
         "images_dir": str(dataset_root / "images"),
         "labels_dir": str(dataset_root / "labels"),
         "metadata_dir": str(metadata_dir),
-        "class_map": {str(CLASS_ID_PROBLEM): CLASS_NAME_PROBLEM},
+        "class_map": {str(key): value for key, value in CLASS_MAP.items()},
         "counts_by_change": by_change,
         "revision_events_total": sum(max(1, int(row.get("revision_count") or 1)) for row in rows),
         "policy": {
-            "save_only_human_modified_model_boxes": True,
+            "save_only_human_modified_model_boxes": False,
+            "allows_reviewed_page_training_capture": True,
             "problem_vs_solution_classification": "excluded_for_now",
         },
     }
-    dataset_root.mkdir(parents=True, exist_ok=True)
-    (dataset_root / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    _mkdir(dataset_root)
+    _write_text(dataset_root / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
     return manifest
 
 
 def _copy_page_image_as_png(source: Path, target: Path) -> tuple[int, int]:
-    target.parent.mkdir(parents=True, exist_ok=True)
+    _mkdir(target.parent)
     try:
-        with Image.open(source) as image:
+        with Image.open(_fs_path(source)) as image:
             width, height = image.size
             if source.suffix.lower() == ".png":
                 try:
                     if source.resolve() != target.resolve():
-                        shutil.copy2(source, target)
+                        shutil.copy2(_fs_path(source), _fs_path(target))
                     return int(width), int(height)
                 except FileNotFoundError:
                     pass
-            image.convert("RGB").save(target, format="PNG")
+            image.convert("RGB").save(_fs_path(target), format="PNG")
             return int(width), int(height)
     except Exception:
         raise
+
+
+def _fs_path(path: Path) -> str:
+    """Return a filesystem path usable with long Windows paths."""
+    resolved = Path(path).expanduser().resolve()
+    text = str(resolved)
+    if os.name != "nt" or text.startswith("\\\\?\\"):
+        return text
+    if text.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + text[2:]
+    return "\\\\?\\" + text
+
+
+def _mkdir(path: Path) -> None:
+    Path(path).mkdir(parents=True, exist_ok=True)
+
+
+def _path_exists(path: Path) -> bool:
+    return os.path.exists(_fs_path(path))
+
+
+def _read_text(path: Path) -> str:
+    with open(_fs_path(path), "r", encoding="utf-8") as handle:
+        return handle.read()
+
+
+def _write_text(path: Path, text: str) -> None:
+    _mkdir(Path(path).parent)
+    with open(_fs_path(path), "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
+def _iter_json_files(directory: Path) -> list[Path]:
+    if not _path_exists(directory):
+        return []
+    rows: list[Path] = []
+    try:
+        with os.scandir(_fs_path(directory)) as entries:
+            for entry in entries:
+                if entry.is_file() and entry.name.lower().endswith(".json"):
+                    rows.append(Path(directory) / entry.name)
+    except FileNotFoundError:
+        return []
+    return sorted(rows, key=lambda item: item.name.lower())
 
 
 def _coerce_boxes(raw_boxes: list[Any] | tuple[Any, ...]) -> list[tuple[int, int, int, int]]:
@@ -252,6 +350,53 @@ def _coerce_boxes(raw_boxes: list[Any] | tuple[Any, ...]) -> list[tuple[int, int
     return clean
 
 
+def _class_key(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    key = "".join(ch if ch.isalnum() else "_" for ch in text).strip("_")
+    while "__" in key:
+        key = key.replace("__", "_")
+    if key in {"problem_number", "numero", "number"}:
+        return CLASS_NAME_PROBLEM_NUMBER
+    if key in {"answer_block", "alternatives", "alternativas", "options"}:
+        return CLASS_NAME_ANSWER_BLOCK
+    return CLASS_NAME_PROBLEM
+
+
+def _labeled_problem_boxes(boxes: list[tuple[int, int, int, int]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "class": CLASS_NAME_PROBLEM,
+            "class_id": CLASS_ID_PROBLEM,
+            "xyxy": [int(value) for value in box],
+        }
+        for box in boxes
+    ]
+
+
+def _coerce_labeled_boxes(raw_rows: list[Any] | tuple[Any, ...]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for raw in list(raw_rows or []):
+        if isinstance(raw, dict):
+            bbox_raw = raw.get("bbox_px") or raw.get("xyxy") or []
+            class_name = _class_key(raw.get("class_key") or raw.get("class_name") or raw.get("role") or raw.get("class"))
+            class_id = CLASS_NAME_TO_ID.get(class_name, CLASS_ID_PROBLEM)
+        else:
+            bbox_raw = raw
+            class_name = CLASS_NAME_PROBLEM
+            class_id = CLASS_ID_PROBLEM
+        boxes = _coerce_boxes([bbox_raw])
+        if not boxes:
+            continue
+        rows.append(
+            {
+                "class": class_name,
+                "class_id": int(class_id),
+                "xyxy": [int(value) for value in boxes[0]],
+            }
+        )
+    return rows
+
+
 def _box_rows(boxes: list[tuple[int, int, int, int]], *, include_order: bool = False) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for index, box in enumerate(boxes, start=1):
@@ -266,7 +411,30 @@ def _box_rows(boxes: list[tuple[int, int, int, int]], *, include_order: bool = F
     return rows
 
 
-def _to_yolo_line(box: tuple[int, int, int, int], width: int, height: int) -> str:
+def _labeled_box_rows(rows: list[dict[str, Any]], *, include_order: bool = False) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for index, row in enumerate(rows, start=1):
+        item = {
+            "class": str(row.get("class") or CLASS_MAP.get(int(row.get("class_id") or 0), CLASS_NAME_PROBLEM)),
+            "class_id": int(row.get("class_id") or 0),
+            "xyxy": [int(value) for value in list(row.get("xyxy") or [])[:4]],
+        }
+        if include_order:
+            item["order"] = index
+        result.append(item)
+    return result
+
+
+def _class_map_for_rows(rows: list[dict[str, Any]]) -> dict[str, str]:
+    class_ids = {int(row.get("class_id") or 0) for row in rows} or {CLASS_ID_PROBLEM}
+    return {str(class_id): CLASS_MAP.get(class_id, str(class_id)) for class_id in sorted(class_ids)}
+
+
+def _has_multiclass_rows(rows: list[dict[str, Any]]) -> bool:
+    return any(int(row.get("class_id") or 0) != CLASS_ID_PROBLEM for row in rows)
+
+
+def _to_yolo_line(box: tuple[int, int, int, int] | list[int], width: int, height: int, *, class_id: int = CLASS_ID_PROBLEM) -> str:
     if width <= 0 or height <= 0:
         return ""
     x1, y1, x2, y2 = [float(value) for value in box]
@@ -280,7 +448,7 @@ def _to_yolo_line(box: tuple[int, int, int, int], width: int, height: int) -> st
     y_center = ((y1 + y2) / 2.0) / float(height)
     box_width = (x2 - x1) / float(width)
     box_height = (y2 - y1) / float(height)
-    return f"{CLASS_ID_PROBLEM} {x_center:.6f} {y_center:.6f} {box_width:.6f} {box_height:.6f}"
+    return f"{int(class_id)} {x_center:.6f} {y_center:.6f} {box_width:.6f} {box_height:.6f}"
 
 
 def _match_boxes(

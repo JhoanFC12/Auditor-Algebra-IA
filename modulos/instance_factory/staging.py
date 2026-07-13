@@ -291,6 +291,152 @@ class InstanceStagingStore:
     def manifest_path(self) -> Path:
         return self.root / "manifest.json"
 
+    @property
+    def server_artifacts_path(self) -> Path:
+        return self.root / "server_artifacts.json"
+
+    def load_server_artifacts(self) -> dict[str, Any]:
+        if not self.server_artifacts_path.exists():
+            return {
+                "schema_version": "pdf_factory_server_artifacts_v1",
+                "updated_at": "",
+                "page_boxes": {},
+                "raw_ocr": {},
+            }
+        try:
+            payload = json.loads(self.server_artifacts_path.read_text(encoding="utf-8"))
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        page_boxes = payload.get("page_boxes")
+        if not isinstance(page_boxes, dict):
+            page_boxes = {}
+        raw_ocr = payload.get("raw_ocr")
+        if not isinstance(raw_ocr, dict):
+            raw_ocr = {}
+        return {
+            "schema_version": "pdf_factory_server_artifacts_v1",
+            "updated_at": str(payload.get("updated_at") or ""),
+            "page_boxes": page_boxes,
+            "raw_ocr": raw_ocr,
+        }
+
+    def record_server_page_boxes(
+        self,
+        *,
+        page_number: int,
+        boxes: list[dict[str, Any]],
+        artifact: dict[str, Any],
+        job_id: str = "",
+        position: int = 0,
+        rewrite_manifest: bool = True,
+    ) -> dict[str, Any]:
+        page_key = str(int(page_number))
+        current = self.load_server_artifacts()
+        page_boxes = dict(current.get("page_boxes") or {})
+        entry = {
+            "schema_version": "pdf_factory_server_page_boxes_v1",
+            "page_number": int(page_number),
+            "position": int(position or 0),
+            "boxes_count": len(list(boxes or [])),
+            "artifact": dict(artifact or {}),
+            "job_id": str(job_id or ""),
+            "updated_at": utc_now_text(),
+        }
+        page_boxes[page_key] = entry
+        payload = {
+            "schema_version": "pdf_factory_server_artifacts_v1",
+            "updated_at": utc_now_text(),
+            "page_boxes": page_boxes,
+            "raw_ocr": dict(current.get("raw_ocr") or {}),
+        }
+        self.server_artifacts_path.parent.mkdir(parents=True, exist_ok=True)
+        self.server_artifacts_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        if rewrite_manifest:
+            self.rewrite_manifest()
+        return entry
+
+    def record_server_raw_ocr(
+        self,
+        *,
+        record_id: str,
+        raw_ocr: str,
+        artifact: dict[str, Any],
+        job_id: str = "",
+        position: int = 0,
+        model: str = "",
+        rewrite_manifest: bool = True,
+    ) -> dict[str, Any]:
+        clean_record_id = str(record_id or "").strip()
+        if not clean_record_id:
+            raise ValueError("record_id requerido para guardar OCR servidor.")
+        current = self.load_server_artifacts()
+        raw_index = dict(current.get("raw_ocr") or {})
+        entry = {
+            "schema_version": "pdf_factory_server_raw_ocr_v1",
+            "record_id": clean_record_id,
+            "position": int(position or 0),
+            "characters": len(str(raw_ocr or "")),
+            "artifact": dict(artifact or {}),
+            "job_id": str(job_id or ""),
+            "model": str(model or ""),
+            "updated_at": utc_now_text(),
+        }
+        raw_index[clean_record_id] = entry
+        payload = {
+            "schema_version": "pdf_factory_server_artifacts_v1",
+            "updated_at": utc_now_text(),
+            "page_boxes": dict(current.get("page_boxes") or {}),
+            "raw_ocr": raw_index,
+        }
+        self.server_artifacts_path.parent.mkdir(parents=True, exist_ok=True)
+        self.server_artifacts_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        record = self.get_record(clean_record_id)
+        if record is not None:
+            previous = str(record.raw_ocr or "")
+            record.raw_ocr = str(raw_ocr or "")
+            record.structured_ocr = {}
+            record.artifacts = {
+                **dict(record.artifacts or {}),
+                "server_raw_ocr_artifact": dict(artifact or {}),
+                "server_raw_ocr_job_id": str(job_id or ""),
+            }
+            record.trace = {
+                **dict(record.trace or {}),
+                "last_server_raw_ocr": {
+                    "schema_version": "server_raw_ocr_trace_v1",
+                    "job_id": str(job_id or ""),
+                    "model": str(model or ""),
+                    "position": int(position or 0),
+                    "previous_characters": len(previous),
+                    "characters": len(record.raw_ocr),
+                    "updated_at": utc_now_text(),
+                },
+            }
+            if record.raw_ocr.strip():
+                record.set_step(
+                    PipelineStep.OCR,
+                    StageStatus.READY,
+                    "OCR crudo guardado desde job servidor",
+                    source="server_hf_ocr",
+                    characters=len(record.raw_ocr),
+                )
+            else:
+                record.set_step(
+                    PipelineStep.OCR,
+                    StageStatus.PENDING,
+                    "OCR crudo vacio desde job servidor",
+                    source="server_hf_ocr",
+                )
+            record.clear_recovered_errors()
+            record.sync_status_from_steps()
+            self.upsert_record(record, rewrite_manifest=False)
+        if rewrite_manifest:
+            self.rewrite_manifest()
+        return entry
+
     @staticmethod
     def load_manifest_summary_from_root(root: Path | str) -> dict[str, int] | None:
         """Read staging counters from manifest.json without loading every record file."""
@@ -413,6 +559,10 @@ class InstanceStagingStore:
         ]
         if not all(parts[:4]) or bbox_key in ("[]", "null"):
             return ""
+        if str(source.get("ocr_input_mode") or "") == "merged_crops_replacement":
+            merged_from = source.get("merged_from_record_ids")
+            if isinstance(merged_from, list) and merged_from:
+                return "|".join([*parts, json.dumps([str(item) for item in merged_from], separators=(",", ":"))])
         return "|".join(parts)
 
     def metadata_issues(self, record: StagingProblemRecord) -> list[str]:
@@ -772,7 +922,8 @@ class InstanceStagingStore:
         rows = records if records is not None else self.load_records()
         continuation_ids = self._summary_continuation_record_ids(rows)
         summary = {
-            "records_total": len(rows),
+            "raw_records_total": len(rows),
+            "records_total": 0,
             "problems_total": 0,
             "primary_records_total": 0,
             "crops_found": 0,
@@ -788,6 +939,7 @@ class InstanceStagingStore:
         for row in rows:
             is_continuation = self._is_summary_continuation_record(row, continuation_ids)
             if not is_continuation:
+                summary["records_total"] += 1
                 summary["problems_total"] += 1
                 summary["primary_records_total"] += 1
             crop_exists = False
@@ -800,10 +952,11 @@ class InstanceStagingStore:
                 else:
                     crop_exists = Path(row.crop_path).exists()
             if crop_exists:
-                summary["crops_found"] += 1
-            if row.raw_ocr:
+                if not is_continuation:
+                    summary["crops_found"] += 1
+            if row.raw_ocr and not is_continuation:
                 summary["ocr_done"] += 1
-            if row.figure_segmentation:
+            if row.figure_segmentation and not is_continuation:
                 summary["segments_done"] += 1
             if row.normalized and not is_continuation:
                 summary["normalized_done"] += 1
@@ -817,7 +970,7 @@ class InstanceStagingStore:
                 summary["human_reviewed"] += 1
             elif status == StageStatus.NEEDS_REVIEW or review_status == StageStatus.NEEDS_REVIEW:
                 summary["needs_review"] += 1
-            if status == StageStatus.ERROR or row.errors:
+            if not is_continuation and (status == StageStatus.ERROR or row.errors):
                 summary["errors"] += 1
             db_promotion = dict(dict(row.audit or {}).get("db_promotion") or {})
             if not is_continuation and (db_promotion.get("problem_id") or dict(row.artifacts or {}).get("db_problem_id")):
@@ -847,6 +1000,11 @@ class InstanceStagingStore:
     ) -> bool:
         ids = continuation_ids or set()
         if str(row.record_id or "").strip() in ids or str(row.crop_id or "").strip() in ids:
+            return True
+        source = row.source if isinstance(row.source, dict) else {}
+        if str(source.get("replaced_by_record_id") or "").strip():
+            return True
+        if str(source.get("merged_into_record_id") or "").strip():
             return True
         normalized = row.normalized if isinstance(row.normalized, dict) else {}
         continuation = normalized.get("continuacion") if isinstance(normalized.get("continuacion"), dict) else {}
@@ -947,12 +1105,19 @@ class InstanceStagingStore:
             if not key:
                 continue
             source = dict(row.source or {})
+            figure = row.figure_segmentation if isinstance(row.figure_segmentation, dict) else {}
+            try:
+                segments_total = int(figure.get("segments_total") or 0)
+            except Exception:
+                segments_total = 0
             by_id[key] = {
                 "record_id": str(row.record_id or ""),
                 "crop_id": str(row.crop_id or ""),
                 "crop_name": Path(str(row.crop_path or "")).name,
                 "page_number": source.get("page_number", source.get("source_page_number")),
                 "bbox_px": source.get("bbox_px") if isinstance(source.get("bbox_px"), list) else None,
+                "has_figure": segments_total > 0,
+                "segments_total": segments_total,
                 "texto_fusionado": self._continuation_text_for_record(row),
             }
         record.normalized = {
@@ -1148,6 +1313,7 @@ class InstanceStagingStore:
             "contract": build_pipeline_contract(),
             "contract_validation": self.validate_contract(rows),
             "evaluation_matrix": _build_retraining_evaluation_matrix(),
+            "server_storage": self.load_server_artifacts(),
         }
         self.manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -1249,8 +1415,13 @@ class InstanceStagingStore:
 
     def _sync_review_to_normalizer_training_bank(self, record: StagingProblemRecord, *, review_status: str) -> None:
         try:
+            rewrite_training_index = bool(str(os.environ.get("NORMALIZER_TRAINING_BANK_ROOT") or "").strip())
             if StageStatus.normalize(review_status) != StageStatus.READY:
-                manifest = remove_normalizer_training_sample(self.context, record)
+                manifest = remove_normalizer_training_sample(
+                    self.context,
+                    record,
+                    rewrite_index=rewrite_training_index,
+                )
             else:
                 rows = self.load_records()
                 rows = [row for row in rows if row.record_id != record.record_id] + [record]
@@ -1259,6 +1430,7 @@ class InstanceStagingStore:
                     record,
                     staging_root=self.root,
                     all_records=rows,
+                    rewrite_index=rewrite_training_index,
                 )
             record.artifacts = {
                 **dict(record.artifacts or {}),

@@ -14,7 +14,7 @@ try:
 except Exception:  # pragma: no cover - optional runtime dependency
     OpenAI = None  # type: ignore[assignment]
 
-TRAINED_OCR_VISION_MODEL = "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-agent-angle-policy-merged-v1"
+TRAINED_OCR_VISION_MODEL = "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-agent-nostradamus-wk01-17-merged-v2"
 from ..latex_normalizer import normalize_scan_json_display_text
 
 from .prompts import (

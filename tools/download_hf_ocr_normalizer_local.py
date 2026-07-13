@@ -11,9 +11,9 @@ from huggingface_hub import snapshot_download
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MODEL_REPO = "Jhoan12/math-ocr-normalizer-qwen2.5-0.5b-lora-v1"
+DEFAULT_MODEL_REPO = "Jhoan12/math-ocr-normalizer-qwen2.5-0.5b-nostradamus-wk01-17-lora-v3"
 DEFAULT_BASE_REPO = "Qwen/Qwen2.5-0.5B-Instruct"
-DEFAULT_TARGET_ROOT = REPO_ROOT / "models" / "ocr_normalizer_qwen2_5_0_5b_lora_v1"
+DEFAULT_TARGET_ROOT = REPO_ROOT / "models" / "ocr_normalizer_qwen2_5_0_5b_nostradamus_wk01_17_lora_v3"
 ENV_FILE = REPO_ROOT / ".env.local"
 
 

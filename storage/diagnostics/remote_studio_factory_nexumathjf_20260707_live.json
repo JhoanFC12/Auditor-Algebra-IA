@@ -1,0 +1,151 @@
+﻿{
+    "schema":  "studio_factory_remote_smoke_v1",
+    "base_url":  "https://nexumathjf.com",
+    "started_at":  "2026-07-07T13:31:06.5556163Z",
+    "finished_at":  "2026-07-07T13:31:11.5860629Z",
+    "options":  {
+                    "allow_empty_library":  false,
+                    "allow_job_write":  true,
+                    "allow_word_generation":  true,
+                    "require_official_ready":  false
+                },
+    "summary":  {
+                    "checks":  22,
+                    "failures":  0,
+                    "warnings":  0
+                },
+    "checks":  [
+                   {
+                       "name":  "Health remoto",
+                       "ok":  true,
+                       "detail":  "https://nexumathjf.com",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "health sin fuga sensible",
+                       "ok":  true,
+                       "detail":  "",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Login Studio web",
+                       "ok":  true,
+                       "detail":  "status=200",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Login operador Studio",
+                       "ok":  true,
+                       "detail":  "admin",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "login sin fuga sensible",
+                       "ok":  true,
+                       "detail":  "",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Bootstrap Factory",
+                       "ok":  true,
+                       "detail":  "validation",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "bootstrap sin fuga sensible",
+                       "ok":  true,
+                       "detail":  "",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Biblioteca Factory",
+                       "ok":  true,
+                       "detail":  "20 libro(s)",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "books sin fuga sensible",
+                       "ok":  true,
+                       "detail":  "",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Instancias Factory",
+                       "ok":  true,
+                       "detail":  "23 instancia(s)",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "instances sin fuga sensible",
+                       "ok":  true,
+                       "detail":  "",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Snapshot de instancia",
+                       "ok":  true,
+                       "detail":  "semana_00_-_ngulos_introductorio",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "snapshot sin fuga sensible",
+                       "ok":  true,
+                       "detail":  "",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Permiso de escritura job",
+                       "ok":  true,
+                       "detail":  "Flag explicito -AllowJobWrite",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Job registrado",
+                       "ok":  true,
+                       "detail":  "job_29cd4ed2312143bcbe4ab291",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Job recuperable por status_url",
+                       "ok":  true,
+                       "detail":  "queued",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "job sin fuga sensible",
+                       "ok":  true,
+                       "detail":  "",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Permiso de generar Word",
+                       "ok":  true,
+                       "detail":  "Flag explicito -AllowWordGeneration",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Word job finalizado",
+                       "ok":  true,
+                       "detail":  "Word generado: 30 problema(s), 0 error(es).",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Word artifact disponible",
+                       "ok":  true,
+                       "detail":  "/studio/factory/word/jobs/job_13d359101b1c4f72a8163041/download?artifact=docx",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Word descarga docx",
+                       "ok":  true,
+                       "detail":  "status=200",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "word_job sin fuga sensible",
+                       "ok":  true,
+                       "detail":  "",
+                       "severity":  "error"
+                   }
+               ]
+}

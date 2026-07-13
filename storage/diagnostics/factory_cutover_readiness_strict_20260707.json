@@ -1,0 +1,228 @@
+﻿{
+    "schema":  "studio_factory_cutover_readiness_v1",
+    "generated_at":  "2026-07-07T13:54:13.8288227Z",
+    "strict":  true,
+    "summary":  {
+                    "checks":  36,
+                    "failures":  0,
+                    "warnings":  0
+                },
+    "checks":  [
+                   {
+                       "name":  "Script backup_math_bank.sh",
+                       "ok":  true,
+                       "detail":  "E:\\Github\\MathContentStudio\\scan-math-db\\scripts\\backup_math_bank.sh",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Script restore_math_bank_bundle.py",
+                       "ok":  true,
+                       "detail":  "E:\\Github\\MathContentStudio\\scan-math-db\\scripts\\restore_math_bank_bundle.py",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Script export_math_bank_bundle.py",
+                       "ok":  true,
+                       "detail":  "E:\\Github\\MathContentStudio\\scan-math-db\\scripts\\export_math_bank_bundle.py",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Runbook math-bank-server-migration.md",
+                       "ok":  true,
+                       "detail":  "E:\\Github\\MathContentStudio\\scan-math-db\\docs\\math-bank-server-migration.md",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Backup ref informado",
+                       "ok":  true,
+                       "detail":  "/srv/mathcontentstudio/backups/mathcontentstudio_cutover_ready_20260707_133940.dump",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Rollback plan existente",
+                       "ok":  true,
+                       "detail":  "E:\\Github\\Auditor-IA\\storage\\cutover\\migration_server_verified_20260707\\rollback-plan.md",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Migration manifest existente",
+                       "ok":  true,
+                       "detail":  "E:\\Github\\Auditor-IA\\storage\\cutover\\migration_server_verified_20260707\\migration-manifest.json",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Manifest batch_id",
+                       "ok":  true,
+                       "detail":  "",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Manifest source",
+                       "ok":  true,
+                       "detail":  "",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Manifest target",
+                       "ok":  true,
+                       "detail":  "",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Manifest counts",
+                       "ok":  true,
+                       "detail":  "",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Manifest rollback",
+                       "ok":  true,
+                       "detail":  "",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Manifest count books source",
+                       "ok":  true,
+                       "detail":  "",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Manifest count books target",
+                       "ok":  true,
+                       "detail":  "target=70",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Manifest count books coincide",
+                       "ok":  true,
+                       "detail":  "source=70 target=70",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Manifest count instances source",
+                       "ok":  true,
+                       "detail":  "",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Manifest count instances target",
+                       "ok":  true,
+                       "detail":  "target=430",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Manifest count instances coincide",
+                       "ok":  true,
+                       "detail":  "source=430 target=430",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Manifest count problems source",
+                       "ok":  true,
+                       "detail":  "",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Manifest count problems target",
+                       "ok":  true,
+                       "detail":  "target=6415",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Manifest count problems coincide",
+                       "ok":  true,
+                       "detail":  "source=6415 target=6415",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Manifest count assets source",
+                       "ok":  true,
+                       "detail":  "",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Manifest count assets target",
+                       "ok":  true,
+                       "detail":  "target=111",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Manifest count assets coincide",
+                       "ok":  true,
+                       "detail":  "source=111 target=111",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Manifest missing_files cero",
+                       "ok":  true,
+                       "detail":  "missing_files=0",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Manifest local_only_remaining cero",
+                       "ok":  true,
+                       "detail":  "local_only_remaining=0",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Manifest validation aprobada",
+                       "ok":  true,
+                       "detail":  "status=passed",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Manifest rollback disponible",
+                       "ok":  true,
+                       "detail":  "",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "migration_manifest sin fuga sensible",
+                       "ok":  true,
+                       "detail":  "",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Login remoto para cutover",
+                       "ok":  true,
+                       "detail":  "",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Remote backup_verified",
+                       "ok":  true,
+                       "detail":  "",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Remote rollback_verified",
+                       "ok":  true,
+                       "detail":  "",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Remote assets_migrated",
+                       "ok":  true,
+                       "detail":  "",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Remote can_declare_official",
+                       "ok":  true,
+                       "detail":  "",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "Remote sin escritura local",
+                       "ok":  true,
+                       "detail":  "",
+                       "severity":  "error"
+                   },
+                   {
+                       "name":  "remote_bootstrap sin fuga sensible",
+                       "ok":  true,
+                       "detail":  "",
+                       "severity":  "error"
+                   }
+               ]
+}

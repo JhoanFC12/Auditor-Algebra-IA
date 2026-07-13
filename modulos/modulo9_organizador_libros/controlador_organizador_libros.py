@@ -66,8 +66,13 @@ class BookInstanceInput:
     tipo: str
     total_esperado: int = 0
     titulo_practica: str = ""
+    pdf_path: str = ""
     session_path: str = ""
     soluciones_dir: str = ""
+    nombre_instancia: str = ""
+    estado: str = "pendiente"
+    config_snapshot: dict = None
+    session_schema_version: int = 0
     notas: str = ""
     activo: bool = True
 
@@ -168,7 +173,9 @@ class BookProgressController:
                         COALESCE(inst.instances_solutions_count, 0) AS instances_solutions_count,
                         b.estado,
                         b.notas,
-                        b.activo
+                        b.activo,
+                        b.created_at,
+                        b.updated_at
                     FROM libros_escaneo b
                     LEFT JOIN LATERAL (
                         SELECT
@@ -239,7 +246,9 @@ class BookProgressController:
                         COALESCE(inst.instances_solutions_count, 0) AS instances_solutions_count,
                         estado,
                         notas,
-                        activo
+                        activo,
+                        created_at,
+                        updated_at
                     FROM libros_escaneo b
                     LEFT JOIN (
                         SELECT
@@ -331,7 +340,9 @@ class BookProgressController:
                         COALESCE(art.cover_path_local, '') AS cover_path_local,
                         b.estado,
                         b.notas,
-                        b.activo
+                        b.activo,
+                        b.created_at,
+                        b.updated_at
                     FROM libros_escaneo b
                     LEFT JOIN LATERAL (
                         SELECT
@@ -372,7 +383,9 @@ class BookProgressController:
                         '' AS cover_path_local,
                         estado,
                         notas,
-                        activo
+                        activo,
+                        created_at,
+                        updated_at
                     FROM libros_escaneo
                     WHERE id = %s
                     """,
@@ -533,8 +546,11 @@ class BookProgressController:
             cur = conn.cursor()
             cur.execute(
                 f"""
-                SELECT id, libro_id, {instance_col} AS tipo, COALESCE(titulo_practica, '') AS titulo_practica, total_esperado, session_path,
-                       soluciones_dir, activo, notas
+                SELECT id, libro_id, {instance_col} AS tipo, COALESCE(titulo_practica, '') AS titulo_practica,
+                       total_esperado, COALESCE(pdf_path, '') AS pdf_path, COALESCE(session_path, '') AS session_path,
+                       COALESCE(soluciones_dir, '') AS soluciones_dir, COALESCE(nombre_instancia, '') AS nombre_instancia,
+                       COALESCE(estado, 'pendiente') AS estado, COALESCE(config_snapshot, '{{}}'::jsonb) AS config_snapshot,
+                       COALESCE(session_schema_version, 0) AS session_schema_version, activo, notas
                 FROM libro_instancias_escaneo
                 WHERE libro_id = %s
                 ORDER BY LOWER({instance_col}) ASC, id ASC
@@ -553,8 +569,11 @@ class BookProgressController:
             cur = conn.cursor()
             cur.execute(
                 f"""
-                SELECT id, libro_id, {instance_col} AS tipo, COALESCE(titulo_practica, '') AS titulo_practica, total_esperado, session_path,
-                       soluciones_dir, activo, notas
+                SELECT id, libro_id, {instance_col} AS tipo, COALESCE(titulo_practica, '') AS titulo_practica,
+                       total_esperado, COALESCE(pdf_path, '') AS pdf_path, COALESCE(session_path, '') AS session_path,
+                       COALESCE(soluciones_dir, '') AS soluciones_dir, COALESCE(nombre_instancia, '') AS nombre_instancia,
+                       COALESCE(estado, 'pendiente') AS estado, COALESCE(config_snapshot, '{{}}'::jsonb) AS config_snapshot,
+                       COALESCE(session_schema_version, 0) AS session_schema_version, activo, notas
                 FROM libro_instancias_escaneo
                 ORDER BY libro_id ASC, LOWER({instance_col}) ASC, id ASC
                 """
@@ -576,8 +595,11 @@ class BookProgressController:
             cur = conn.cursor()
             cur.execute(
                 f"""
-                SELECT id, libro_id, {instance_col} AS tipo, COALESCE(titulo_practica, '') AS titulo_practica, total_esperado, session_path,
-                       soluciones_dir, activo, notas
+                SELECT id, libro_id, {instance_col} AS tipo, COALESCE(titulo_practica, '') AS titulo_practica,
+                       total_esperado, COALESCE(pdf_path, '') AS pdf_path, COALESCE(session_path, '') AS session_path,
+                       COALESCE(soluciones_dir, '') AS soluciones_dir, COALESCE(nombre_instancia, '') AS nombre_instancia,
+                       COALESCE(estado, 'pendiente') AS estado, COALESCE(config_snapshot, '{{}}'::jsonb) AS config_snapshot,
+                       COALESCE(session_schema_version, 0) AS session_schema_version, activo, notas
                 FROM libro_instancias_escaneo
                 WHERE libro_id = %s AND {instance_col} = %s
                 """,
@@ -603,6 +625,7 @@ class BookProgressController:
                 raise ValueError("Libro no encontrado.")
             workspace_dir = self._normalize_resource_path_text(str((row[0] if row else "") or "").strip(), prefer_existing=False)
             self._prepare_instance_workspace(workspace_dir, data.tipo)
+            instance_pdf_path = self._normalize_resource_path_text(str(data.pdf_path or "").strip(), prefer_existing=False)
             session_path = data.session_path or str(self._default_session_path_for_instance(workspace_dir, data.tipo))
             soluciones_dir = data.soluciones_dir or str(self._default_solutions_dir_for_instance(workspace_dir, data.tipo))
             session_path = self._normalize_resource_path_text(session_path, prefer_existing=False)
@@ -610,8 +633,9 @@ class BookProgressController:
             cur.execute(
                 f"""
                 INSERT INTO libro_instancias_escaneo
-                    (libro_id, {instance_col}, titulo_practica, total_esperado, session_path, soluciones_dir, activo, notas)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    (libro_id, {instance_col}, titulo_practica, total_esperado, pdf_path, session_path, soluciones_dir,
+                     activo, notas, nombre_instancia, estado, config_snapshot, session_schema_version)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
                 RETURNING id
                 """,
                 (
@@ -619,10 +643,15 @@ class BookProgressController:
                     data.tipo,
                     data.titulo_practica,
                     data.total_esperado,
+                    instance_pdf_path,
                     session_path,
                     soluciones_dir,
                     bool(data.activo),
                     data.notas,
+                    data.nombre_instancia,
+                    data.estado,
+                    json.dumps(data.config_snapshot or {}, ensure_ascii=False),
+                    data.session_schema_version,
                 ),
             )
             instancia_id = int(cur.fetchone()[0])
@@ -646,7 +675,9 @@ class BookProgressController:
             cur = conn.cursor()
             cur.execute(
                 f"""
-                SELECT i.libro_id, i.{instance_col} AS tipo, COALESCE(i.session_path, ''), COALESCE(i.soluciones_dir, ''),
+                SELECT i.libro_id, i.{instance_col} AS tipo, COALESCE(i.pdf_path, ''), COALESCE(i.session_path, ''),
+                       COALESCE(i.soluciones_dir, ''), COALESCE(i.nombre_instancia, ''), COALESCE(i.estado, 'pendiente'),
+                       COALESCE(i.config_snapshot, '{{}}'::jsonb), COALESCE(i.session_schema_version, 0),
                        COALESCE(l.workspace_dir, ''), COALESCE(l.codigo, '')
                 FROM libro_instancias_escaneo i
                 JOIN libros_escaneo l ON l.id = i.libro_id
@@ -659,17 +690,28 @@ class BookProgressController:
                 raise ValueError("Instancia no encontrada.")
             libro_id = int(row[0])
             old_tipo = self._normalize_instance_type(str(row[1] or ""))
-            old_session_path = self._normalize_resource_path_text(str(row[2] or "").strip(), prefer_existing=True)
-            old_soluciones_dir = self._normalize_resource_path_text(str(row[3] or "").strip(), prefer_existing=True)
-            workspace_dir = self._normalize_resource_path_text(str(row[4] or "").strip(), prefer_existing=False)
-            libro_codigo = str(row[5] or "").strip()
+            old_pdf_path = self._normalize_resource_path_text(str(row[2] or "").strip(), prefer_existing=True)
+            old_session_path = self._normalize_resource_path_text(str(row[3] or "").strip(), prefer_existing=True)
+            old_soluciones_dir = self._normalize_resource_path_text(str(row[4] or "").strip(), prefer_existing=True)
+            old_nombre_instancia = str(row[5] or "").strip()
+            old_estado = self._normalize_instance_state(str(row[6] or "pendiente"))
+            old_config_snapshot = self._normalize_instance_config_snapshot(row[7])
+            old_session_schema_version = int(row[8] or 0)
+            workspace_dir = self._normalize_resource_path_text(str(row[9] or "").strip(), prefer_existing=False)
+            libro_codigo = str(row[10] or "").strip()
             self._prepare_instance_workspace(workspace_dir, data.tipo)
             old_default_session = str(self._default_session_path_for_instance(workspace_dir, old_tipo))
             old_default_soluciones = str(self._default_solutions_dir_for_instance(workspace_dir, old_tipo))
             new_default_session = str(self._default_session_path_for_instance(workspace_dir, data.tipo))
             new_default_soluciones = str(self._default_solutions_dir_for_instance(workspace_dir, data.tipo))
+            next_pdf_path = str(data.pdf_path or "").strip() or old_pdf_path
             next_session_path = str(data.session_path or "").strip()
             next_soluciones_dir = str(data.soluciones_dir or "").strip()
+            next_nombre_instancia = str(data.nombre_instancia or "").strip() or old_nombre_instancia
+            next_estado = self._normalize_instance_state(str(data.estado or "").strip() or old_estado)
+            next_config_snapshot = data.config_snapshot if data.config_snapshot else old_config_snapshot
+            next_session_schema_version = int(data.session_schema_version or old_session_schema_version or 0)
+            next_pdf_path = self._normalize_resource_path_text(next_pdf_path, prefer_existing=False)
             if not next_session_path:
                 next_session_path = new_default_session if (not old_session_path or old_session_path == old_default_session) else old_session_path
             if not next_soluciones_dir:
@@ -682,10 +724,15 @@ class BookProgressController:
                 SET {instance_col} = %s,
                     titulo_practica = %s,
                     total_esperado = %s,
+                    pdf_path = %s,
                     session_path = %s,
                     soluciones_dir = %s,
                     activo = %s,
                     notas = %s,
+                    nombre_instancia = %s,
+                    estado = %s,
+                    config_snapshot = %s::jsonb,
+                    session_schema_version = %s,
                     updated_at = NOW()
                 WHERE id = %s
                 """,
@@ -693,10 +740,15 @@ class BookProgressController:
                     data.tipo,
                     data.titulo_practica,
                     data.total_esperado,
+                    next_pdf_path,
                     next_session_path,
                     next_soluciones_dir,
                     bool(data.activo),
                     data.notas,
+                    next_nombre_instancia,
+                    next_estado,
+                    json.dumps(next_config_snapshot or {}, ensure_ascii=False),
+                    next_session_schema_version,
                     int(instancia_id),
                 ),
             )
@@ -963,8 +1015,13 @@ class BookProgressController:
             tipo=self._normalize_instance_type(payload.tipo),
             titulo_practica=str(payload.titulo_practica or "").strip(),
             total_esperado=max(int(payload.total_esperado or 0), 0),
+            pdf_path=self._normalize_resource_path_text(str(payload.pdf_path or "").strip(), prefer_existing=False),
             session_path=self._normalize_resource_path_text(str(payload.session_path or "").strip(), prefer_existing=False),
             soluciones_dir=self._normalize_resource_path_text(str(payload.soluciones_dir or "").strip(), prefer_existing=False),
+            nombre_instancia=str(payload.nombre_instancia or "").strip(),
+            estado=self._normalize_instance_state(str(payload.estado or "pendiente")),
+            config_snapshot=self._normalize_instance_config_snapshot(payload.config_snapshot),
+            session_schema_version=max(int(payload.session_schema_version or 0), 0),
             activo=bool(payload.activo),
             notas=str(payload.notas or "").strip(),
         )
@@ -1040,6 +1097,10 @@ class BookProgressController:
             cur.execute("ALTER TABLE libros_escaneo ADD COLUMN IF NOT EXISTS segmentos_dir TEXT NOT NULL DEFAULT '';")
             cur.execute("ALTER TABLE libros_escaneo ADD COLUMN IF NOT EXISTS soluciones_dir TEXT NOT NULL DEFAULT '';")
             cur.execute("ALTER TABLE libros_escaneo ADD COLUMN IF NOT EXISTS estado VARCHAR(20) NOT NULL DEFAULT 'pendiente';")
+            cur.execute("ALTER TABLE libros_escaneo ADD COLUMN IF NOT EXISTS created_at TIMESTAMP;")
+            cur.execute("ALTER TABLE libros_escaneo ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP;")
+            cur.execute("ALTER TABLE libros_escaneo ALTER COLUMN created_at SET DEFAULT NOW();")
+            cur.execute("ALTER TABLE libros_escaneo ALTER COLUMN updated_at SET DEFAULT NOW();")
             cur.execute(
                 """
                 DO $$
@@ -1083,6 +1144,10 @@ class BookProgressController:
             cur.execute("ALTER TABLE libro_instancias_escaneo ADD COLUMN IF NOT EXISTS pdf_path TEXT NOT NULL DEFAULT '';")
             cur.execute("ALTER TABLE libro_instancias_escaneo ADD COLUMN IF NOT EXISTS session_path TEXT NOT NULL DEFAULT '';")
             cur.execute("ALTER TABLE libro_instancias_escaneo ADD COLUMN IF NOT EXISTS soluciones_dir TEXT NOT NULL DEFAULT '';")
+            cur.execute("ALTER TABLE libro_instancias_escaneo ADD COLUMN IF NOT EXISTS nombre_instancia TEXT NOT NULL DEFAULT '';")
+            cur.execute("ALTER TABLE libro_instancias_escaneo ADD COLUMN IF NOT EXISTS estado VARCHAR(40) NOT NULL DEFAULT 'pendiente';")
+            cur.execute("ALTER TABLE libro_instancias_escaneo ADD COLUMN IF NOT EXISTS config_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb;")
+            cur.execute("ALTER TABLE libro_instancias_escaneo ADD COLUMN IF NOT EXISTS session_schema_version INT NOT NULL DEFAULT 0;")
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS libro_archivos_avance (
@@ -1341,7 +1406,29 @@ class BookProgressController:
         for key in ("pdf_path", "session_path", "soluciones_dir"):
             if key in hydrated:
                 hydrated[key] = self._normalize_resource_path_text(str(hydrated.get(key) or "").strip(), prefer_existing=True)
+        if "config_snapshot" in hydrated:
+            hydrated["config_snapshot"] = self._normalize_instance_config_snapshot(hydrated.get("config_snapshot"))
+        if "estado" in hydrated:
+            hydrated["estado"] = self._normalize_instance_state(str(hydrated.get("estado") or "pendiente"))
         return hydrated
+
+    def _normalize_instance_state(self, value: str) -> str:
+        clean = str(value or "").strip().lower()
+        return clean or "pendiente"
+
+    def _normalize_instance_config_snapshot(self, value) -> dict:
+        if isinstance(value, dict):
+            return dict(value)
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return {}
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                return {}
+            return dict(parsed) if isinstance(parsed, dict) else {}
+        return {}
 
     def _default_session_path_for_instance(self, workspace_dir: str, tipo: str) -> Path:
         root = Path(str(workspace_dir or "").strip()) if str(workspace_dir or "").strip() else self._default_workspace_dir(codigo="", titulo="", pdf_path="")

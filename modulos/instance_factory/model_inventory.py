@@ -9,7 +9,7 @@ from typing import Any
 try:
     from modulos.modulo0_transcriptor.scan_pipeline.extractor import TRAINED_OCR_VISION_MODEL
 except Exception:
-    TRAINED_OCR_VISION_MODEL = "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-agent-angle-policy-merged-v1"
+    TRAINED_OCR_VISION_MODEL = "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-agent-nostradamus-wk01-17-merged-v2"
 
 try:
     from modulos.modulo0_transcriptor.segmentador_v2 import (
@@ -34,10 +34,27 @@ except Exception:
     DEFAULT_MODEL_REPO_ID = "Jhoan12/pdf-problem-detector-yolov8n-v4"
 
 from .models import ModelDefaults, ModelStageTrace
+from .server_storage import DEFAULT_SERVER_STORAGE_ROOT, ServerStorageResolver, is_windows_or_unc_path
 
 
 NORMALIZER_PASSTHROUGH = "normalizer_v0_passthrough"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+SERVER_LOCAL_MODEL_STAGES = {"pdf_detector", "figure_segmenter", "number_alt_detector"}
+SERVER_REQUIRED_MODEL_STAGES = {"pdf_detector", "figure_segmenter", "number_alt_detector", "ocr"}
+
+
+def _stage_model_value(defaults: ModelDefaults, stage_key: str) -> str:
+    if stage_key == "pdf_detector":
+        return str(defaults.pdf_detector or "")
+    if stage_key == "ocr":
+        return str(defaults.ocr or "")
+    if stage_key == "figure_segmenter":
+        return str(defaults.figure_segmenter or "")
+    if stage_key == "normalizer":
+        return str(defaults.normalizer or "")
+    if stage_key == "number_alt_detector":
+        return str(defaults.pdf_detector or "")
+    return ""
 
 
 def _clean_env(name: str) -> str:
@@ -247,6 +264,181 @@ def build_model_inventory_manifest(defaults: ModelDefaults | None = None) -> dic
             "problemas_write_enabled": False,
         },
     }
+
+
+def _model_path_exists(value: str) -> bool | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if _is_hf_repo(raw):
+        return None
+    try:
+        return Path(raw).expanduser().exists()
+    except Exception:
+        return False
+
+
+def _server_model_stage_row(stage_key: str, row: dict[str, Any], resolver: ServerStorageResolver) -> dict[str, Any]:
+    provider = str(row.get("provider") or "").strip()
+    model_id = str(row.get("model_id") or "").strip()
+    resolved_path = str(row.get("resolved_path") or model_id or "").strip()
+    source = str(row.get("source") or "").strip()
+    path_category = resolver.classify_reference(resolved_path) if resolved_path else "empty"
+    exists = _model_path_exists(resolved_path)
+
+    server_ready = False
+    action = "configure_model"
+    if stage_key == "ocr" and provider == "huggingface":
+        server_ready = True
+        action = "keep_hugging_face_endpoint"
+    elif stage_key == "normalizer" and provider == "local_passthrough":
+        server_ready = True
+        action = "deferred_passthrough"
+    elif stage_key == "normalizer" and provider == "huggingface":
+        server_ready = False
+        action = "deferred_not_required_for_server_factory_mvp"
+    elif provider == "local":
+        if path_category == "server_storage_path":
+            server_ready = bool(exists)
+            action = "ready" if server_ready else "server_model_file_missing"
+        elif is_windows_or_unc_path(resolved_path):
+            action = "copy_model_to_server_storage_and_repoint_env"
+        else:
+            action = "set_model_env_to_server_storage_path"
+    elif provider == "huggingface" and stage_key in SERVER_LOCAL_MODEL_STAGES:
+        action = "download_or_mount_model_on_server_then_set_env"
+    elif provider == "huggingface":
+        server_ready = True
+        action = "configured_hugging_face_model"
+
+    return {
+        "stage": stage_key,
+        "provider": provider,
+        "model_id": model_id,
+        "resolved_path": resolved_path,
+        "version": str(row.get("version") or _infer_version(model_id or resolved_path)),
+        "source": source,
+        "path_category": path_category,
+        "exists": exists,
+        "server_ready": server_ready,
+        "action": action,
+        "fallback": str(row.get("fallback") or ""),
+        "metadata": dict(row.get("metadata") or {}),
+    }
+
+
+def _ensure_number_alt_stage(stages_payload: dict[str, Any], defaults_payload: dict[str, Any]) -> None:
+    if stages_payload.get("number_alt_detector"):
+        return
+    pdf_row = dict(stages_payload.get("pdf_detector") or {})
+    if not pdf_row:
+        pdf_model = str(defaults_payload.get("pdf_detector") or "").strip()
+        pdf_row = {
+            "stage": "pdf_detector",
+            "model_id": pdf_model,
+            "resolved_path": pdf_model,
+            "provider": "local" if pdf_model else "",
+            "source": "derived:defaults.pdf_detector",
+            "fallback": "manual_review_continuity_pairs",
+        }
+    metadata = dict(pdf_row.get("metadata") or {})
+    metadata["derived_from"] = "pdf_detector"
+    metadata["purpose"] = "problem_number_and_answer_block_detection"
+    stages_payload["number_alt_detector"] = {
+        **pdf_row,
+        "stage": "number_alt_detector",
+        "source": f"{str(pdf_row.get('source') or '').strip()}|derived:number_alt_detector".strip("|"),
+        "fallback": "manual_review_continuity_pairs",
+        "metadata": metadata,
+    }
+
+
+def build_server_model_configuration(
+    defaults: ModelDefaults | None = None,
+    *,
+    storage: ServerStorageResolver | None = None,
+) -> dict[str, Any]:
+    """Return non-secret model readiness for the server factory runtime."""
+    defaults = defaults or resolve_model_defaults()
+    resolver = storage or ServerStorageResolver()
+    defaults_payload = defaults.to_dict()
+    stages_payload = dict(defaults_payload.get("stages") or {})
+    _ensure_number_alt_stage(stages_payload, defaults_payload)
+    stages: list[dict[str, Any]] = []
+    for stage_key in sorted(stages_payload):
+        row = stages_payload.get(stage_key) or {}
+        stages.append(_server_model_stage_row(stage_key, row, resolver))
+
+    required = set(SERVER_REQUIRED_MODEL_STAGES)
+    required_rows = [row for row in stages if row["stage"] in required]
+    missing_required = [row for row in required_rows if not row["server_ready"]]
+    return {
+        "schema_version": "pdf_factory_server_model_configuration_v1",
+        "server_storage_root": str(resolver.root or DEFAULT_SERVER_STORAGE_ROOT),
+        "required_stages": sorted(required),
+        "stages": stages,
+        "summary": {
+            "total": len(stages),
+            "required": len(required_rows),
+            "ready_required": len(required_rows) - len(missing_required),
+            "missing_required": len(missing_required),
+            "missing_required_stages": [str(row.get("stage") or "") for row in missing_required],
+            "server_ready": not missing_required,
+        },
+        "policy": {
+            "ocr_provider": "huggingface",
+            "server_local_model_stages": sorted(SERVER_LOCAL_MODEL_STAGES),
+            "secrets_included": False,
+        },
+    }
+
+
+def build_server_model_inventory(
+    defaults: ModelDefaults | None = None,
+    *,
+    storage: ServerStorageResolver | None = None,
+) -> dict[str, Any]:
+    """Return server model configuration plus stage lookup helpers for API/UI use."""
+    payload = build_server_model_configuration(defaults, storage=storage)
+    stage_map = {str(row.get("stage") or ""): dict(row) for row in list(payload.get("stages") or [])}
+    payload["stage_map"] = stage_map
+    payload["missing_actions"] = [
+        {
+            "stage": stage,
+            "action": str(row.get("action") or ""),
+            "model_id": str(row.get("model_id") or ""),
+            "resolved_path": str(row.get("resolved_path") or ""),
+        }
+        for stage, row in stage_map.items()
+        if stage in SERVER_REQUIRED_MODEL_STAGES and not bool(row.get("server_ready"))
+    ]
+    return payload
+
+
+def select_server_model_path(
+    stage_key: str,
+    defaults: ModelDefaults | None = None,
+    *,
+    storage: ServerStorageResolver | None = None,
+    allow_not_ready: bool = True,
+) -> str:
+    """Select the configured model reference for a stage via server inventory.
+
+    `allow_not_ready=True` preserves the current Windows/local workflow while
+    the same inventory still reports that the reference must be copied or
+    repointed before production server use.
+    """
+    stage = str(stage_key or "").strip()
+    defaults = defaults or resolve_model_defaults()
+    payload = build_server_model_inventory(defaults, storage=storage)
+    row = dict((payload.get("stage_map") or {}).get(stage) or {})
+    if not row:
+        return _stage_model_value(defaults, stage)
+    if not bool(row.get("server_ready")) and not allow_not_ready:
+        action = str(row.get("action") or "configure_model")
+        model_ref = str(row.get("resolved_path") or row.get("model_id") or "")
+        raise FileNotFoundError(f"Modelo servidor no listo para {stage}: {action} ({model_ref})")
+    return str(row.get("resolved_path") or row.get("model_id") or _stage_model_value(defaults, stage) or "").strip()
 
 
 def resolve_model_defaults() -> ModelDefaults:

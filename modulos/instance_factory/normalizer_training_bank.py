@@ -216,19 +216,51 @@ def _rewrite_index(bank_root: Path, *, threshold: int = DEFAULT_THRESHOLD) -> di
     return manifest
 
 
+def _refresh_manifest_fast(bank_root: Path, *, threshold: int = DEFAULT_THRESHOLD) -> dict[str, Any]:
+    threshold = _threshold(threshold)
+    samples_dir = bank_root / "samples"
+    samples_dir.mkdir(parents=True, exist_ok=True)
+    samples_total = sum(1 for _path in samples_dir.glob("*.json"))
+    previous = load_manifest(bank_root)
+    reached_before = str(previous.get("threshold_reached_at") or "").strip()
+    ready = samples_total >= int(threshold)
+    manifest = {
+        "schema_version": BANK_SCHEMA_VERSION,
+        "updated_at": _now(),
+        "root": str(bank_root),
+        "manifest_path": str(bank_root / "manifest.json"),
+        "threshold": int(threshold),
+        "samples_total": samples_total,
+        "ready_to_train": ready,
+        "threshold_reached_at": reached_before or (_now() if ready else ""),
+        "samples_jsonl": str(bank_root / "samples.jsonl"),
+        "samples_dir": str(samples_dir),
+        "images_dir": str(bank_root / "images"),
+        "revision_events_total": int(previous.get("revision_events_total") or samples_total),
+        "next_action": "train_normalizer_v1" if ready else "collect_more_samples",
+        "remaining_to_threshold": max(0, int(threshold) - samples_total),
+        "index_status": "deferred",
+    }
+    (bank_root / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return manifest
+
+
 def remove_sample(
     context: InstancePipelineContext,
     record: StagingProblemRecord,
     *,
     root: Path | None = None,
     threshold: int = DEFAULT_THRESHOLD,
+    rewrite_index: bool = True,
 ) -> dict[str, Any]:
     bank_root = _bank_root(root)
     sample_id = _sample_id(context, record)
     sample_path = bank_root / "samples" / f"{sample_id}.json"
     if sample_path.exists():
         sample_path.unlink()
-    return _rewrite_index(bank_root, threshold=threshold)
+    if rewrite_index:
+        return _rewrite_index(bank_root, threshold=threshold)
+    return _refresh_manifest_fast(bank_root, threshold=threshold)
 
 
 def upsert_sample(
@@ -239,12 +271,13 @@ def upsert_sample(
     all_records: Iterable[StagingProblemRecord] = (),
     root: Path | None = None,
     threshold: int = DEFAULT_THRESHOLD,
+    rewrite_index: bool = True,
 ) -> dict[str, Any]:
     bank_root = _bank_root(root)
     bank_root.mkdir(parents=True, exist_ok=True)
     (bank_root / "samples").mkdir(parents=True, exist_ok=True)
     if _is_continuation(record) or not _final_latex(record):
-        return remove_sample(context, record, root=bank_root, threshold=threshold)
+        return remove_sample(context, record, root=bank_root, threshold=threshold, rewrite_index=rewrite_index)
 
     sample_id = _sample_id(context, record)
     sample_path = bank_root / "samples" / f"{sample_id}.json"
@@ -291,7 +324,9 @@ def upsert_sample(
         "intended_use": "normalizer_final_latex_training",
     }
     sample_path.write_text(json.dumps(row, ensure_ascii=False, indent=2), encoding="utf-8")
-    return _rewrite_index(bank_root, threshold=threshold)
+    if rewrite_index:
+        return _rewrite_index(bank_root, threshold=threshold)
+    return _refresh_manifest_fast(bank_root, threshold=threshold)
 
 
 def _history_from_existing(existing: dict[str, Any]) -> list[dict[str, Any]]:

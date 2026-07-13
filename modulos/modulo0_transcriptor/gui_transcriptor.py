@@ -183,7 +183,7 @@ def _resolve_default_provider_label() -> str:
 
 
 FIXED_PROVIDER = _resolve_default_provider_label()
-TRAINED_OCR_VISION_MODEL = "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-agent-angle-policy-merged-v1"
+TRAINED_OCR_VISION_MODEL = "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-agent-nostradamus-wk01-17-merged-v2"
 DEFAULT_HF_VISION_MODEL = TRAINED_OCR_VISION_MODEL
 DEFAULT_OPENAI_VISION_MODEL = TRAINED_OCR_VISION_MODEL
 DEFAULT_OPENAI_FORMAT_MODEL = TRAINED_OCR_VISION_MODEL

@@ -64,6 +64,23 @@ class DatabaseManagerTests(unittest.TestCase):
         fake_conn.close.assert_called_once()
         self.assertEqual(mocked_connect.call_args.kwargs["dbname"], "mathcontentstudio")
 
+    def test_listar_bases_datos_retries_transient_timeout(self) -> None:
+        fake_conn = MagicMock()
+        with (
+            patch.dict(os.environ, self._env(DB_CONNECT_RETRIES="2", DB_CONNECT_RETRY_DELAY_MS="0"), clear=False),
+            patch(
+                "database.connection.psycopg2.connect",
+                side_effect=[RuntimeError("timeout expired"), fake_conn],
+            ) as mocked_connect,
+        ):
+            db = DatabaseManager()
+            dbs = db.listar_bases_datos()
+
+        self.assertEqual(dbs, ["mathcontentstudio"])
+        self.assertEqual(mocked_connect.call_count, 2)
+        fake_conn.close.assert_called_once()
+        self.assertEqual(db.last_connection_error, "")
+
     def test_listar_bases_datos_returns_empty_when_connection_fails(self) -> None:
         with (
             patch.dict(os.environ, self._env(), clear=False),

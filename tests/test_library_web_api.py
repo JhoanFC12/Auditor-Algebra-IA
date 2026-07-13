@@ -1757,6 +1757,51 @@ class LibraryWebApiTests(unittest.TestCase):
         finally:
             runtime.stop()
 
+    def test_library_runtime_keeps_direct_latex_word_filter_refs(self) -> None:
+        class _PracticeController:
+            def contar_problemas(self, db_name, **filters):
+                self.db_name = db_name
+                self.filters = filters
+                return 0
+
+            def obtener_problemas(self, _db_name, *, cantidad, **_filters):
+                return []
+
+            def listar_cursos(self, _db_name):
+                return ["Algebra"]
+
+            def listar_temas(self, _db_name, *, curso=""):
+                return [{"id": "direct:topic:Ecuaciones Lineales", "nombre": "Ecuaciones Lineales"}]
+
+            def listar_subtemas(self, _db_name, *, tema_id=None):
+                self.subtema_tema_id = tema_id
+                return []
+
+            def listar_autores(self, _db_name, **_filters):
+                return []
+
+            def listar_editoriales(self, _db_name, **_filters):
+                return []
+
+            def listar_libros_problemas(self, _db_name, **_filters):
+                return []
+
+        runtime = LibraryWebRuntime(controller=_FakeController())
+        practice = _PracticeController()
+        runtime.word_service.practice_controller = practice
+        try:
+            base = runtime.start()
+            payload = _get_json(
+                base,
+                "api/word/problems?db_name=demo_db&curso=Algebra&tema_id=direct%3Atopic%3AEcuaciones%20Lineales&estado=Todos&clave=Todos&limit=25",
+            )
+
+            self.assertEqual(payload["schema_version"], "latex_word_problem_selection_v1")
+            self.assertEqual(practice.filters["tema_id"], "direct:topic:Ecuaciones Lineales")
+            self.assertEqual(payload["options"]["temas"][0]["id"], "direct:topic:Ecuaciones Lineales")
+        finally:
+            runtime.stop()
+
     def test_library_runtime_converts_latex_word_db_problems_via_api(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -1,0 +1,24 @@
+{
+  "job_id": "6a52b856e4a4e82c0b58e66e",
+  "dataset_repo_id": "Jhoan12/problem-detector-multiclass-reviewed-401-v7-20260711",
+  "model_repo_id": "Jhoan12/pdf-problem-detector-multiclass-v7-401",
+  "base_model": "base/pdf_problem_detector_multiclass_v6_375_best.pt",
+  "samples_total": 401,
+  "train_images": 338,
+  "val_images": 63,
+  "epochs": 45,
+  "batch": 4,
+  "imgsz": 768,
+  "flavor": "t4-small",
+  "status_at_submission": "submitted",
+  "status": "completed",
+  "completed_at": "2026-07-11T22:06:20Z",
+  "local_best_model": "models/pdf_problem_detector_multiclass_v7_401/weights/best.pt",
+  "best_model_sha256": "b62e280a993c092cbec194a72cc7512c3f52a8bed6846ea82e4274a20362043c",
+  "metrics": {
+    "precision": 0.99624,
+    "recall": 0.99728,
+    "map50": 0.99374,
+    "map50_95": 0.88365
+  }
+}

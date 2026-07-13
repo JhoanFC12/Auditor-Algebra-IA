@@ -228,7 +228,7 @@ class ModelStageTrace:
 @dataclass
 class ModelDefaults:
     pdf_detector: str = "Jhoan12/pdf-problem-detector-yolov8n-v4"
-    ocr: str = "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-agent-angle-policy-merged-v1"
+    ocr: str = "Jhoan12/math-ocr-qwen2.5-vl-3b-geometry-agent-nostradamus-wk01-17-merged-v2"
     figure_segmenter: str = "Jhoan12/problem-segmentation-yolov8n-golden-v1"
     normalizer: str = "normalizer_v0_passthrough"
     fallbacks: dict[str, str] = field(default_factory=dict)

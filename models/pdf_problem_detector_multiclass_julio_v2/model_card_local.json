@@ -1,0 +1,12 @@
+{
+  "schema_version": "problem_detector_multiclass_local_model_v1",
+  "downloaded_at": "2026-06-25T15:18:23",
+  "model_repo_id": "Jhoan12/pdf-problem-detector-multiclass-julio-v2",
+  "hub_weights_path": "weights/best.pt",
+  "local_weights_path": "E:\\Github\\Auditor-IA\\models\\pdf_problem_detector_multiclass_julio_v2\\weights\\best.pt",
+  "classes": {
+    "0": "problem",
+    "1": "problem_number",
+    "2": "answer_block"
+  }
+}

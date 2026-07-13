@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Problem Detector Lab</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Auditor-IA</p>
+        <h1>Problem Detector Lab</h1>
+        <p id="datasetPath" class="muted">Cargando dataset...</p>
+      </div>
+      <div class="top-actions">
+        <label class="dataset-picker">
+          <span>Dataset</span>
+          <select id="datasetSelect"></select>
+        </label>
+        <button id="switchDatasetBtn" class="secondary">Cargar dataset</button>
+        <button id="exportYamlBtn" class="secondary">Crear dataset.yaml</button>
+        <button id="saveBtn" class="primary">Guardar labels</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="sidebar">
+        <section class="panel">
+          <h2>Muestras</h2>
+          <div class="stats">
+            <span><strong id="totalCount">0</strong><small>Total</small></span>
+            <span><strong id="reviewedCount">0</strong><small>Revisadas</small></span>
+            <span><strong id="pendingCount">0</strong><small>Pendientes</small></span>
+          </div>
+          <input id="searchInput" class="input" placeholder="Buscar instancia o pagina" />
+          <select id="groupFilter" class="input">
+            <option value="">Todas las fuentes</option>
+          </select>
+          <select id="reviewFilter" class="input">
+            <option value="">Todos los estados</option>
+            <option value="pending">Pendientes</option>
+            <option value="reviewed">Revisadas</option>
+          </select>
+          <div id="sampleList" class="sample-list"></div>
+        </section>
+      </aside>
+
+      <section class="workspace">
+        <div class="toolbar panel">
+          <div class="toolbar-row">
+            <button id="prevBtn" class="secondary">Anterior</button>
+            <div class="sample-title">
+              <strong id="sampleTitle">Sin muestra</strong>
+              <span id="sampleMeta" class="muted"></span>
+            </div>
+            <button id="nextBtn" class="secondary">Siguiente</button>
+          </div>
+          <div class="toolbar-row compact">
+            <div class="segmented" id="classSelector">
+              <button data-class="0" class="active problem">Problema</button>
+              <button data-class="1" class="number">Numero</button>
+              <button data-class="2" class="answer">Alternativas</button>
+            </div>
+            <button id="selectBtn" class="primary" title="Tecla D para alternar">Seleccionar/modificar</button>
+            <button id="drawBtn" class="secondary" title="Tecla D para alternar">Dibujar box</button>
+            <button id="deleteBtn" class="danger">Eliminar</button>
+            <button id="fitBtn" class="secondary">Ajustar</button>
+            <button id="zoomOutBtn" class="secondary">-</button>
+            <span id="zoomLabel" class="zoom-label">100%</span>
+            <button id="zoomInBtn" class="secondary">+</button>
+          </div>
+        </div>
+
+        <div class="canvas-shell panel">
+          <canvas id="labelCanvas"></canvas>
+        </div>
+      </section>
+
+      <aside class="inspector">
+        <section class="panel">
+          <h2>Boxes</h2>
+          <p class="muted">Rojo: problema. Amarillo: numero. Azul: alternativas.</p>
+          <div id="boxList" class="box-list"></div>
+        </section>
+        <section class="panel dimensions-panel">
+          <h2>Dimensiones</h2>
+          <p id="dimensionHint" class="muted">Selecciona un box para editar sus medidas.</p>
+          <div class="dimension-grid">
+            <label>X1<input id="dimX1" type="number" step="1" /></label>
+            <label>Y1<input id="dimY1" type="number" step="1" /></label>
+            <label>X2<input id="dimX2" type="number" step="1" /></label>
+            <label>Y2<input id="dimY2" type="number" step="1" /></label>
+            <label>Ancho<input id="dimW" type="number" step="1" /></label>
+            <label>Alto<input id="dimH" type="number" step="1" /></label>
+          </div>
+          <button id="applyDimensionsBtn" class="primary full">Aplicar dimensiones</button>
+        </section>
+        <section class="panel">
+          <h2>Salida</h2>
+          <pre id="statusLog">Listo.</pre>
+        </section>
+      </aside>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

@@ -138,13 +138,18 @@ def _extract_final_options(text: str) -> dict[str, str] | None:
 
 
 def _metric_unit_spacing(text: str) -> RuleMetric:
-    unit = r"(?:u|cm|mm|m|km|dm|in|ft|cm\^2|m\^2|cm\^3|m\^3)"
+    unit = r"(?:cm\^2|m\^2|cm\^3|m\^3|mm\^2|dm\^2|km\^2|u|cm|mm|km|dm|m|in|ft)"
+    unit_end = r"(?=$|\s|\$|[.,;:!?)}\]\u00a3\u00e6])"
     violations: list[str] = []
     evidence: list[str] = []
     patterns = [
-        (rf"\$\s*\d+(?:[.,]\d+)?\s*,\s*{unit}\b", "unit_comma_in_math"),
-        (rf"\$\s*\d+(?:[.,]\d+)?\s*(?<!\\,){unit}\b", "missing_latex_thin_space"),
-        (rf"\b\d+(?:[.,]\d+)?\s*,\s*{unit}\b", "unit_comma"),
+        (rf"\$[^$\n\r]+?\$\s*(?:\\,|~)\s*{unit}{unit_end}", "unit_outside_math"),
+        (rf"\$[^$\n\r]*?\\,\s*\$\s*{unit}{unit_end}", "unit_outside_math_after_thin_space"),
+        (rf"\$[^$\n\r]+?\$\s+{unit}{unit_end}", "unit_outside_math_plain_space"),
+        (rf"\$[^$\n\r]*?\\,\s+{unit}\$", "space_after_latex_thin_space"),
+        (rf"\$\s*\d+(?:[.,]\d+)?\s*,\s*{unit}{unit_end}", "unit_comma_in_math"),
+        (rf"\$\s*\d+(?:[.,]\d+)?\s*(?<!\\,){unit}{unit_end}", "missing_latex_thin_space"),
+        (rf"\b\d+(?:[.,]\d+)?\s*,\s*{unit}{unit_end}", "unit_comma"),
     ]
     for pattern, code in patterns:
         rows = _regex_evidence(pattern, text, flags=re.IGNORECASE)
@@ -212,12 +217,16 @@ def _metric_segment_vs_length(text: str) -> RuleMetric:
     violations: list[str] = []
     evidence: list[str] = []
     patterns = [
-        (r"\bm\s*\\overline\s*\{[A-Z]{2}\}", "segment_has_measure_prefix"),
-        (r"(?:calcule|halle|medida|longitud)\s+\$?\\overline\s*\{[A-Z]{2}\}", "length_requested_as_segment_object"),
-        (r"(?:segmento|segment)\s+\$?[A-Z]{2}\$?(?![A-Za-z])", "segment_object_without_overline"),
+        (r"\bm\s*\\overline\s*\{[A-Z]{2}\}", "segment_has_measure_prefix", re.IGNORECASE),
+        (
+            r"(?:calcule|halle|medida|longitud)\s+\$?\\overline\s*\{[A-Z]{2}\}",
+            "length_requested_as_segment_object",
+            re.IGNORECASE,
+        ),
+        (r"(?:[Ss]egmento|[Ss]egment)\s+\$?[A-Z]{2}\$?(?![A-Za-z])", "segment_object_without_overline", 0),
     ]
-    for pattern, code in patterns:
-        rows = _regex_evidence(pattern, text, flags=re.IGNORECASE)
+    for pattern, code, flags in patterns:
+        rows = _regex_evidence(pattern, text, flags=flags)
         if rows:
             violations.append(code)
             evidence.extend(rows)
@@ -270,6 +279,21 @@ def _figure_count(row: dict[str, Any]) -> int:
     images = row.get("images")
     if isinstance(images, list) and images:
         return len(images)
+    normalized = row.get("normalized") if isinstance(row.get("normalized"), dict) else {}
+    fused = (
+        normalized.get("continuaciones_fusionadas")
+        if isinstance(normalized.get("continuaciones_fusionadas"), list)
+        else []
+    )
+    for item in fused:
+        if not isinstance(item, dict):
+            continue
+        try:
+            segments_total = int(item.get("segments_total") or 0)
+        except Exception:
+            segments_total = 0
+        if segments_total > 0 or bool(item.get("has_figure")):
+            return max(1, segments_total)
     for payload in _embedded_normalizer_inputs(row):
         nested_count = _figure_count(payload)
         if nested_count > 0:
@@ -329,6 +353,8 @@ def _metric_hallucination_risk(text: str, row: dict[str, Any], *, target: str) -
 
 
 def _metric_final_format_valid(text: str) -> RuleMetric:
+    if text.strip() == "[CONT.]":
+        return _metric("final_format_valid", applies=False)
     violations: list[str] = []
     evidence: list[str] = []
     required_patterns = [
@@ -349,6 +375,8 @@ def _metric_final_format_valid(text: str) -> RuleMetric:
 
 def _metric_alternatives_complete(text: str, *, target: str) -> RuleMetric:
     if target == TARGET_NORMALIZER:
+        if text.strip() == "[CONT.]":
+            return _metric("alternatives_complete", applies=False)
         final_options = _extract_final_options(text)
         if final_options is None:
             if not _has_any_option(text) and not _has_final_option_markers(text):
@@ -372,7 +400,8 @@ def _metric_alternatives_complete(text: str, *, target: str) -> RuleMetric:
     if not _has_any_option(text):
         return _metric("alternatives_complete", applies=False)
     counts = _option_counts(text)
-    missing = [label for label, count in counts.items() if count < 1]
+    expected = OPTION_LABELS if counts.get("E", 0) > 0 else OPTION_LABELS[:4]
+    missing = [label for label in expected if counts.get(label, 0) < 1]
     duplicated = [label for label, count in counts.items() if count > 1]
     return _metric(
         "alternatives_complete",

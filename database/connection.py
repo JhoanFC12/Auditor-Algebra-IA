@@ -269,11 +269,33 @@ class DatabaseManager:
         Valida la conexion contra la base configurada y expone solo esa base.
         """
         self.last_connection_error = ""
+        attempts = max(int(self.connect_retries or 1), 1)
+        delay_s = max(float(self.connect_retry_delay_ms or 0) / 1000.0, 0.0)
         try:
             # La pantalla inicial de Biblioteca solo necesita validar si la BD
-            # configurada esta disponible; evitar reintentos aqui mantiene el
-            # arranque responsivo cuando PostgreSQL local esta apagado.
-            conn = self._connect(self.db_name)
+            # configurada esta disponible. Reintentamos solo errores transitorios
+            # para cubrir arranques lentos de PostgreSQL local.
+            conn = None
+            for attempt in range(1, attempts + 1):
+                try:
+                    conn = self._connect(self.db_name)
+                    break
+                except Exception as exc:
+                    if not (_is_transient_db_connection_error(exc) and attempt < attempts):
+                        raise
+                    LOGGER.warning(
+                        "db_listar_bases_retry host=%s port=%s db=%s attempt=%s/%s err=%s",
+                        self.host,
+                        self.port,
+                        self.db_name,
+                        attempt,
+                        attempts,
+                        exc,
+                    )
+                    if delay_s > 0:
+                        time.sleep(delay_s)
+            if conn is None:
+                raise ConnectionError(f"No se pudo conectar a '{self.db_name}'.")
             conn.close()
             LOGGER.info("db_listar_bases_ok db=%s", self.db_name)
             return [self.db_name]

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import re
+import shutil
 import tempfile
 import time
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Callable
 
@@ -16,7 +19,7 @@ from modulos.modulo13_laboratorio_pdf_segmentacion.controlador_laboratorio_pdf i
     sort_boxes_reading_order,
 )
 
-from .model_inventory import build_model_inventory_manifest, resolve_model_defaults
+from .model_inventory import build_model_inventory_manifest, resolve_model_defaults, select_server_model_path
 from .continuations import continuation_flags_enabled, has_continuation_marker
 from .models import (
     PIPELINE_CONTRACT_VERSION,
@@ -27,11 +30,196 @@ from .models import (
     build_pipeline_contract,
     utc_now_text,
 )
-from .normalizer_inference import HfOcrNormalizerClient, normalizer_input_from_record
-from .ocr_training_bank import upsert_raw_ocr_correction
+from .normalizer_inference import (
+    HfOcrNormalizerClient,
+    normalizer_input_from_record,
+    repair_final_latex_with_normalizer_input,
+)
 from .page_selection import parse_page_selection
-from .problem_detector_corrections import maybe_write_problem_detector_correction
 from .staging import InstanceStagingStore
+from .training_bank import (
+    persist_figure_segment_correction,
+    persist_problem_detector_correction,
+    persist_raw_ocr_correction,
+)
+
+
+OCR_INPUT_ARTIFACT_KEY = "ocr_input_crop_path"
+MERGED_CROP_ARTIFACT_KEY = "merged_crop_path"
+PROBLEM_START_RE = re.compile(
+    r"^\s*(?:<\s*)?(?:problema|pregunta|n[°ºo]\.?)?\s*\d{1,4}\s*(?:[.)>\-:]|\.>)",
+    re.IGNORECASE,
+)
+OPTION_LABEL_RE = re.compile(r"(?:^|[\s£æ|])([A-E])\s*[\?¿!:\-]*\s*[\).]", re.IGNORECASE)
+AUX_PROBLEM_START_RE = re.compile(
+    r"^\s*(?:<\s*)?(?:problema|pregunta|n[Â°Âºo]\.?)?\s*\d{1,4}\s*(?:[.)>\-:]|(?=\s+[A-ZÁÉÍÓÚÑ]))",
+    re.IGNORECASE,
+)
+AUX_PROBLEM_LABEL_START_RE = re.compile(
+    r"^\s*(?:[^\w<]{0,6}\s*)?(?:problema|pregunta|ejercicio|item)\b",
+    re.IGNORECASE,
+)
+AUX_PROBLEM_NUMBER_PREFIX_RE = re.compile(
+    r"^\s*(?:[^\w<]{0,6}\s*)?(?:n|no|num|numero)\s*\W*\s*(?:\d{1,4}|[a-z]{1,5}\d*)\b",
+    re.IGNORECASE,
+)
+AUX_PROBLEM_NUMBER_EARLY_RE = re.compile(
+    r"\b(?:n|no|num|numero)\s*\W*\s*(?:\d{1,4}|[a-z]{1,5}\d*)\b",
+    re.IGNORECASE,
+)
+AUX_NOISY_PROBLEM_NUMBER_EARLY_RE = re.compile(
+    r"\b(?:n|no|nro|num|numero)\s*[^\w\s]{0,4}\s*\d{1,4}[a-z]?\b",
+    re.IGNORECASE,
+)
+AUX_UNNUMBERED_PROBLEM_PHRASE_RE = re.compile(
+    r"^\s*(?:[^\w<]{0,10}\s*)?(?:"
+    r"en\s+(?:el|la|un|una)\b|"
+    r"segun\b|"
+    r"sea\b|"
+    r"si\s+\w|"
+    r"se\s+(?:tiene|tienen|cumple|ubica|muestra)\b|"
+    r"calcule\b|"
+    r"halle\b|"
+    r"halla\b|"
+    r"determine\b|"
+    r"determinar\b|"
+    r"indique\b"
+    r")",
+    re.IGNORECASE,
+)
+AUX_PROBLEM_CONTEXT_EARLY_RE = re.compile(
+    r"\b(?:exami\w*|pr[ia]cti\w*|seminario)\b",
+    re.IGNORECASE,
+)
+AUX_GEOMETRY_OBJECT_PROBLEM_EARLY_RE = re.compile(
+    r"\b(?:triangulo|cuadrado|trapecio|romboide|circunferencia|pentagono|poligono)\s+[A-Z]{2,8}\b",
+    re.IGNORECASE,
+)
+DEFAULT_TESSERACT_PATHS = (
+    Path("C:/Program Files/Tesseract-OCR/tesseract.exe"),
+    Path("C:/Program Files (x86)/Tesseract-OCR/tesseract.exe"),
+)
+CONTINUATION_BOOLEAN_WEIGHTS = {
+    "order_consecutive": 0.16,
+    "order_near": 0.06,
+    "x_overlap_strong": 0.14,
+    "x_overlap_compatible": 0.08,
+    "same_page_after": 0.08,
+    "vertical_close": 0.12,
+    "child_not_taller": 0.04,
+    "cross_page": 0.10,
+    "parent_bottom": 0.10,
+    "child_top": 0.08,
+    "child_options_strong": 0.20,
+    "child_options_weak": 0.10,
+    "parent_missing_options": 0.22,
+    "child_no_leading_number": 0.24,
+    "parent_has_leading_number": 0.14,
+    "split_multiple_choice_rule": 0.28,
+    "parent_has_options_penalty": -0.30,
+    "child_has_leading_number_penalty": -0.45,
+}
+_CONTINUITY_DETECTOR_MODEL_CACHE: dict[str, Any] = {}
+
+
+def _continuity_detector_enabled() -> bool:
+    value = str(os.environ.get("PDF_FACTORY_CONTINUITY_DETECTOR") or "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _continuity_detector_conf_threshold(class_name: str) -> float:
+    specific_key = f"PDF_FACTORY_CONTINUITY_DETECTOR_{class_name.upper()}_CONF"
+    for key in (specific_key, "PDF_FACTORY_CONTINUITY_DETECTOR_CONF"):
+        try:
+            return max(0.01, min(0.99, float(os.environ.get(key) or "")))
+        except Exception:
+            continue
+    return 0.22
+
+
+def _continuity_detector_payload_from_subboxes(
+    detections: list[Any] | tuple[Any, ...],
+    *,
+    source: str,
+    checked: bool = True,
+) -> dict[str, Any]:
+    counts = {"problem": 0, "problem_number": 0, "answer_block": 0}
+    max_conf = {"problem": 0.0, "problem_number": 0.0, "answer_block": 0.0}
+    clean: list[dict[str, Any]] = []
+    for index, raw in enumerate(list(detections or [])):
+        if not isinstance(raw, dict):
+            continue
+        class_name = str(raw.get("class_key") or raw.get("class_name") or raw.get("class") or "").strip()
+        key = re.sub(r"[^a-z0-9]+", "_", class_name.lower()).strip("_")
+        if key in {"numero", "number"}:
+            key = "problem_number"
+        elif key in {"alternativas", "alternatives", "options"}:
+            key = "answer_block"
+        if key not in counts:
+            continue
+        try:
+            confidence = float(raw.get("conf") or raw.get("confidence") or 1.0)
+        except Exception:
+            confidence = 1.0
+        counts[key] += 1
+        max_conf[key] = max(max_conf[key], confidence)
+        if len(clean) < 12:
+            clean.append(
+                {
+                    "class": key,
+                    "confidence": round(confidence, 3),
+                    "bbox": [round(float(value), 1) for value in list(raw.get("bbox_px") or raw.get("bbox") or [])[:4]],
+                    "index": int(raw.get("idx") or raw.get("index") or index),
+                    "source": str(raw.get("source") or source),
+                }
+            )
+    number_conf = _continuity_detector_conf_threshold("problem_number")
+    answer_conf = _continuity_detector_conf_threshold("answer_block")
+    has_problem_number = max_conf["problem_number"] >= number_conf
+    has_answer_block = max_conf["answer_block"] >= answer_conf
+    return {
+        "available": True,
+        "source": source,
+        "checked": bool(checked),
+        "counts": counts,
+        "max_conf": {key: round(value, 3) for key, value in max_conf.items()},
+        "detections_total": sum(counts.values()),
+        "subbox_detections_total": counts["problem_number"] + counts["answer_block"],
+        "has_problem_number": has_problem_number,
+        "has_answer_block": has_answer_block,
+        "complete_problem": has_problem_number and has_answer_block,
+        "detections": clean,
+    }
+
+
+def _continuity_detector_model_path() -> Path | None:
+    override = str(os.environ.get("PDF_FACTORY_CONTINUITY_DETECTOR_MODEL") or "").strip().strip('"')
+    if override:
+        path = Path(override).expanduser()
+        return path if path.exists() else None
+    try:
+        from .runtime_env import load_factory_runtime_env
+
+        load_factory_runtime_env()
+    except Exception:
+        pass
+    try:
+        raw = str(select_server_model_path("number_alt_detector", allow_not_ready=True) or "").strip()
+    except Exception:
+        raw = str(os.environ.get("PDF_PROBLEM_MODEL") or "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    return path if path.exists() else None
+
+
+def _load_continuity_detector_model(path: Path) -> Any:
+    key = str(path.resolve())
+    if key not in _CONTINUITY_DETECTOR_MODEL_CACHE:
+        from ultralytics import YOLO
+
+        _CONTINUITY_DETECTOR_MODEL_CACHE[key] = YOLO(key)
+    return _CONTINUITY_DETECTOR_MODEL_CACHE[key]
 
 
 def _canonical_human_review_text(value: str) -> str:
@@ -39,6 +227,731 @@ def _canonical_human_review_text(value: str) -> str:
         line.rstrip()
         for line in str(value or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
     ).strip()
+
+
+def _effective_ocr_image_path(record: StagingProblemRecord) -> Path:
+    artifacts = dict(record.artifacts or {})
+    for key in (OCR_INPUT_ARTIFACT_KEY, MERGED_CROP_ARTIFACT_KEY):
+        value = str(artifacts.get(key) or "").strip()
+        if value:
+            return Path(value)
+    return Path(record.crop_path)
+
+
+def _record_has_effective_crop(record: StagingProblemRecord) -> bool:
+    raw_path = str(record.crop_path or "").strip()
+    artifacts = dict(record.artifacts or {})
+    artifact_path = str(artifacts.get(OCR_INPUT_ARTIFACT_KEY) or artifacts.get(MERGED_CROP_ARTIFACT_KEY) or "").strip()
+    if not raw_path and not artifact_path:
+        return False
+    try:
+        return _effective_ocr_image_path(record).exists()
+    except OSError:
+        return False
+
+
+def _record_replaced_by_merged_crop(record: StagingProblemRecord) -> bool:
+    source = dict(record.source or {})
+    return bool(str(source.get("replaced_by_record_id") or "").strip())
+
+
+def _record_excluded_from_ocr_work(record: StagingProblemRecord) -> bool:
+    source = dict(record.source or {})
+    return bool(
+        str(source.get("merged_into_record_id") or "").strip()
+        or str(source.get("replaced_by_record_id") or "").strip()
+    )
+
+
+def _record_excluded_from_continuation_scan(record: StagingProblemRecord) -> bool:
+    source = dict(record.source or {})
+    if str(source.get("ocr_input_mode") or "").strip() == "merged_crops_replacement":
+        return True
+    return _record_excluded_from_ocr_work(record)
+
+
+def _record_detector_class(record: StagingProblemRecord) -> str:
+    source = dict(record.source or {})
+    detector_box = source.get("detector_box") if isinstance(source.get("detector_box"), dict) else {}
+    raw = (
+        source.get("box_class_key")
+        or source.get("box_class_name")
+        or source.get("box_role")
+        or detector_box.get("class_key")
+        or detector_box.get("class_name")
+        or detector_box.get("role")
+        or ""
+    )
+    return re.sub(r"[^a-z0-9]+", "_", str(raw or "").strip().lower()).strip("_")
+
+
+def _record_is_problem_crop(record: StagingProblemRecord) -> bool:
+    source = dict(record.source or {})
+    explicit = _record_detector_class(record)
+    if explicit:
+        return explicit == "problem"
+    if "continuity_problem_crop" in source:
+        return bool(source.get("continuity_problem_crop"))
+    return True
+
+
+def _record_ocr_text(record: StagingProblemRecord) -> str:
+    review = dict(record.review or {})
+    candidates = [
+        record.raw_ocr,
+        dict(record.normalized or {}).get("latex_rendered_item"),
+        dict(record.normalized or {}).get("enunciado_latex"),
+        review.get("final_latex"),
+        review.get("latex_rendered_item"),
+        review.get("human_review_text"),
+    ]
+    return "\n".join(str(item or "").strip() for item in candidates if str(item or "").strip())
+
+
+def _starts_problem(text: str) -> bool:
+    return bool(PROBLEM_START_RE.search(str(text or "").strip()))
+
+
+def _option_labels(text: str) -> set[str]:
+    return {match.group(1).upper() for match in OPTION_LABEL_RE.finditer(str(text or ""))}
+
+
+def _looks_like_problem_label_token(token: str) -> bool:
+    lowered = str(token or "").strip().lower()
+    if not lowered.startswith("p"):
+        return False
+    score = max(
+        SequenceMatcher(None, lowered, "problema").ratio(),
+        SequenceMatcher(None, lowered, "pregunta").ratio(),
+    )
+    return score >= 0.58 or ("m" in lowered and score >= 0.5)
+
+
+def _aux_starts_problem(text: str) -> bool:
+    value = str(text or "").strip()
+    if _starts_problem(value):
+        return True
+    for line in value.splitlines()[:4]:
+        clean_line = line.strip()
+        if (
+            AUX_PROBLEM_START_RE.search(clean_line)
+            or AUX_PROBLEM_LABEL_START_RE.search(clean_line)
+            or AUX_PROBLEM_NUMBER_PREFIX_RE.search(clean_line)
+            or AUX_PROBLEM_NUMBER_EARLY_RE.search(clean_line[:48])
+            or AUX_NOISY_PROBLEM_NUMBER_EARLY_RE.search(clean_line[:72])
+        ):
+            return True
+        for token in re.findall(r"[A-Za-z]{4,16}", clean_line[:64])[:4]:
+            if _looks_like_problem_label_token(token):
+                return True
+    return False
+
+
+def _aux_looks_like_unnumbered_problem(text: str) -> bool:
+    value = " ".join(str(text or "").split())
+    if not value or _aux_starts_problem(value):
+        return False
+    if AUX_UNNUMBERED_PROBLEM_PHRASE_RE.search(value[:180]):
+        return True
+    if AUX_PROBLEM_CONTEXT_EARLY_RE.search(value[:90]):
+        return True
+    if AUX_GEOMETRY_OBJECT_PROBLEM_EARLY_RE.search(value[:120]):
+        return True
+    for token in re.findall(r"[A-Za-z]{4,16}", value[:48])[:3]:
+        if _looks_like_problem_label_token(token):
+            return True
+    return False
+
+
+def _resolve_tesseract_cmd() -> Path | None:
+    for key in ("PDF_FACTORY_TESSERACT_CMD", "TESSERACT_CMD", "TESSERACT_EXE"):
+        raw = str(os.environ.get(key) or "").strip().strip('"')
+        if raw:
+            path = Path(raw)
+            if path.exists():
+                return path
+    found = shutil.which("tesseract")
+    if found:
+        return Path(found)
+    for path in DEFAULT_TESSERACT_PATHS:
+        if path.exists():
+            return path
+    return None
+
+
+def _continuity_tesseract_enabled() -> bool:
+    value = str(os.environ.get("PDF_FACTORY_CONTINUITY_TESSERACT") or "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _preprocess_aux_ocr_image(image: Any, *, target_width: int | None = None, mode: str = "fixed") -> Any:
+    from PIL import Image, ImageOps
+
+    image = ImageOps.autocontrast(image.convert("L"))
+    if target_width is None:
+        try:
+            target_width = int(os.environ.get("PDF_FACTORY_CONTINUITY_TESSERACT_WIDTH") or "1200")
+        except Exception:
+            target_width = 1200
+    if image.width > 0 and image.width < target_width:
+        ratio = target_width / max(1, image.width)
+        image = image.resize((target_width, max(1, int(image.height * ratio))))
+    if mode in {"otsu", "adaptive"}:
+        try:
+            import cv2
+            import numpy as np
+
+            arr = np.asarray(image)
+            if mode == "adaptive":
+                arr = cv2.adaptiveThreshold(
+                    arr,
+                    255,
+                    cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                    cv2.THRESH_BINARY,
+                    31,
+                    11,
+                )
+            else:
+                _, arr = cv2.threshold(arr, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            return Image.fromarray(arr)
+        except Exception:
+            pass
+    return image.point(lambda px: 255 if px > 182 else 0)
+
+
+def _preprocess_for_aux_ocr(path: Path):
+    from PIL import Image
+
+    image = Image.open(path)
+    return _preprocess_aux_ocr_image(image)
+
+
+def _run_aux_tesseract_pass(
+    pytesseract: Any,
+    image: Any,
+    *,
+    lang: str,
+    timeout: float,
+    psm: int = 6,
+    whitelist: str | None = None,
+) -> str:
+    config = f"--psm {psm}"
+    if whitelist:
+        config += f" -c tessedit_char_whitelist={whitelist}"
+    return str(
+        pytesseract.image_to_string(
+            image,
+            lang=lang,
+            config=config,
+            timeout=timeout,
+        )
+        or ""
+    )
+
+
+def _auxiliary_continuity_zone_ocr(
+    path: Path,
+    pytesseract: Any,
+    *,
+    lang: str,
+    timeout: float,
+) -> tuple[str, list[dict[str, Any]]]:
+    from PIL import Image
+
+    with Image.open(path) as source:
+        source = source.convert("RGB")
+        width, height = source.size
+        top = source.crop((0, 0, width, max(1, int(height * 0.28))))
+        left = source.crop((0, 0, max(1, int(width * 0.42)), height))
+        bottom = source.crop((0, max(0, int(height * 0.42)), width, height))
+
+        number_whitelist = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.°ºNnPpRrOoBbLlEeMmAa"
+        passes: list[tuple[str, Any, str, str | None]] = [
+            ("top_otsu", top, "otsu", number_whitelist),
+            ("left_otsu", left, "otsu", number_whitelist),
+            ("bottom_otsu", bottom, "otsu", None),
+            ("bottom_adaptive", bottom, "adaptive", None),
+        ]
+        zone_texts: list[dict[str, Any]] = []
+        collected: list[str] = []
+        labels: set[str] = set()
+        starts_problem = False
+
+        for zone, zone_image, mode, whitelist in passes:
+            target_width = 950 if zone.startswith(("top", "left")) else 1200
+            prepared = _preprocess_aux_ocr_image(zone_image, target_width=target_width, mode=mode)
+            text = _run_aux_tesseract_pass(
+                pytesseract,
+                prepared,
+                lang=lang,
+                timeout=timeout,
+                psm=6,
+                whitelist=whitelist,
+            )
+            collected.append(text)
+            labels.update(_option_labels(text))
+            starts_problem = starts_problem or _aux_starts_problem(text)
+            zone_texts.append(
+                {
+                    "zone": zone,
+                    "mode": mode,
+                    "text_preview": " ".join(str(text or "").split())[:220],
+                    "starts_problem": _aux_starts_problem(text),
+                    "option_labels": sorted(_option_labels(text)),
+                }
+            )
+
+        if len(labels) < 4:
+            prepared = _preprocess_aux_ocr_image(source, target_width=1200, mode="otsu")
+            text = _run_aux_tesseract_pass(
+                pytesseract,
+                prepared,
+                lang=lang,
+                timeout=timeout,
+                psm=6,
+            )
+            collected.append(text)
+            labels.update(_option_labels(text))
+            starts_problem = starts_problem or _aux_starts_problem(text)
+            zone_texts.append(
+                {
+                    "zone": "full_otsu",
+                    "mode": "otsu",
+                    "text_preview": " ".join(str(text or "").split())[:220],
+                    "starts_problem": _aux_starts_problem(text),
+                    "option_labels": sorted(_option_labels(text)),
+                }
+            )
+
+    return "\n".join(item for item in collected if str(item or "").strip()), zone_texts
+
+
+def _preprocess_for_aux_ocr_legacy(path: Path):
+    from PIL import Image, ImageOps
+
+    image = Image.open(path).convert("L")
+    image = ImageOps.autocontrast(image)
+    try:
+        target_width = int(os.environ.get("PDF_FACTORY_CONTINUITY_TESSERACT_WIDTH") or "1200")
+    except Exception:
+        target_width = 1200
+    if image.width > 0 and image.width < target_width:
+        ratio = target_width / max(1, image.width)
+        image = image.resize((target_width, max(1, int(image.height * ratio))))
+    return image.point(lambda px: 255 if px > 182 else 0)
+
+
+def _auxiliary_continuity_ocr_features(
+    record: StagingProblemRecord,
+    cache: dict[tuple[str, int, int], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if not _continuity_tesseract_enabled():
+        return {"available": False, "disabled": True}
+    path = Path(str(record.crop_path or ""))
+    if not path.exists():
+        return {"available": False, "error": "crop_missing"}
+    try:
+        stat = path.stat()
+        cache_key = (str(path), int(stat.st_size), int(stat.st_mtime_ns))
+    except Exception:
+        cache_key = (str(path), 0, 0)
+    if cache is not None and cache_key in cache:
+        return dict(cache[cache_key])
+
+    cmd = _resolve_tesseract_cmd()
+    if not cmd:
+        result = {"available": False, "error": "tesseract_not_found"}
+        if cache is not None:
+            cache[cache_key] = dict(result)
+        return result
+    try:
+        import pytesseract
+
+        pytesseract.pytesseract.tesseract_cmd = str(cmd)
+        lang = str(os.environ.get("PDF_FACTORY_CONTINUITY_TESSERACT_LANG") or "eng").strip() or "eng"
+        timeout = float(os.environ.get("PDF_FACTORY_CONTINUITY_TESSERACT_TIMEOUT") or "4")
+        text, zone_texts = _auxiliary_continuity_zone_ocr(
+            path,
+            pytesseract,
+            lang=lang,
+            timeout=timeout,
+        )
+        labels = _option_labels(text)
+        result = {
+            "available": True,
+            "cmd": str(cmd),
+            "lang": lang,
+            "starts_problem": _aux_starts_problem(text),
+            "looks_like_unnumbered_problem": _aux_looks_like_unnumbered_problem(text),
+            "option_labels": sorted(labels),
+            "option_count": len(labels),
+            "has_options": len(labels) >= 2,
+            "complete_options": len(labels) >= 4,
+            "text": str(text or ""),
+            "text_preview": " ".join(str(text or "").split())[:220],
+            "zone_texts": zone_texts,
+            "ocr_passes": len(zone_texts),
+        }
+    except Exception as exc:
+        result = {"available": False, "cmd": str(cmd), "error": str(exc)}
+    if cache is not None:
+        cache[cache_key] = dict(result)
+    return result
+
+
+def _bbox_metrics(record: StagingProblemRecord) -> dict[str, float]:
+    source = dict(record.source or {})
+    bbox = source.get("bbox_px") or []
+    try:
+        x1, y1, x2, y2 = [float(value) for value in list(bbox)[:4]]
+    except Exception:
+        return {"x1": 0.0, "y1": 0.0, "x2": 0.0, "y2": 0.0, "width": 0.0, "height": 0.0}
+    return {
+        "x1": x1,
+        "y1": y1,
+        "x2": x2,
+        "y2": y2,
+        "width": max(0.0, x2 - x1),
+        "height": max(0.0, y2 - y1),
+    }
+
+
+def _x_overlap_ratio(first: dict[str, float], second: dict[str, float]) -> float:
+    overlap = max(0.0, min(first["x2"], second["x2"]) - max(first["x1"], second["x1"]))
+    base = max(1.0, min(first["width"], second["width"]))
+    return max(0.0, min(1.0, overlap / base))
+
+
+def _bbox_is_valid(box: dict[str, float]) -> bool:
+    return box["width"] > 0 and box["height"] > 0
+
+
+def _source_order_value(source: dict[str, Any]) -> int | None:
+    for key in ("source_order", "problem_index", "box_index", "page_problem_index"):
+        try:
+            value = int(source.get(key))
+        except Exception:
+            continue
+        if value >= 0:
+            return value
+    return None
+
+
+def _page_number_value(source: dict[str, Any]) -> int:
+    for key in ("page_number", "source_page_number"):
+        try:
+            value = int(source.get(key))
+        except Exception:
+            continue
+        if value >= 0:
+            return value
+    return 10**9
+
+
+def _continuity_uses_global_source_order(records: list[StagingProblemRecord]) -> bool:
+    values = [
+        value
+        for record in records
+        if (value := _source_order_value(dict(record.source or {}))) is not None
+    ]
+    if len(values) < 3:
+        return False
+    unique_ratio = len(set(values)) / max(1, len(values))
+    max_value = max(values)
+    pages = {
+        _page_number_value(dict(record.source or {}))
+        for record in records
+        if _page_number_value(dict(record.source or {})) < 10**9
+    }
+    return unique_ratio >= 0.65 and max_value >= max(8, len(pages) * 2, int(len(values) * 0.45))
+
+
+def _continuity_reading_order_key(
+    record: StagingProblemRecord,
+    *,
+    global_source_order: bool,
+) -> tuple[int, int, int, int, str]:
+    source = dict(record.source or {})
+    order = _source_order_value(source)
+    order_key = order if order is not None else 10**9
+    page_key = _page_number_value(source)
+    bbox = _bbox_metrics(record)
+    y_key = int(bbox.get("y1") or 0)
+    x_key = int(bbox.get("x1") or 0)
+    if global_source_order:
+        return (order_key, page_key, y_key, x_key, str(record.record_id or ""))
+    return (page_key, order_key, y_key, x_key, str(record.record_id or ""))
+
+
+def _page_image_size(record: StagingProblemRecord) -> tuple[int, int] | None:
+    path = str(dict(record.source or {}).get("page_image") or "").strip()
+    if not path:
+        return None
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            return int(image.width), int(image.height)
+    except Exception:
+        return None
+
+
+def _effective_crop_path(record: StagingProblemRecord) -> Path:
+    source = dict(record.source or {})
+    raw = str(record.crop_path or source.get("crop_path") or "").strip()
+    return Path(raw) if raw else Path("")
+
+
+def _visual_option_block_features(
+    record: StagingProblemRecord,
+    cache: dict[tuple[str, int, int], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    path = _effective_crop_path(record)
+    if not path.exists():
+        return {"score": 0.0, "option_rows": 0, "max_segments": 0, "line_rows": 0, "error": "crop_missing"}
+    try:
+        stat = path.stat()
+        cache_key = (str(path), int(stat.st_size), int(stat.st_mtime_ns))
+    except Exception:
+        cache_key = (str(path), 0, 0)
+    if cache is not None and cache_key in cache:
+        return dict(cache[cache_key])
+    try:
+        from PIL import Image
+        import numpy as np
+
+        with Image.open(path) as image:
+            gray = image.convert("L")
+            max_width = 520
+            if gray.width > max_width:
+                ratio = max_width / max(1, gray.width)
+                gray = gray.resize((max_width, max(1, int(gray.height * ratio))))
+            width, height = gray.size
+            if width <= 0 or height <= 0:
+                return {"score": 0.0, "option_rows": 0, "max_segments": 0, "line_rows": 0, "error": "empty_image"}
+            mask = np.asarray(gray) < 185
+            row_threshold = max(3, int(width * 0.012))
+            active_rows = [int(y) for y in np.flatnonzero(mask.sum(axis=1) >= row_threshold)]
+
+            bands: list[tuple[int, int]] = []
+            for y in active_rows:
+                if not bands or y - bands[-1][1] > 3:
+                    bands.append((y, y))
+                else:
+                    bands[-1] = (bands[-1][0], y)
+
+            option_rows = 0
+            vertical_option_rows = 0
+            bottom_option_rows = 0
+            max_segments = 0
+            option_row_details: list[dict[str, Any]] = []
+            vertical_option_details: list[dict[str, Any]] = []
+            leading_number_score = 0.0
+            leading_number_band: dict[str, Any] | None = None
+            max_word_gap = max(8, int(width * 0.035))
+            min_segment_width = max(8, int(width * 0.018))
+            for y1, y2 in bands:
+                band_height = y2 - y1 + 1
+                if band_height <= 1 or band_height > max(24, int(height * 0.16)):
+                    continue
+                col_threshold = max(1, int(band_height * 0.08))
+                active_cols = [int(x) for x in np.flatnonzero(mask[y1 : y2 + 1, :].sum(axis=0) >= col_threshold)]
+                segments: list[tuple[int, int]] = []
+                for x in active_cols:
+                    if not segments or x - segments[-1][1] > max_word_gap:
+                        segments.append((x, x))
+                    else:
+                        segments[-1] = (segments[-1][0], x)
+                compact_segments = [
+                    (x1, x2)
+                    for x1, x2 in segments
+                    if x2 - x1 + 1 >= min_segment_width and x2 - x1 + 1 <= width * 0.42
+                ]
+                if not leading_number_band and compact_segments:
+                    first_x1, first_x2 = compact_segments[0]
+                    first_width = first_x2 - first_x1 + 1
+                    second_x1 = compact_segments[1][0] if len(compact_segments) > 1 else width
+                    top_ratio = ((y1 + y2) / 2.0) / max(1, height)
+                    left_ratio = first_x1 / max(1, width)
+                    width_ratio = first_width / max(1, width)
+                    gap_ratio = max(0, second_x1 - first_x2) / max(1, width)
+                    if (
+                        len(compact_segments) <= 2
+                        and top_ratio <= 0.3
+                        and left_ratio <= 0.14
+                        and width_ratio <= 0.18
+                        and gap_ratio >= 0.018
+                    ):
+                        leading_number_score = 0.86
+                        leading_number_band = {
+                            "y": round(top_ratio, 3),
+                            "x": round(left_ratio, 3),
+                            "width": round(width_ratio, 3),
+                            "gap_after": round(gap_ratio, 3),
+                            "segments": len(compact_segments),
+                        }
+                mid_y = (y1 + y2) / 2.0
+                option_like_row = len(compact_segments) >= 3 or mid_y >= height * 0.42
+                if len(compact_segments) >= 2 and option_like_row:
+                    option_rows += 1
+                    if mid_y >= height * 0.42:
+                        bottom_option_rows += 1
+                    max_segments = max(max_segments, len(compact_segments))
+                    option_row_details.append(
+                        {
+                            "y": round(mid_y / max(1, height), 3),
+                            "segments": len(compact_segments),
+                        }
+                    )
+                if compact_segments and active_cols:
+                    first_x1, first_x2 = compact_segments[0]
+                    span_width = active_cols[-1] - active_cols[0] + 1
+                    row_y_ratio = mid_y / max(1, height)
+                    starts_like_option_label = first_x1 <= width * 0.24
+                    short_option_span = span_width <= width * 0.42
+                    vertical_answer_span = (
+                        row_y_ratio >= 0.28
+                        and span_width <= width * 0.82
+                        and len(compact_segments) <= 5
+                    )
+                    after_header_zone = row_y_ratio >= 0.12
+                    if starts_like_option_label and (short_option_span or vertical_answer_span) and after_header_zone:
+                        vertical_option_rows += 1
+                        vertical_option_details.append(
+                            {
+                                "y": round(row_y_ratio, 3),
+                                "span": round(span_width / max(1, width), 3),
+                                "segments": len(compact_segments),
+                            }
+                        )
+
+            score = 0.0
+            if option_rows >= 2:
+                score = 0.9
+            elif option_rows == 1 and max_segments >= 3:
+                score = 0.78
+            elif option_rows == 1:
+                score = 0.58
+            if vertical_option_rows >= 4:
+                score = max(score, 0.94)
+            elif vertical_option_rows >= 3:
+                score = max(score, 0.9)
+            elif vertical_option_rows >= 2:
+                score = max(score, 0.62)
+            if option_rows and bottom_option_rows == option_rows:
+                score = min(0.98, score + 0.04)
+            vertical_complete_options = vertical_option_rows >= 4 or (vertical_option_rows >= 3 and option_rows >= 1)
+            result = {
+                "score": round(score, 3),
+                "option_rows": option_rows,
+                "vertical_option_rows": vertical_option_rows,
+                "vertical_complete_options": vertical_complete_options,
+                "bottom_option_rows": bottom_option_rows,
+                "max_segments": max_segments,
+                "line_rows": len(bands),
+                "details": option_row_details[:4],
+                "vertical_details": vertical_option_details[:5],
+                "leading_number_score": round(leading_number_score, 3),
+                "leading_number": leading_number_band or {},
+            }
+            if cache is not None:
+                cache[cache_key] = dict(result)
+            return result
+    except Exception as exc:
+        return {"score": 0.0, "option_rows": 0, "max_segments": 0, "line_rows": 0, "error": str(exc)}
+
+
+def _continuity_detector_features(
+    record: StagingProblemRecord,
+    cache: dict[tuple[str, int, int, str], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    source = dict(record.source or {})
+    if source.get("continuity_subboxes_checked") or source.get("continuity_subboxes"):
+        return _continuity_detector_payload_from_subboxes(
+            list(source.get("continuity_subboxes") or []),
+            source="page_detector_subboxes",
+            checked=bool(source.get("continuity_subboxes_checked", True)),
+        )
+    if not _continuity_detector_enabled():
+        return {"available": False, "disabled": True}
+    path = _effective_crop_path(record)
+    if not path.exists():
+        return {"available": False, "error": "crop_missing"}
+    model_path = _continuity_detector_model_path()
+    if model_path is None:
+        return {"available": False, "error": "model_not_configured"}
+    try:
+        stat = path.stat()
+        cache_key = (str(path), int(stat.st_size), int(stat.st_mtime_ns), str(model_path.resolve()))
+    except Exception:
+        cache_key = (str(path), 0, 0, str(model_path))
+    if cache is not None and cache_key in cache:
+        return dict(cache[cache_key])
+
+    try:
+        model = _load_continuity_detector_model(model_path)
+        imgsz = int(os.environ.get("PDF_FACTORY_CONTINUITY_DETECTOR_IMGSZ") or "768")
+        conf = _continuity_detector_conf_threshold("DEFAULT")
+        iou = float(os.environ.get("PDF_FACTORY_CONTINUITY_DETECTOR_IOU") or "0.45")
+        max_det = int(os.environ.get("PDF_FACTORY_CONTINUITY_DETECTOR_MAX_DET") or "40")
+        result = model.predict(
+            str(path),
+            imgsz=imgsz,
+            conf=conf,
+            iou=iou,
+            max_det=max_det,
+            verbose=False,
+        )[0]
+        boxes = result.boxes
+        names = getattr(model, "names", {}) or {}
+        counts = {"problem": 0, "problem_number": 0, "answer_block": 0}
+        max_conf = {"problem": 0.0, "problem_number": 0.0, "answer_block": 0.0}
+        detections: list[dict[str, Any]] = []
+        if boxes is not None:
+            classes = boxes.cls.cpu().tolist()
+            confs = boxes.conf.cpu().tolist()
+            xyxys = boxes.xyxy.cpu().tolist()
+            for index, (cls_value, conf_value, xyxy) in enumerate(zip(classes, confs, xyxys)):
+                class_id = int(cls_value)
+                class_name = str(names.get(class_id, class_id))
+                if class_name not in counts:
+                    continue
+                confidence = float(conf_value)
+                counts[class_name] += 1
+                max_conf[class_name] = max(max_conf[class_name], confidence)
+                if len(detections) < 12:
+                    detections.append(
+                        {
+                            "class": class_name,
+                            "confidence": round(confidence, 3),
+                            "bbox": [round(float(value), 1) for value in list(xyxy)[:4]],
+                            "index": index,
+                        }
+                    )
+        number_conf = _continuity_detector_conf_threshold("problem_number")
+        answer_conf = _continuity_detector_conf_threshold("answer_block")
+        has_problem_number = max_conf["problem_number"] >= number_conf
+        has_answer_block = max_conf["answer_block"] >= answer_conf
+        result_payload = {
+            "available": True,
+            "model_path": str(model_path),
+            "imgsz": imgsz,
+            "conf": conf,
+            "iou": iou,
+            "counts": counts,
+            "max_conf": {key: round(value, 3) for key, value in max_conf.items()},
+            "detections_total": sum(counts.values()),
+            "subbox_detections_total": counts["problem_number"] + counts["answer_block"],
+            "has_problem_number": has_problem_number,
+            "has_answer_block": has_answer_block,
+            "complete_problem": has_problem_number and has_answer_block,
+            "detections": detections,
+        }
+    except Exception as exc:
+        result_payload = {"available": False, "model_path": str(model_path), "error": str(exc)}
+    if cache is not None:
+        cache[cache_key] = dict(result_payload)
+    return result_payload
 
 
 class InstancePdfPipelineService:
@@ -55,6 +968,12 @@ class InstancePdfPipelineService:
         self.models = resolve_model_defaults()
         self._pages_cache_signature: tuple[tuple[str, int, int], ...] | None = None
         self._pages_cache_rows: list[ProblemPageRecord] | None = None
+
+    def _server_model_reference(self, stage_key: str, *, override: str = "") -> str:
+        raw_override = str(override or "").strip()
+        if raw_override:
+            return raw_override
+        return select_server_model_path(stage_key, self.models, allow_not_ready=True)
 
     @classmethod
     def from_library_instance(
@@ -397,11 +1316,15 @@ class InstancePdfPipelineService:
         record_id: str,
         boxes: list[Any],
         *,
+        detector_detections: list[Any] | None = None,
         layout_mode: str = "auto",
         reviewed: bool = True,
         reorder: bool = False,
+        force_training_capture: bool = False,
     ) -> ProblemPageRecord:
         """Persist reviewed page boxes from a UI without opening the legacy editor."""
+        setattr(self, "_last_problem_detector_correction", None)
+        setattr(self, "_last_problem_detector_correction_error", None)
         rows = self._dedupe_page_rows(self.load_pages())
         target: ProblemPageRecord | None = None
         for row in rows:
@@ -413,14 +1336,35 @@ class InstancePdfPipelineService:
         clean_boxes = self._coerce_boxes(boxes)
         previous_boxes = list(target.boxes or [])
         previous_signature = self._boxes_signature(previous_boxes)
+        previous_detections = self._page_detector_training_detections(target)
+        previous_detector_signature = self._detector_detections_signature(previous_detections)
         baseline_reviewed = bool(target.reviewed)
         target.layout_mode = str(layout_mode or target.layout_mode or "auto")
         target.boxes = sort_boxes_reading_order(clean_boxes, target.layout_mode) if reorder else clean_boxes
+        target.box_details = [
+            {
+                "idx": index,
+                "bbox_px": [int(value) for value in box],
+                "class_name": "problem",
+                "class_key": "problem",
+                "role": "problem",
+                "conf": 1.0,
+                "source": "human_review",
+            }
+            for index, box in enumerate(target.boxes, start=1)
+        ]
+        target.detector_detections = self._compose_page_detector_detections(
+            target.box_details,
+            detector_detections if detector_detections is not None else list(getattr(target, "detector_detections", []) or []),
+        )
         target.reviewed = bool(reviewed)
         current_signature = self._boxes_signature(target.boxes)
-        if previous_signature != current_signature and target.reviewed:
+        current_detections = self._page_detector_training_detections(target)
+        current_detector_signature = self._detector_detections_signature(current_detections)
+        training_changed = previous_signature != current_signature or previous_detector_signature != current_detector_signature
+        if (training_changed or force_training_capture) and target.reviewed:
             try:
-                correction = maybe_write_problem_detector_correction(
+                correction = persist_problem_detector_correction(
                     context=self.context,
                     page_record_id=str(target.record_id or record_id),
                     page_number=int(target.page_number or 0),
@@ -430,7 +1374,11 @@ class InstancePdfPipelineService:
                     layout_mode=str(target.layout_mode or "auto"),
                     previous_boxes=previous_boxes,
                     human_boxes=list(target.boxes or []),
+                    previous_detections=previous_detections,
+                    human_detections=current_detections,
                     baseline_reviewed=baseline_reviewed,
+                    force=bool(force_training_capture),
+                    capture_reason="manual_page_training_capture" if force_training_capture and not training_changed else "human_correction",
                 )
                 if correction.get("saved"):
                     setattr(self, "_last_problem_detector_correction", correction)
@@ -459,6 +1407,103 @@ class InstancePdfPipelineService:
         setattr(self, "_last_page_boxes_invalidated_records", list(invalidated_records))
         setattr(self, "_last_page_boxes_updated_records", list(updated_records))
         return target
+
+    def capture_problem_detector_training_pages(
+        self,
+        record_ids: list[str] | None = None,
+        *,
+        reviewed_only: bool = True,
+    ) -> dict[str, Any]:
+        """Copy reviewed full-page annotations into the problem-detector training bank."""
+        wanted = {str(item) for item in list(record_ids or []) if str(item or "").strip()}
+        rows = self._dedupe_page_rows(self.load_pages())
+        results: list[dict[str, Any]] = []
+        saved = skipped = errors = 0
+        for row in rows:
+            record_id = str(getattr(row, "record_id", "") or "")
+            if wanted and record_id not in wanted:
+                continue
+            page_number = int(getattr(row, "page_number", 0) or 0)
+            if reviewed_only and not bool(getattr(row, "reviewed", False)):
+                skipped += 1
+                results.append(
+                    {
+                        "record_id": record_id,
+                        "page_number": page_number,
+                        "status": "skipped",
+                        "reason": "page_not_reviewed",
+                    }
+                )
+                continue
+            detections = self._page_detector_training_detections(row)
+            if not detections:
+                skipped += 1
+                results.append(
+                    {
+                        "record_id": record_id,
+                        "page_number": page_number,
+                        "status": "skipped",
+                        "reason": "no_detector_segments",
+                    }
+                )
+                continue
+            try:
+                correction = persist_problem_detector_correction(
+                    context=self.context,
+                    page_record_id=record_id,
+                    page_number=page_number,
+                    page_image=Path(getattr(row, "image_path", "")),
+                    pdf_path=str(getattr(row, "pdf_path", "") or self.context.pdf_path or ""),
+                    detector_source=str(getattr(row, "detector_source", "") or ""),
+                    layout_mode=str(getattr(row, "layout_mode", "") or "auto"),
+                    previous_boxes=list(getattr(row, "boxes", []) or []),
+                    human_boxes=list(getattr(row, "boxes", []) or []),
+                    previous_detections=detections,
+                    human_detections=detections,
+                    baseline_reviewed=bool(getattr(row, "reviewed", False)),
+                    force=True,
+                    capture_reason="manual_reviewed_pages_batch",
+                )
+                if correction.get("saved"):
+                    saved += 1
+                    results.append(
+                        {
+                            "record_id": record_id,
+                            "page_number": page_number,
+                            "status": "saved",
+                            "correction_id": correction.get("correction_id"),
+                            "metadata_path": correction.get("metadata_path"),
+                            "label_path": correction.get("label_path"),
+                        }
+                    )
+                else:
+                    skipped += 1
+                    results.append(
+                        {
+                            "record_id": record_id,
+                            "page_number": page_number,
+                            "status": "skipped",
+                            "reason": correction.get("reason") or "not_saved",
+                        }
+                    )
+            except Exception as exc:
+                errors += 1
+                results.append(
+                    {
+                        "record_id": record_id,
+                        "page_number": page_number,
+                        "status": "error",
+                        "error": str(exc),
+                    }
+                )
+        return {
+            "schema_version": "problem_detector_training_page_capture_v1",
+            "saved": saved,
+            "skipped": skipped,
+            "errors": errors,
+            "total_considered": len(results),
+            "results": results,
+        }
 
     def delete_page_record(self, record_id: str) -> list[ProblemPageRecord]:
         """Remove a detected PDF page from the factory flow and invalidate dependent staging rows."""
@@ -498,6 +1543,231 @@ class InstancePdfPipelineService:
                 continue
             clean.append((left, top, right, bottom))
         return clean
+
+    @staticmethod
+    def _detector_class_key(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        key = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+        if key in {"problem_number", "numero", "number"}:
+            return "problem_number"
+        if key in {"answer_block", "alternatives", "alternativas", "options"}:
+            return "answer_block"
+        return "problem"
+
+    @classmethod
+    def _coerce_detector_detections(cls, raw_detections: list[Any] | tuple[Any, ...]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for index, raw in enumerate(list(raw_detections or []), start=1):
+            if not isinstance(raw, dict):
+                continue
+            bbox = raw.get("bbox_px") or raw.get("xyxy") or []
+            clean_boxes = cls._coerce_boxes([bbox])
+            if not clean_boxes:
+                continue
+            class_key = cls._detector_class_key(raw.get("class_key") or raw.get("class_name") or raw.get("role"))
+            try:
+                idx = int(raw.get("idx") or index)
+            except Exception:
+                idx = index
+            try:
+                conf = float(raw.get("conf") or 1.0)
+            except Exception:
+                conf = 1.0
+            rows.append(
+                {
+                    **dict(raw),
+                    "idx": idx,
+                    "bbox_px": [int(value) for value in clean_boxes[0]],
+                    "class_name": class_key,
+                    "class_key": class_key,
+                    "role": class_key,
+                    "conf": conf,
+                    "source": str(raw.get("source") or "human_review"),
+                }
+            )
+        return rows
+
+    @classmethod
+    def _compose_page_detector_detections(
+        cls,
+        problem_details: list[dict[str, Any]],
+        detector_detections: list[Any] | tuple[Any, ...],
+    ) -> list[dict[str, Any]]:
+        problem_rows = cls._coerce_detector_detections(problem_details)
+        auxiliary_rows = [
+            row
+            for row in cls._coerce_detector_detections(detector_detections)
+            if cls._detector_class_key(row.get("class_key") or row.get("class_name")) != "problem"
+        ]
+        return problem_rows + auxiliary_rows
+
+    @classmethod
+    def _page_detector_training_detections(cls, page: Any) -> list[dict[str, Any]]:
+        detections = list(getattr(page, "detector_detections", []) or [])
+        if not detections:
+            detections = list(getattr(page, "box_details", []) or [])
+        return cls._coerce_detector_detections(detections)
+
+    @staticmethod
+    def _box_area(box: list[int] | tuple[int, int, int, int]) -> int:
+        if len(box) < 4:
+            return 0
+        return max(0, int(box[2]) - int(box[0])) * max(0, int(box[3]) - int(box[1]))
+
+    @classmethod
+    def _box_intersection_ratio(
+        cls,
+        inner: list[int] | tuple[int, int, int, int],
+        outer: list[int] | tuple[int, int, int, int],
+    ) -> float:
+        if len(inner) < 4 or len(outer) < 4:
+            return 0.0
+        left = max(int(inner[0]), int(outer[0]))
+        top = max(int(inner[1]), int(outer[1]))
+        right = min(int(inner[2]), int(outer[2]))
+        bottom = min(int(inner[3]), int(outer[3]))
+        overlap = cls._box_area([left, top, right, bottom])
+        return overlap / max(1, cls._box_area(inner))
+
+    @classmethod
+    def _problem_box_match_for_crop(
+        cls,
+        page: ProblemPageRecord | None,
+        bbox: list[Any] | tuple[Any, ...],
+    ) -> dict[str, Any]:
+        if page is None:
+            return {"matched": False, "available": False}
+        crop_boxes = cls._coerce_boxes([bbox])
+        if not crop_boxes:
+            return {"matched": False, "available": False}
+        crop_box = crop_boxes[0]
+        crop_area = max(1, cls._box_area(crop_box))
+        best: dict[str, Any] = {
+            "matched": False,
+            "available": False,
+            "crop_cover": 0.0,
+            "problem_cover": 0.0,
+            "area_ratio": 0.0,
+            "detector_box": {},
+        }
+        for detection in cls._page_detector_training_detections(page):
+            class_key = cls._detector_class_key(detection.get("class_key") or detection.get("class_name") or detection.get("role"))
+            if class_key != "problem":
+                continue
+            det_boxes = cls._coerce_boxes([detection.get("bbox_px") or []])
+            if not det_boxes:
+                continue
+            det_box = det_boxes[0]
+            left = max(int(crop_box[0]), int(det_box[0]))
+            top = max(int(crop_box[1]), int(det_box[1]))
+            right = min(int(crop_box[2]), int(det_box[2]))
+            bottom = min(int(crop_box[3]), int(det_box[3]))
+            overlap = cls._box_area([left, top, right, bottom])
+            problem_area = max(1, cls._box_area(det_box))
+            crop_cover = overlap / crop_area
+            problem_cover = overlap / problem_area
+            score = crop_cover * problem_cover
+            if score <= float(best.get("crop_cover") or 0.0) * float(best.get("problem_cover") or 0.0):
+                continue
+            best = {
+                "matched": crop_cover >= 0.72 and problem_cover >= 0.55,
+                "available": True,
+                "crop_cover": round(crop_cover, 3),
+                "problem_cover": round(problem_cover, 3),
+                "area_ratio": round(crop_area / problem_area, 3),
+                "detector_box": dict(detection),
+            }
+        return best
+
+    @classmethod
+    def _continuity_subboxes_for_crop(
+        cls,
+        page: ProblemPageRecord | None,
+        bbox: list[Any] | tuple[Any, ...],
+    ) -> list[dict[str, Any]]:
+        if page is None:
+            return []
+        crop_boxes = cls._coerce_boxes([bbox])
+        if not crop_boxes:
+            return []
+        crop_box = crop_boxes[0]
+        rows: list[dict[str, Any]] = []
+        for detection in cls._page_detector_training_detections(page):
+            class_key = cls._detector_class_key(detection.get("class_key") or detection.get("class_name") or detection.get("role"))
+            if class_key == "problem":
+                continue
+            det_boxes = cls._coerce_boxes([detection.get("bbox_px") or []])
+            if not det_boxes:
+                continue
+            det_box = det_boxes[0]
+            center_x = (det_box[0] + det_box[2]) / 2.0
+            center_y = (det_box[1] + det_box[3]) / 2.0
+            center_inside = crop_box[0] <= center_x <= crop_box[2] and crop_box[1] <= center_y <= crop_box[3]
+            if not center_inside and cls._box_intersection_ratio(det_box, crop_box) < 0.45:
+                continue
+            rows.append(
+                {
+                    **dict(detection),
+                    "class_key": class_key,
+                    "class_name": class_key,
+                    "bbox_px": [int(value) for value in det_box],
+                    "bbox_in_crop_px": [
+                        int(det_box[0]) - int(crop_box[0]),
+                        int(det_box[1]) - int(crop_box[1]),
+                        int(det_box[2]) - int(crop_box[0]),
+                        int(det_box[3]) - int(crop_box[1]),
+                    ],
+                    "source": str(detection.get("source") or "page_detector"),
+                }
+            )
+        return rows
+
+    def _attach_continuity_subboxes_from_pages(self, records: list[StagingProblemRecord]) -> None:
+        try:
+            pages = self.load_pages()
+        except Exception:
+            return
+        by_record_id = {str(page.record_id or ""): page for page in pages if str(page.record_id or "")}
+        by_page_number: dict[int, ProblemPageRecord] = {}
+        for page in pages:
+            try:
+                by_page_number.setdefault(int(page.page_number), page)
+            except Exception:
+                continue
+        for record in records:
+            source = dict(record.source or {})
+            if source.get("continuity_subboxes_checked") or source.get("continuity_subboxes"):
+                continue
+            page = by_record_id.get(str(source.get("source_record_id") or ""))
+            if page is None:
+                try:
+                    page = by_page_number.get(int(source.get("page_number") or 0))
+                except Exception:
+                    page = None
+            if page is None:
+                continue
+            problem_match = self._problem_box_match_for_crop(page, source.get("bbox_px") or [])
+            updated_source = {
+                **source,
+                "continuity_subboxes": self._continuity_subboxes_for_crop(page, source.get("bbox_px") or []),
+                "continuity_subboxes_checked": True,
+            }
+            if problem_match.get("available"):
+                updated_source["continuity_problem_crop"] = bool(problem_match.get("matched"))
+                updated_source["continuity_problem_match"] = problem_match
+            record.source = updated_source
+
+    @classmethod
+    def _detector_detections_signature(cls, detections: list[Any] | tuple[Any, ...]) -> str:
+        rows = cls._coerce_detector_detections(detections)
+        compact = [
+            {
+                "class_key": row.get("class_key") or row.get("class_name"),
+                "bbox_px": [int(value) for value in row.get("bbox_px", [])[:4]],
+            }
+            for row in rows
+        ]
+        return json.dumps(compact, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
     @classmethod
     def _boxes_signature(cls, boxes: list[Any] | tuple[Any, ...]) -> str:
@@ -804,6 +2074,7 @@ class InstancePdfPipelineService:
         confidence: float = 0.25,
         detector_model: str = "",
         replace_existing: bool = False,
+        preserve_reviewed: bool = True,
     ) -> list[ProblemPageRecord]:
         import fitz
 
@@ -812,17 +2083,21 @@ class InstancePdfPipelineService:
             raise FileNotFoundError(f"No se encontro el PDF: {pdf_path}")
         rows = self._dedupe_page_rows(self.load_pages())
         selected_page_numbers = {int(page) for page in pages}
+        existing_by_page = {int(row.page_number or 0): row for row in rows}
+        skipped_reviewed_pages: list[int] = []
         removed_rows: list[ProblemPageRecord] = []
         if replace_existing:
             removed_rows = [
                 row
                 for row in rows
                 if int(row.page_number or 0) not in selected_page_numbers
+                and not (preserve_reviewed and bool(row.reviewed))
             ]
             rows = [
                 row
                 for row in rows
                 if int(row.page_number or 0) in selected_page_numbers
+                or (preserve_reviewed and bool(row.reviewed))
             ]
         temp = Path(tempfile.mkdtemp(prefix="pdf_factory_pages_"))
         with fitz.open(pdf_path) as document:
@@ -830,6 +2105,10 @@ class InstancePdfPipelineService:
             for page_number in pages:
                 if page_number < 1 or page_number > document.page_count:
                     raise ValueError(f"Pagina fuera del PDF: {page_number}")
+                existing = existing_by_page.get(int(page_number))
+                if preserve_reviewed and existing is not None and bool(existing.reviewed):
+                    skipped_reviewed_pages.append(int(page_number))
+                    continue
                 rendered = temp / f"page_{page_number:04d}.png"
                 document[page_number - 1].get_pixmap(matrix=matrix, alpha=False).save(str(rendered))
                 row = self.golden.add_rendered_page(
@@ -838,13 +2117,25 @@ class InstancePdfPipelineService:
                     page_number=page_number,
                     rendered_path=rendered,
                 )
-                active_detector = str(detector_model or self.models.pdf_detector or "")
+                active_detector = self._server_model_reference("pdf_detector", override=detector_model)
                 row.boxes = self.golden.predict_boxes(
                     row.image_path,
                     confidence=confidence,
                     layout_mode=row.layout_mode,
                     model=active_detector,
                 )
+                prediction_details = dict(getattr(self.golden, "last_prediction_details", {}) or {})
+                if prediction_details:
+                    row.box_details = [
+                        dict(item)
+                        for item in list(prediction_details.get("problem_boxes") or [])
+                        if isinstance(item, dict)
+                    ]
+                    row.detector_detections = [
+                        dict(item)
+                        for item in list(prediction_details.get("detections") or [])
+                        if isinstance(item, dict)
+                    ]
                 row.detector_source = f"pdf_factory:{active_detector or self.models.pdf_detector}"
                 row.reviewed = False
                 rows = [existing for existing in rows if int(existing.page_number or 0) != int(row.page_number or 0)]
@@ -868,17 +2159,47 @@ class InstancePdfPipelineService:
         for removed in removed_rows:
             invalidated_records.extend(self._invalidate_downstream_for_page_removed(removed))
         setattr(self, "_last_pages_detect_removed_count", len(removed_rows))
+        setattr(self, "_last_pages_detect_skipped_reviewed_pages", list(skipped_reviewed_pages))
         setattr(self, "_last_pages_detect_invalidated_count", len(invalidated_records))
         setattr(self, "_last_pages_detect_invalidated_records", list(invalidated_records))
         return self.load_pages()
 
+    def _clear_existing_base_crop_fusion_state(self) -> int:
+        """Remove stale fusion metadata before rebuilding staging from detector boxes."""
+        changed: list[StagingProblemRecord] = []
+        for record in self.staging.load_records():
+            source = dict(record.source or {})
+            if str(source.get("ocr_input_mode") or "").strip() == "merged_crops_replacement":
+                continue
+            if str(source.get("replaced_by_record_id") or "").strip():
+                continue
+            if str(source.get("merged_into_record_id") or "").strip():
+                continue
+            normalized = dict(record.normalized or {})
+            removed = False
+            if "continuacion" in normalized:
+                normalized.pop("continuacion", None)
+                removed = True
+            if "continuaciones_fusionadas" in normalized:
+                normalized.pop("continuaciones_fusionadas", None)
+                removed = True
+            if not removed:
+                continue
+            record.normalized = normalized
+            changed.append(record)
+        if changed:
+            self.staging.upsert_many(changed)
+        return len(changed)
+
     def materialize_crops_to_staging(self, rows: list[ProblemPageRecord] | None = None) -> list[StagingProblemRecord]:
+        self._clear_existing_base_crop_fusion_state()
         page_rows = rows if rows is not None else self.load_pages()
         session_path = self.context.resolved_session_path()
         target, crop_ids = self.golden.materialize_problem_crops_for_downstream(
             self.context.instance_name,
             page_rows,
             return_crop_ids=True,
+            persist_source_instance=False,
             session_path=session_path,
             book_code=self.context.book_code,
             instance_type=self.context.instance_type,
@@ -896,10 +2217,41 @@ class InstancePdfPipelineService:
                 crop_payload = {}
             crop_payloads.append((self._crop_payload_sort_key(crop_id, crop_payload), crop_id, record_path, crop_payload))
 
+        pages_by_record_id = {str(row.record_id or ""): row for row in page_rows if str(row.record_id or "")}
+        pages_by_number: dict[int, ProblemPageRecord] = {}
+        for row in page_rows:
+            try:
+                pages_by_number.setdefault(int(row.page_number), row)
+            except Exception:
+                continue
         prepared_payloads: list[tuple[str, Path, Path, dict[str, Any], dict[str, Any]]] = []
         for _sort_key, crop_id, record_path, crop_payload in sorted(crop_payloads, key=lambda item: item[0]):
             crop_rel = str(crop_payload.get("crop_image_rel") or "").strip()
             crop_path = Path(target) / crop_rel if crop_rel else Path("")
+            source_record_id = str(crop_payload.get("source_record_id") or "")
+            page = pages_by_record_id.get(source_record_id)
+            if page is None:
+                try:
+                    page = pages_by_number.get(int(crop_payload.get("source_page_number") or 0))
+                except Exception:
+                    page = None
+            detector_box = crop_payload.get("detector_box") if isinstance(crop_payload.get("detector_box"), dict) else {}
+            box_class_name = (
+                crop_payload.get("box_class_key")
+                or crop_payload.get("box_class_name")
+                or detector_box.get("class_key")
+                or detector_box.get("class_name")
+                or detector_box.get("role")
+                or ""
+            )
+            box_class = self._detector_class_key(box_class_name)
+            if box_class and box_class != "problem":
+                continue
+            problem_match = self._problem_box_match_for_crop(page, crop_payload.get("bbox_px") or [])
+            if page is not None and problem_match.get("available") and not problem_match.get("matched") and not box_class:
+                continue
+            continuity_subboxes = self._continuity_subboxes_for_crop(page, crop_payload.get("bbox_px") or [])
+            is_problem_crop = bool(box_class == "problem" or problem_match.get("matched") or not problem_match.get("available"))
             new_source = {
                 "book_code": self.context.book_code,
                 "instance_type": self.context.instance_type,
@@ -911,16 +2263,30 @@ class InstancePdfPipelineService:
                 "page_problem_index": crop_payload.get("page_problem_index"),
                 "problem_index": crop_payload.get("problem_index"),
                 "bbox_px": crop_payload.get("bbox_px") or [],
+                "box_class_name": box_class or "problem",
+                "detector_box": detector_box,
                 "crop_id": crop_id,
                 "crop_path": str(crop_path),
                 "crop_image_rel": crop_rel,
-                "source_record_id": crop_payload.get("source_record_id") or "",
+                "source_record_id": source_record_id,
                 "source_instance": crop_payload.get("source_instance_full") or crop_payload.get("source_instance") or "",
                 "layout_mode": crop_payload.get("layout_mode") or "",
                 "session_json": crop_payload.get("session_json") or "",
                 "problem_crops_live_record": str(record_path),
+                "continuity_subboxes": continuity_subboxes,
+                "continuity_subboxes_checked": page is not None,
+                "continuity_problem_crop": is_problem_crop,
+                "continuity_problem_match": problem_match,
             }
             prepared_payloads.append((crop_id, crop_path, record_path, crop_payload, new_source))
+
+        active_crop_ids = {crop_id for crop_id, *_rest in prepared_payloads}
+        for existing_record in self.staging.load_records():
+            existing_id = str(existing_record.record_id or "").strip()
+            existing_crop_id = str(existing_record.crop_id or "").strip()
+            if existing_id in active_crop_ids or existing_crop_id in active_crop_ids:
+                continue
+            self.staging.delete_record(existing_id or existing_crop_id, rewrite_manifest=False)
 
         existing_records = self.staging.load_records()
         existing_by_dependency: dict[str, StagingProblemRecord] = {}
@@ -930,7 +2296,6 @@ class InstancePdfPipelineService:
                 continue
             existing_by_dependency.setdefault(signature, copy.deepcopy(existing_record))
 
-        active_crop_ids = {crop_id for crop_id, *_rest in prepared_payloads}
         for crop_id, _crop_path, _record_path, _crop_payload, new_source in prepared_payloads:
             signature = self._source_dependency_signature(new_source)
             match = existing_by_dependency.get(signature)
@@ -987,6 +2352,10 @@ class InstancePdfPipelineService:
             record.record_id = crop_id
             record.crop_id = crop_id
             record.status = StageStatus.normalize(record.status)
+            cleaned_normalized = dict(record.normalized or {})
+            cleaned_normalized.pop("continuacion", None)
+            cleaned_normalized.pop("continuaciones_fusionadas", None)
+            record.normalized = cleaned_normalized
             if record.status == StageStatus.ERROR and record.step_status(PipelineStep.CROPS) == StageStatus.ERROR:
                 record.status = StageStatus.PENDING
             record.source = new_source
@@ -1041,6 +2410,835 @@ class InstancePdfPipelineService:
         self.staging.upsert_many(out, existing_by_identity={})
         return out
 
+    def merge_records_for_ocr(self, record_id: str, continuation_record_ids: list[str]) -> list[StagingProblemRecord]:
+        parent_id = str(record_id or "").strip()
+        child_ids = [str(item or "").strip() for item in list(continuation_record_ids or []) if str(item or "").strip()]
+        if not parent_id:
+            raise ValueError("record_id requerido.")
+        if not child_ids:
+            raise ValueError("Debe indicar al menos una continuacion.")
+        all_records = self.staging.load_records()
+        by_id = {str(row.record_id or ""): row for row in all_records}
+        parent = by_id.get(parent_id)
+        if parent is None:
+            raise KeyError(parent_id)
+        children: list[StagingProblemRecord] = []
+        for child_id in child_ids:
+            if child_id == parent_id:
+                raise ValueError("Un registro no puede fusionarse consigo mismo.")
+            child = by_id.get(child_id)
+            if child is None:
+                raise KeyError(child_id)
+            children.append(child)
+        ordered = [parent, *children]
+        image_paths = [Path(str(row.crop_path or "")) for row in ordered]
+        missing = [str(path) for path in image_paths if not path.exists()]
+        if missing:
+            raise FileNotFoundError(f"No se encontro crop para fusionar: {missing[0]}")
+
+        merge_source_ids = [str(row.record_id or "") for row in ordered]
+        merge_digest = hashlib.sha1("|".join(merge_source_ids).encode("utf-8", errors="ignore")).hexdigest()[:12]
+        merged_record_id = f"{parent.record_id}__fusion_{merge_digest}"
+        merged_crop_id = merged_record_id
+        output_dir = self.staging.artifact_dir("merged_crops", merged_record_id, probe_file="crop.png")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / "crop.png"
+        merge_meta = self._write_vertical_crop_merge(image_paths, output_path)
+        now = utc_now_text()
+
+        parent_source = dict(parent.source or {})
+        merged_source = {
+            **parent_source,
+            "ocr_input_mode": "merged_crops_replacement",
+            "merged_from_record_ids": merge_source_ids,
+            "merged_from_crop_ids": [str(row.crop_id or "") for row in ordered],
+            "source_parent_record_id": parent.record_id,
+            "source_continuation_record_ids": [str(row.record_id or "") for row in children],
+            "source_continuation_crop_ids": [str(row.crop_id or "") for row in children],
+        }
+        if "source_order" in parent_source:
+            merged_source["source_order"] = parent_source.get("source_order")
+        if "box_index" in parent_source:
+            merged_source["box_index"] = parent_source.get("box_index")
+
+        merged_record = StagingProblemRecord(
+            record_id=merged_record_id,
+            crop_id=merged_crop_id,
+            crop_path=str(output_path),
+            status=StageStatus.PENDING,
+            source=merged_source,
+            models=copy.deepcopy(parent.models or {}),
+            confidence=copy.deepcopy(parent.confidence or {}),
+            artifacts={
+                "source_crop_paths": [str(path) for path in image_paths],
+                "source_record_ids": merge_source_ids,
+                "source_crop_ids": [str(row.crop_id or "") for row in ordered],
+                **merge_meta,
+                OCR_INPUT_ARTIFACT_KEY: str(output_path),
+                MERGED_CROP_ARTIFACT_KEY: str(output_path),
+            },
+            trace={
+                **dict(parent.trace or {}),
+                "created_from_ocr_crop_merge": {
+                    "created_at": now,
+                    "merged_record_id": merged_record_id,
+                    "parent_record_id": parent.record_id,
+                    "continuation_record_ids": [str(row.record_id or "") for row in children],
+                    **merge_meta,
+                },
+            },
+            created_at=now,
+            updated_at=now,
+        )
+        merged_record.set_step(PipelineStep.CROPS, StageStatus.READY, "crop fusionado disponible", crop_path=str(output_path))
+        merged_record.set_step(PipelineStep.OCR, StageStatus.PENDING, "OCR pendiente sobre crop fusionado")
+        merged_record.set_step(PipelineStep.SEGMENTATION, StageStatus.PENDING, "segmentacion pendiente sobre crop fusionado")
+        merged_record.set_step(PipelineStep.NORMALIZATION, StageStatus.PENDING, "pendiente de OCR fusionado")
+        merged_record.set_step(PipelineStep.REVIEW, StageStatus.PENDING, "pendiente de revision humana")
+        merged_record.sync_status_from_steps()
+
+        updated = [merged_record]
+        for index, source_record in enumerate(ordered):
+            role = "parent" if index == 0 else "continuation"
+            source_record.source = {
+                **dict(source_record.source or {}),
+                "ocr_input_mode": "replaced_by_merged_crop",
+                "replaced_by_record_id": merged_record_id,
+                "replaced_by_crop_id": merged_crop_id,
+                "replacement_role": role,
+                "replacement_order": index,
+                "replacement_source_record_ids": merge_source_ids,
+            }
+            if role == "continuation":
+                source_record.normalized = {
+                    **dict(source_record.normalized or {}),
+                    "continuacion": {
+                        **(
+                            dict(source_record.normalized.get("continuacion") or {})
+                            if isinstance(source_record.normalized.get("continuacion"), dict)
+                            else {}
+                        ),
+                        "es_continuacion": True,
+                        "fusionar_con_anterior": True,
+                        "parent_record_id": parent.record_id,
+                        "ocr_input_fusionado": True,
+                    },
+                }
+            source_record.set_step(PipelineStep.OCR, StageStatus.READY, f"reemplazado por crop fusionado {merged_record_id}")
+            source_record.set_step(PipelineStep.SEGMENTATION, StageStatus.READY, f"reemplazado por crop fusionado {merged_record_id}")
+            source_record.set_step(PipelineStep.NORMALIZATION, StageStatus.READY, f"reemplazado por crop fusionado {merged_record_id}")
+            source_record.set_step(PipelineStep.REVIEW, StageStatus.READY, f"reemplazado por crop fusionado {merged_record_id}")
+            source_record.trace = {
+                **dict(source_record.trace or {}),
+                "replaced_by_merged_crop": {
+                    "updated_at": now,
+                    "merged_record_id": merged_record_id,
+                    "merged_crop_path": str(output_path),
+                    "replacement_role": role,
+                    "replacement_order": index,
+                },
+            }
+            source_record.errors = [
+                str(item)
+                for item in list(source_record.errors or [])
+                if not str(item).startswith(("ocr_crudo:", "ocr_estructura:", "segmentacion_grafica:"))
+            ]
+            source_record.sync_status_from_steps()
+            source_record.touch()
+            updated.append(source_record)
+
+        self.staging.upsert_many(updated)
+        return updated
+
+    def detect_continuation_candidates(
+        self,
+        *,
+        min_confidence: float = 0.35,
+        max_candidates: int = 50,
+    ) -> list[dict[str, Any]]:
+        return list(
+            self.scan_continuation_candidates(
+                min_confidence=min_confidence,
+                max_candidates=max_candidates,
+            ).get("candidates")
+            or []
+        )
+
+    def scan_continuation_candidates(
+        self,
+        *,
+        min_confidence: float = 0.35,
+        max_candidates: int = 50,
+    ) -> dict[str, Any]:
+        all_rows = self.staging.load_records()
+        rows = [
+            record
+            for record in all_rows
+            if not _record_excluded_from_continuation_scan(record)
+            and _record_has_effective_crop(record)
+        ]
+        self._attach_continuity_subboxes_from_pages(rows)
+        classified_problem_rows = [
+            record
+            for record in rows
+            if _record_detector_class(record) or "continuity_problem_crop" in dict(record.source or {})
+        ]
+        if classified_problem_rows:
+            rows = [record for record in rows if _record_is_problem_crop(record)]
+        global_source_order = _continuity_uses_global_source_order(rows)
+        rows = sorted(
+            rows,
+            key=lambda record: _continuity_reading_order_key(
+                record,
+                global_source_order=global_source_order,
+            ),
+        )
+        candidates: list[dict[str, Any]] = []
+        seen_candidate_pairs: set[tuple[str, str]] = set()
+        visual_cache: dict[tuple[str, int, int], dict[str, Any]] = {}
+        aux_ocr_cache: dict[tuple[str, int, int], dict[str, Any]] = {}
+        detector_cache: dict[tuple[str, int, int, str], dict[str, Any]] = {}
+        profile_cache: dict[int, dict[str, Any]] = {}
+
+        def add_candidate(candidate: dict[str, Any] | None) -> None:
+            if not candidate:
+                return
+            pair = (
+                str(candidate.get("parent_record_id") or ""),
+                str(candidate.get("continuation_record_id") or ""),
+            )
+            if not pair[0] or not pair[1] or pair in seen_candidate_pairs:
+                return
+            try:
+                confidence = float(candidate.get("confidence") or 0.0)
+            except Exception:
+                confidence = 0.0
+            if confidence >= max(0.0, min(1.0, float(min_confidence))):
+                seen_candidate_pairs.add(pair)
+                candidates.append(candidate)
+
+        def profile_at(index: int) -> dict[str, Any]:
+            if index not in profile_cache:
+                profile_cache[index] = self._classify_continuation_crop(
+                    rows[index],
+                    visual_cache=visual_cache,
+                    aux_ocr_cache=aux_ocr_cache,
+                    detector_cache=detector_cache,
+                )
+            return profile_cache[index]
+
+        for index in range(len(rows) - 1):
+            parent = rows[index]
+            child = rows[index + 1]
+            candidate = self._score_continuation_pair(
+                parent,
+                child,
+                index=index,
+                visual_cache=visual_cache,
+                aux_ocr_cache=aux_ocr_cache,
+                detector_cache=detector_cache,
+                require_visual_prefilter=False,
+            )
+            add_candidate(candidate)
+
+        page_midpoints: dict[int, float] = {}
+        page_boxes: dict[int, list[dict[str, float]]] = {}
+        for record in rows:
+            source = dict(record.source or {})
+            page_key = _page_number_value(source)
+            box = _bbox_metrics(record)
+            if page_key >= 10**9 or not _bbox_is_valid(box):
+                continue
+            page_boxes.setdefault(page_key, []).append(box)
+        for page_key, boxes in page_boxes.items():
+            min_x = min(box["x1"] for box in boxes)
+            max_x = max(box["x2"] for box in boxes)
+            page_midpoints[page_key] = (min_x + max_x) / 2.0
+
+        def layout_order_key(record: StagingProblemRecord) -> tuple[int, int, int, int, int, str]:
+            source = dict(record.source or {})
+            page_key = _page_number_value(source)
+            box = _bbox_metrics(record)
+            midpoint = page_midpoints.get(page_key)
+            column_key = 0
+            if midpoint is not None and box["x1"] >= midpoint:
+                column_key = 1
+            order = _source_order_value(source)
+            return (
+                page_key,
+                column_key,
+                int(box.get("y1") or 0),
+                int(box.get("x1") or 0),
+                order if order is not None else 10**9,
+                str(record.record_id or ""),
+            )
+
+        layout_rows = sorted(rows, key=layout_order_key)
+        for layout_index in range(len(layout_rows) - 1):
+            parent = layout_rows[layout_index]
+            child = layout_rows[layout_index + 1]
+            candidate = self._score_continuation_pair(
+                parent,
+                child,
+                index=layout_index,
+                visual_cache=visual_cache,
+                aux_ocr_cache=aux_ocr_cache,
+                detector_cache=detector_cache,
+                require_visual_prefilter=False,
+                order_gap_override=1,
+                order_basis="layout",
+            )
+            add_candidate(candidate)
+        candidates.sort(key=lambda item: (-float(item.get("confidence") or 0.0), int(item.get("index") or 0)))
+        max_candidates_value = max(1, int(max_candidates or 50))
+        limited = candidates[:max_candidates_value]
+        if len(rows) <= 80:
+            profiles = [profile_at(index) for index in range(len(rows))]
+            summary_mode = "exact"
+        else:
+            profiles = [profile_cache[index] for index in sorted(profile_cache)]
+            summary_mode = "fast_partial"
+        return {
+            "schema_version": "pdf_factory_continuation_scan_v1",
+            "summary": self._continuation_scan_summary(
+                profiles,
+                candidates=candidates,
+                returned_candidates=limited,
+                max_candidates=max_candidates_value,
+                total_crops=len(rows),
+                summary_mode=summary_mode,
+            ),
+            "candidates": limited,
+        }
+
+    def _classify_continuation_crop(
+        self,
+        record: StagingProblemRecord,
+        *,
+        visual_cache: dict[tuple[str, int, int], dict[str, Any]] | None = None,
+        aux_ocr_cache: dict[tuple[str, int, int], dict[str, Any]] | None = None,
+        detector_cache: dict[tuple[str, int, int, str], dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        visual = {
+            "available": False,
+            "skipped": "visual_heuristic_disabled_for_boolean_continuity",
+        }
+        detector = _continuity_detector_features(record, detector_cache)
+        detector_available = bool(detector.get("available"))
+        detector_subbox_informative = bool(detector.get("subbox_detections_total"))
+        aux_ocr = {
+            "available": False,
+            "skipped": "ocr_disabled_for_boolean_continuity",
+        }
+        aux_available = bool(aux_ocr.get("available"))
+        detector_has_number = bool(detector.get("has_problem_number"))
+        detector_has_options = bool(detector.get("has_answer_block"))
+        detector_complete_options = detector_has_options
+        visual_has_number = False
+        visual_has_options = False
+        visual_complete_options = False
+        aux_has_number = bool(aux_ocr.get("starts_problem"))
+        aux_has_options = bool(aux_ocr.get("has_options"))
+        aux_complete_options = bool(aux_ocr.get("complete_options"))
+        has_number = detector_has_number
+        has_options = detector_has_options
+        complete_options = detector_complete_options
+        complete_problem = has_number and complete_options
+        if complete_problem:
+            role = "complete_problem"
+        elif has_number and has_options:
+            role = "ambiguous"
+        elif has_number and not complete_options:
+            role = "possible_parent"
+        elif not has_number and has_options:
+            role = "possible_continuation"
+        else:
+            role = "ambiguous"
+        return {
+            "record_id": record.record_id,
+            "role": role,
+            "has_number": has_number,
+            "has_options": has_options,
+            "complete_options": complete_options,
+            "complete_problem": complete_problem,
+            "visual_has_number": visual_has_number,
+            "visual_has_options": visual_has_options,
+            "visual_complete_options": visual_complete_options,
+            "detector_has_number": detector_has_number,
+            "detector_has_options": detector_has_options,
+            "detector_complete_options": detector_complete_options,
+            "detector_available": detector_available,
+            "detector_subbox_informative": detector_subbox_informative,
+            "aux_has_number": aux_has_number,
+            "aux_has_options": aux_has_options,
+            "aux_complete_options": aux_complete_options,
+            "auxiliary_ocr_available": aux_available,
+            "detector": detector,
+            "visual": visual,
+            "auxiliary_ocr": aux_ocr,
+        }
+
+    @staticmethod
+    def _continuation_scan_summary(
+        profiles: list[dict[str, Any]],
+        *,
+        candidates: list[dict[str, Any]],
+        returned_candidates: list[dict[str, Any]] | None = None,
+        max_candidates: int | None = None,
+        total_crops: int | None = None,
+        summary_mode: str = "exact",
+    ) -> dict[str, Any]:
+        returned = list(returned_candidates if returned_candidates is not None else candidates)
+        roles: dict[str, int] = {}
+        aux_available = 0
+        detector_available = 0
+        detector_subbox_informative = 0
+        for profile in profiles:
+            role = str(profile.get("role") or "ambiguous")
+            roles[role] = roles.get(role, 0) + 1
+            if profile.get("auxiliary_ocr_available"):
+                aux_available += 1
+            if profile.get("detector_available"):
+                detector_available += 1
+            if profile.get("detector_subbox_informative"):
+                detector_subbox_informative += 1
+        complete_discarded = roles.get("complete_problem", 0)
+        total = int(total_crops if total_crops is not None else len(profiles))
+        return {
+            "schema_version": "pdf_factory_continuation_scan_summary_v1",
+            "summary_mode": str(summary_mode or "exact"),
+            "profiled_crops": len(profiles),
+            "total_crops": total,
+            "candidate_pool": max(0, total - complete_discarded),
+            "complete_discarded": complete_discarded,
+            "possible_parents": roles.get("possible_parent", 0),
+            "possible_continuations": roles.get("possible_continuation", 0),
+            "ambiguous": roles.get("ambiguous", 0),
+            "auxiliary_ocr_available": aux_available,
+            "auxiliary_ocr_missing": max(0, len(profiles) - aux_available),
+            "detector_available": detector_available,
+            "detector_missing": max(0, len(profiles) - detector_available),
+            "detector_subbox_informative": detector_subbox_informative,
+            "candidate_pairs": len(returned),
+            "candidate_pairs_total": len(candidates),
+            "candidate_pairs_returned": len(returned),
+            "candidate_pairs_limited": len(candidates) > len(returned),
+            "max_candidates": int(max_candidates or len(returned) or 0),
+            "merge_recommended": sum(1 for item in returned if item.get("recommendation") == "merge"),
+            "merge_recommended_total": sum(1 for item in candidates if item.get("recommendation") == "merge"),
+            "review_recommended": sum(1 for item in returned if item.get("recommendation") != "merge"),
+            "review_recommended_total": sum(1 for item in candidates if item.get("recommendation") != "merge"),
+            "roles": roles,
+        }
+
+    def _score_continuation_pair(
+        self,
+        parent: StagingProblemRecord,
+        child: StagingProblemRecord,
+        *,
+        index: int,
+        visual_cache: dict[tuple[str, int, int], dict[str, Any]] | None = None,
+        aux_ocr_cache: dict[tuple[str, int, int], dict[str, Any]] | None = None,
+        detector_cache: dict[tuple[str, int, int, str], dict[str, Any]] | None = None,
+        parent_profile: dict[str, Any] | None = None,
+        child_profile: dict[str, Any] | None = None,
+        require_visual_prefilter: bool = False,
+        order_gap_override: int | None = None,
+        order_basis: str = "source_order",
+    ) -> dict[str, Any] | None:
+        parent_source = dict(parent.source or {})
+        child_source = dict(child.source or {})
+        if _record_excluded_from_ocr_work(parent):
+            return None
+        if _record_excluded_from_ocr_work(child):
+            return None
+        if str(child.record_id or "") in set(str(item or "") for item in list(parent_source.get("continuation_record_ids") or [])):
+            return None
+
+        parent_page = parent_source.get("page_number") or parent_source.get("source_page_number")
+        child_page = child_source.get("page_number") or child_source.get("source_page_number")
+        try:
+            page_gap = int(child_page) - int(parent_page)
+        except Exception:
+            page_gap = 0
+        if page_gap < 0 or page_gap > 1:
+            return None
+
+        parent_box = _bbox_metrics(parent)
+        child_box = _bbox_metrics(child)
+        if not (_bbox_is_valid(parent_box) and _bbox_is_valid(child_box)):
+            return None
+
+        x_overlap = _x_overlap_ratio(parent_box, child_box)
+        order_parent = _source_order_value(parent_source)
+        order_child = _source_order_value(child_source)
+        source_order_gap = (order_child - order_parent) if order_parent is not None and order_child is not None else None
+        order_gap = int(order_gap_override) if order_gap_override is not None else source_order_gap
+        same_page = page_gap == 0
+        vertical_gap = child_box["y1"] - parent_box["y2"]
+        child_after_parent = page_gap == 1 or child_box["y1"] >= parent_box["y1"] - 12
+        height_ratio = child_box["height"] / max(1.0, parent_box["height"])
+        max_close_gap = max(140.0, parent_box["height"] * 0.55)
+        parent_page_size = _page_image_size(parent)
+        child_page_size = _page_image_size(child)
+        parent_bottom_ratio = (
+            parent_box["y2"] / max(1.0, float(parent_page_size[1]))
+            if parent_page_size
+            else 0.0
+        )
+        child_top_ratio = (
+            child_box["y1"] / max(1.0, float(child_page_size[1]))
+            if child_page_size
+            else 0.0
+        )
+        same_page_column_wrap_signal = (
+            same_page
+            and order_gap == 1
+            and child_box["x1"] >= parent_box["x2"]
+            and (not parent_page_size or parent_bottom_ratio >= 0.7)
+            and (not child_page_size or child_top_ratio <= 0.42)
+        )
+        child_after_parent = child_after_parent or same_page_column_wrap_signal
+        same_page_cut_signal = (
+            same_page
+            and child_after_parent
+            and (
+                same_page_column_wrap_signal
+                or (
+                    x_overlap >= 0.72
+                    and -18.0 <= vertical_gap <= max_close_gap
+                    and height_ratio <= 0.7
+                )
+            )
+        )
+        cross_page_cut_signal = (
+            page_gap == 1
+            and (not parent_page_size or parent_bottom_ratio >= 0.72)
+            and (not child_page_size or child_top_ratio <= 0.38)
+        )
+        geometry_candidate = (
+            same_page_cut_signal
+            or cross_page_cut_signal
+            or (
+                same_page
+                and child_after_parent
+                and order_gap == 1
+                and x_overlap >= 0.55
+            )
+        )
+        if order_gap is not None and (order_gap < 1 or order_gap > 3):
+            return None
+        if require_visual_prefilter:
+            return None
+        parent_profile = parent_profile or self._classify_continuation_crop(
+            parent,
+            visual_cache=visual_cache,
+            aux_ocr_cache=aux_ocr_cache,
+            detector_cache=detector_cache,
+        )
+        child_profile = child_profile or self._classify_continuation_crop(
+            child,
+            visual_cache=visual_cache,
+            aux_ocr_cache=aux_ocr_cache,
+            detector_cache=detector_cache,
+        )
+        parent_options_visual = dict(parent_profile.get("visual") or {})
+        child_options_visual = dict(child_profile.get("visual") or {})
+        parent_detector = dict(parent_profile.get("detector") or {})
+        child_detector = dict(child_profile.get("detector") or {})
+        parent_aux_ocr = dict(parent_profile.get("auxiliary_ocr") or {})
+        child_aux_ocr = dict(child_profile.get("auxiliary_ocr") or {})
+        aux_ocr_available = False
+        parent_option_score = 0.0
+        child_option_score = 0.0
+        parent_number_score = 0.0
+        child_number_score = 0.0
+        parent_has_number_signal = bool(parent_profile.get("has_number"))
+        child_has_number_signal = bool(child_profile.get("has_number"))
+        parent_complete_options_signal = bool(parent_profile.get("complete_options"))
+        child_complete_options_signal = bool(child_profile.get("complete_options"))
+        parent_has_any_options_signal = bool(parent_profile.get("has_options"))
+        has_child_option_signal = bool(child_profile.get("has_options"))
+        parent_complete_problem_signal = bool(parent_profile.get("complete_problem"))
+        child_complete_problem_signal = bool(child_profile.get("complete_problem"))
+        detector_available = bool(parent_detector.get("available")) and bool(child_detector.get("available"))
+        parent_detector_has_number = bool(parent_detector.get("has_problem_number"))
+        child_detector_has_number = bool(child_detector.get("has_problem_number"))
+        parent_detector_has_options = bool(parent_detector.get("has_answer_block"))
+        child_detector_has_options = bool(child_detector.get("has_answer_block"))
+        parent_detector_subboxes = int(parent_detector.get("subbox_detections_total") or 0)
+        child_detector_subboxes = int(child_detector.get("subbox_detections_total") or 0)
+        detector_contradicts_split = detector_available and (
+            parent_detector_has_options
+            or child_detector_has_number
+            or bool(parent_detector.get("complete_problem"))
+            or bool(child_detector.get("complete_problem"))
+        )
+        if detector_contradicts_split:
+            return None
+        detector_pair_informative = detector_available and parent_detector_subboxes > 0 and child_detector_subboxes > 0
+        if detector_pair_informative and not (parent_detector_has_number and child_detector_has_options):
+            return None
+        parent_problem_start_signal = parent_has_number_signal
+        child_problem_start_signal = child_has_number_signal
+        parent_option_fragment_signal = (
+            not parent_problem_start_signal
+            and parent_has_any_options_signal
+        )
+        child_independent_problem_signal = child_problem_start_signal and (
+            has_child_option_signal
+            or child_complete_options_signal
+        )
+        # Si el siguiente crop ya trae numeracion propia y alternativas, es otro
+        # problema completo/iniciado; no es continuacion del anterior aunque el
+        # crop anterior solo tenga numeracion.
+        if child_independent_problem_signal:
+            return None
+        if parent_option_fragment_signal and child_problem_start_signal:
+            return None
+        if parent_complete_problem_signal or child_complete_problem_signal:
+            return None
+        child_no_number_signal = not child_has_number_signal
+        parent_missing_options_signal = not parent_has_any_options_signal
+        split_multiple_choice_signal = (
+            parent_has_number_signal
+            and parent_missing_options_signal
+            and child_no_number_signal
+            and has_child_option_signal
+        )
+        if not split_multiple_choice_signal:
+            return None
+        strict_boolean_neighbor_signal = bool(
+            order_gap == 1
+            and page_gap in {0, 1}
+            and split_multiple_choice_signal
+        )
+        if not geometry_candidate and not strict_boolean_neighbor_signal:
+            return None
+
+        weights = CONTINUATION_BOOLEAN_WEIGHTS
+        score = 0.0
+        reasons: list[str] = []
+        warnings: list[str] = []
+
+        if order_gap is None:
+            score += 0.08
+            reasons.append("registros consecutivos en staging")
+            warnings.append("sin orden numerico de segmentacion; se usa solo vecindad")
+        elif order_gap == 1:
+            score += weights["order_consecutive"]
+            if str(order_basis or "") == "layout":
+                reasons.append("orden de lectura geometrico consecutivo")
+                if source_order_gap != 1:
+                    warnings.append("orden manual de boxes no consecutivo; se uso lectura por columnas")
+            else:
+                reasons.append("orden de segmentacion consecutivo")
+        elif 1 < order_gap <= 3:
+            score += weights["order_near"]
+            reasons.append("orden de segmentacion cercano")
+            warnings.append("hay otros registros entre ambos crops")
+        else:
+            return None
+
+        if x_overlap >= 0.72:
+            score += weights["x_overlap_strong"]
+            reasons.append("misma columna o bloque compatible")
+        elif x_overlap >= 0.55:
+            score += weights["x_overlap_compatible"]
+            reasons.append("alineacion horizontal compatible")
+        else:
+            warnings.append("alineacion horizontal debil")
+
+        if same_page:
+            if not child_after_parent:
+                if not strict_boolean_neighbor_signal:
+                    return None
+                warnings.append("geometria no lineal; se conserva por marcas consecutivas")
+            score += weights["same_page_after"]
+            if same_page_column_wrap_signal:
+                reasons.append("segundo crop aparece despues por salto de columna en la misma pagina")
+                if parent_bottom_ratio >= 0.7:
+                    score += weights["parent_bottom"]
+                    reasons.append("primer crop queda cerca del final de columna/pagina")
+                if child_top_ratio <= 0.42:
+                    score += weights["child_top"]
+                    reasons.append("segundo crop aparece al inicio de la siguiente columna")
+            else:
+                reasons.append("segundo crop aparece despues en la misma pagina")
+            if not same_page_column_wrap_signal and -18.0 <= vertical_gap <= max_close_gap:
+                score += weights["vertical_close"]
+                reasons.append("separacion vertical compatible con corte de problema")
+            elif not same_page_column_wrap_signal and vertical_gap > max_close_gap:
+                warnings.append("separacion vertical amplia; revisar visualmente")
+            elif not same_page_column_wrap_signal:
+                warnings.append("crops se solapan verticalmente; revisar visualmente")
+            if height_ratio <= 0.9:
+                score += weights["child_not_taller"]
+                reasons.append("segundo crop no excede el alto del anterior")
+        else:
+            score += weights["cross_page"]
+            reasons.append("salto directo a pagina siguiente")
+            if parent_bottom_ratio >= 0.72:
+                score += weights["parent_bottom"]
+                reasons.append("primer crop queda cerca del final de pagina")
+            elif parent_page_size:
+                warnings.append("primer crop no esta cerca del final de pagina")
+            if child_top_ratio <= 0.38:
+                score += weights["child_top"]
+                reasons.append("segundo crop aparece al inicio de pagina")
+            elif child_page_size:
+                warnings.append("segundo crop no esta cerca del inicio de pagina")
+
+        if has_child_option_signal:
+            score += weights["child_options_strong"]
+            reasons.append("segundo crop tiene bloque de alternativas detectado")
+
+        if child_no_number_signal:
+            score += weights["child_no_leading_number"]
+            reasons.append("segundo crop no tiene marca de numeracion")
+        else:
+            score += weights["child_has_leading_number_penalty"]
+            warnings.append("segundo crop tiene marca de numeracion")
+
+        if parent_has_number_signal:
+            score += weights["parent_has_leading_number"]
+            reasons.append("primer crop tiene marca de numeracion")
+
+        if parent_missing_options_signal:
+            score += weights["parent_missing_options"]
+            reasons.append("primer crop no tiene marca de alternativas")
+
+        if split_multiple_choice_signal:
+            score += weights["split_multiple_choice_rule"]
+            reasons.append("regla fuerte: padre numerado sin alternativas + continuacion sin numero con alternativas")
+
+        detector_confirms_split = (
+            detector_available
+            and parent_detector_has_number
+            and not parent_detector_has_options
+            and not child_detector_has_number
+            and child_detector_has_options
+        )
+        aux_confirms_split = False
+        geometry_confirms_split = (
+            parent_has_number_signal
+            and parent_missing_options_signal
+            and child_no_number_signal
+            and has_child_option_signal
+            and (
+                same_page_cut_signal
+                or cross_page_cut_signal
+                or same_page_column_wrap_signal
+                or (
+                    same_page
+                    and child_after_parent
+                    and order_gap == 1
+                    and x_overlap >= 0.55
+                )
+            )
+        )
+        if detector_confirms_split and split_multiple_choice_signal:
+            score += 0.18
+            reasons.append("detector v3 confirma: padre con numero sin alternativas + continuacion con alternativas sin numero")
+        elif geometry_confirms_split and split_multiple_choice_signal:
+            score += 0.08
+            reasons.append("confirmacion geometrica: padre numerado sin alternativas + continuacion sin numero con alternativas")
+
+        confidence = max(0.0, min(0.99, score))
+        if confidence < 0.2:
+            return None
+        recommendation = "merge" if (
+            split_multiple_choice_signal
+            and confidence >= 0.78
+            and (detector_confirms_split or aux_confirms_split or geometry_confirms_split)
+        ) else "review"
+        return {
+            "schema_version": "pdf_factory_continuation_candidate_v1",
+            "index": index,
+            "parent_record_id": parent.record_id,
+            "continuation_record_id": child.record_id,
+            "confidence": round(confidence, 3),
+            "recommendation": recommendation,
+            "reasons": reasons,
+            "warnings": warnings,
+            "features": {
+                "parent_page": parent_page,
+                "continuation_page": child_page,
+                "page_gap": page_gap,
+                "order_gap": order_gap,
+                "source_order_gap": source_order_gap,
+                "order_basis": str(order_basis or "source_order"),
+                "x_overlap": round(x_overlap, 3),
+                "vertical_gap": round(vertical_gap, 3),
+                "height_ratio": round(height_ratio, 3),
+                "parent_bottom_ratio": round(parent_bottom_ratio, 3),
+                "continuation_top_ratio": round(child_top_ratio, 3),
+                "parent_option_block_score": parent_options_visual,
+                "continuation_option_block_score": child_options_visual,
+                "parent_auxiliary_ocr": parent_aux_ocr,
+                "continuation_auxiliary_ocr": child_aux_ocr,
+                "parent_detector": parent_detector,
+                "continuation_detector": child_detector,
+                "detector_available": detector_available,
+                "detector_pair_informative": detector_pair_informative,
+                "detector_contradicts_split": detector_contradicts_split,
+                "auxiliary_ocr_available": aux_ocr_available,
+                "parent_complete_problem_signal": parent_complete_problem_signal,
+                "continuation_complete_problem_signal": child_complete_problem_signal,
+                "parent_leading_number_score": round(parent_number_score, 3),
+                "continuation_leading_number_score": round(child_number_score, 3),
+                "split_multiple_choice_signal": split_multiple_choice_signal,
+                "detector_confirms_split": detector_confirms_split,
+                "aux_confirms_split": aux_confirms_split,
+                "visual_confirms_split": False,
+                "geometry_confirms_split": geometry_confirms_split,
+                "continuation_weights": dict(weights),
+                "scoring_mode": "detector_boolean_no_visual_no_ocr",
+            },
+        }
+
+    @staticmethod
+    def _write_vertical_crop_merge(image_paths: list[Path], output_path: Path) -> dict[str, Any]:
+        from PIL import Image
+
+        opened = [Image.open(path).convert("RGB") for path in image_paths]
+        try:
+            padding = 18
+            width = max(image.width for image in opened)
+            height = sum(image.height for image in opened) + padding * max(0, len(opened) - 1)
+            canvas = Image.new("RGB", (width, height), "white")
+            y = 0
+            parts: list[dict[str, Any]] = []
+            for index, image in enumerate(opened):
+                x = max(0, (width - image.width) // 2)
+                canvas.paste(image, (x, y))
+                parts.append(
+                    {
+                        "index": index,
+                        "source_path": str(image_paths[index]),
+                        "x": x,
+                        "y": y,
+                        "width": image.width,
+                        "height": image.height,
+                    }
+                )
+                y += image.height + padding
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            canvas.save(output_path)
+            return {
+                "merged_crop_path": str(output_path),
+                "parts_total": len(parts),
+                "width": width,
+                "height": height,
+                "parts": parts,
+            }
+        finally:
+            for image in opened:
+                try:
+                    image.close()
+                except Exception:
+                    pass
+
     def run_ocr_and_segmentation(
         self,
         *,
@@ -1074,6 +3272,8 @@ class InstancePdfPipelineService:
             records = [record for record in records if str(record.record_id or "") == selected_record_id]
             if not records:
                 raise KeyError(selected_record_id)
+        if not selected_record_ids and not selected_record_id:
+            records = [record for record in records if not _record_excluded_from_ocr_work(record)]
         if limit is not None:
             records = records[: max(0, int(limit))]
         if not records:
@@ -1149,7 +3349,7 @@ class InstancePdfPipelineService:
             SegmentadorProblemasV2 = None  # type: ignore[assignment]
 
         active_ocr_model = str(ocr_model or self.models.ocr or "").strip()
-        active_figure_model = str(figure_model or self.models.figure_segmenter or "").strip()
+        active_figure_model = self._server_model_reference("figure_segmenter", override=figure_model).strip()
         endpoint_state: dict[str, Any] = {}
         pipeline = None
         if run_ocr:
@@ -1184,6 +3384,29 @@ class InstancePdfPipelineService:
         phase_name = "OCR" if run_ocr else "segmentacion"
         for index, record in enumerate(records):
             crop_path = Path(record.crop_path)
+            effective_crop_path = _effective_ocr_image_path(record)
+            source = dict(record.source or {})
+            if _record_excluded_from_ocr_work(record):
+                replacement = source.get("replaced_by_record_id") or source.get("merged_into_record_id")
+                record.set_step(
+                    PipelineStep.OCR,
+                    StageStatus.READY,
+                    f"reemplazado para OCR en {replacement}",
+                )
+                record.set_step(
+                    PipelineStep.SEGMENTATION,
+                    StageStatus.READY,
+                    f"reemplazado para segmentacion en {replacement}",
+                )
+                record.sync_status_from_steps()
+                record.touch()
+                record = self.staging.upsert_record(
+                    record,
+                    rewrite_manifest=False,
+                    existing_by_identity=existing_by_identity,
+                )
+                processed.append(record)
+                continue
             if phase_error_prefixes:
                 record.errors = [
                     str(item)
@@ -1221,14 +3444,46 @@ class InstancePdfPipelineService:
                 )
                 processed.append(record)
                 continue
+            if not effective_crop_path.exists():
+                record.status = StageStatus.ERROR
+                record.errors.append(f"ocr_input_missing:{effective_crop_path}")
+                record.set_step(
+                    PipelineStep.OCR,
+                    StageStatus.ERROR,
+                    "imagen efectiva para OCR no encontrada",
+                    crop_path=str(crop_path),
+                    ocr_input_crop_path=str(effective_crop_path),
+                )
+                if run_segmentation:
+                    record.set_step(
+                        PipelineStep.SEGMENTATION,
+                        StageStatus.ERROR,
+                        "imagen efectiva para segmentacion no encontrada",
+                        ocr_input_crop_path=str(effective_crop_path),
+                    )
+                record.set_step(PipelineStep.NORMALIZATION, StageStatus.PENDING, "pendiente hasta recuperar imagen fusionada")
+                record.sync_status_from_steps()
+                record = self.staging.upsert_record(
+                    record,
+                    rewrite_manifest=False,
+                    existing_by_identity=existing_by_identity,
+                )
+                processed.append(record)
+                continue
             record.status = StageStatus.PROCESSING
-            record.set_step(PipelineStep.CROPS, StageStatus.READY, "crop disponible", crop_path=str(crop_path))
+            record.set_step(
+                PipelineStep.CROPS,
+                StageStatus.READY,
+                "crop disponible",
+                crop_path=str(crop_path),
+                ocr_input_crop_path=str(effective_crop_path),
+            )
             if run_segmentation:
                 record.set_step(PipelineStep.SEGMENTATION, StageStatus.PROCESSING, "segmentando graficos internos")
                 try:
                     if segmenter is None:
                         raise RuntimeError("Segmentador no inicializado.")
-                    segments = segmenter.segmentar(crop_path, force_model=bool(force_figure_model))
+                    segments = segmenter.segmentar(effective_crop_path, force_model=bool(force_figure_model))
                     detector_payload = dict(segmenter.last_detector_payload or {})
                     try:
                         figure_max_conf = float(detector_payload.get("max_conf", 0.0) or 0.0)
@@ -1255,6 +3510,7 @@ class InstancePdfPipelineService:
                                 "idx": int(seg.idx),
                                 "bbox_px": [int(v) for v in seg.bbox],
                                 "image_path": str(seg.image_path),
+                                "source_image_path": str(effective_crop_path),
                             }
                             for seg in segments
                         ],
@@ -1282,7 +3538,7 @@ class InstancePdfPipelineService:
                         raise RuntimeError("Pipeline OCR no inicializado.")
                     _initial_items, raw_output = self._extract_with_cold_start_retry(
                         pipeline,
-                        image_path=crop_path,
+                        image_path=effective_crop_path,
                         curso=curso,
                         tema=tema,
                         start_n=next_n,
@@ -1291,8 +3547,8 @@ class InstancePdfPipelineService:
                             str(provider or "").strip().lower() == "hf"
                             and str(resolved_ocr_model or "").strip() == str(TRAINED_OCR_VISION_MODEL or "").strip()
                         ),
-                        gate_job_id=str(record.record_id or crop_path.stem),
-                        gate_label=crop_path.name,
+                        gate_job_id=str(record.record_id or effective_crop_path.stem),
+                        gate_label=effective_crop_path.name,
                     )
                     record.raw_ocr = raw_output
                     record.structured_ocr = {}
@@ -1589,7 +3845,10 @@ class InstancePdfPipelineService:
         input_payload = normalizer_input_from_record(self.context, record, continuations=continuations)
         client = HfOcrNormalizerClient(model=str(self.models.normalizer or ""))
         prediction = client.generate_final_latex(input_payload)
-        final_latex = str(prediction.get("final_latex") or "").strip()
+        final_latex = repair_final_latex_with_normalizer_input(
+            str(prediction.get("final_latex") or "").strip(),
+            input_payload,
+        )
         if not final_latex:
             raise RuntimeError("El normalizador IA no devolvio formato final.")
 
@@ -1694,7 +3953,7 @@ class InstancePdfPipelineService:
         }
         self._mark_record_downstream_active(record, reason="raw_ocr_reviewed_after_source_change")
         try:
-            training = upsert_raw_ocr_correction(
+            training = persist_raw_ocr_correction(
                 self.context,
                 record,
                 corrected_text=record.raw_ocr,
@@ -1727,15 +3986,15 @@ class InstancePdfPipelineService:
         invalidated_reason = self._invalidated_downstream_reason(record)
         if invalidated_reason:
             raise ValueError(f"Regenera staging antes de guardar segmentos graficos: {invalidated_reason}.")
-        crop_path = Path(record.crop_path)
+        crop_path = _effective_ocr_image_path(record)
         if not crop_path.exists():
-            raise FileNotFoundError(f"No se encontro el crop: {crop_path}")
+            raise FileNotFoundError(f"No se encontro el crop efectivo: {crop_path}")
         clean_boxes = self._coerce_boxes(boxes)
         detector_payload = dict((record.figure_segmentation or {}).get("detector") or {})
         detector_payload.setdefault("predicted_boxes", detector_payload.get("predicted_boxes") or [])
         segmenter = SegmentadorProblemasV2(
             self.staging.root / "segments",
-            model_path=str(self.models.figure_segmenter or ""),
+            model_path=self._server_model_reference("figure_segmenter"),
             force_model_default=False,
         )
         segments = segmenter.save_reviewed_segments(crop_path, clean_boxes, detector_payload=detector_payload)
@@ -1755,6 +4014,7 @@ class InstancePdfPipelineService:
                     "idx": int(seg.idx),
                     "bbox_px": [int(v) for v in seg.bbox],
                     "image_path": str(seg.image_path),
+                    "source_image_path": str(crop_path),
                     "reviewed": True,
                 }
                 for seg in segments
@@ -1792,6 +4052,26 @@ class InstancePdfPipelineService:
                 "boxes": [[int(v) for v in box[:4]] for box in clean_boxes],
             },
         }
+        try:
+            training = persist_figure_segment_correction(
+                self.context,
+                record,
+                boxes=clean_boxes,
+                detector_payload=detector_payload,
+            )
+            record.artifacts = {
+                **dict(record.artifacts or {}),
+                "figure_training_bank_record": str(training.get("record_path") or ""),
+                "figure_training_bank_manifest": str(training.get("manifest_path") or ""),
+                "figure_training_samples_total": int(training.get("samples_total") or 0),
+                "figure_training_corrected_images": int(training.get("corrected_images") or 0),
+                "figure_training_revision_count": int(training.get("revision_count") or 0),
+            }
+        except Exception as exc:
+            record.artifacts = {
+                **dict(record.artifacts or {}),
+                "figure_training_bank_error": str(exc),
+            }
         self._write_raw_artifacts(record)
         record.sync_status_from_steps()
         record.touch()
@@ -1801,7 +4081,7 @@ class InstancePdfPipelineService:
     def _structure_raw_ocr_for_normalization(self, record: StagingProblemRecord):
         from modulos.modulo0_transcriptor.scan_pipeline.pipeline import ScanPipeline
 
-        crop_path = Path(record.crop_path)
+        crop_path = _effective_ocr_image_path(record)
         source = dict(record.source or {})
         try:
             start_n = max(1, int(record.normalized.get("numero") or source.get("problem_number") or source.get("n") or 1))
@@ -2001,6 +4281,11 @@ class InstancePdfPipelineService:
             if not row_id or row_id in seen_fused:
                 continue
             row_source = dict(row.source or {})
+            row_figure = row.figure_segmentation if isinstance(row.figure_segmentation, dict) else {}
+            try:
+                row_segments_total = int(row_figure.get("segments_total") or 0)
+            except Exception:
+                row_segments_total = 0
             fused_rows.append(
                 {
                     "record_id": row_id,
@@ -2008,6 +4293,8 @@ class InstancePdfPipelineService:
                     "crop_name": Path(str(row.crop_path or "")).name,
                     "page_number": row_source.get("page_number", row_source.get("source_page_number")),
                     "bbox_px": row_source.get("bbox_px") if isinstance(row_source.get("bbox_px"), list) else None,
+                    "has_figure": row_segments_total > 0,
+                    "segments_total": row_segments_total,
                     "texto_fusionado": self._continuation_text_for_normalization(row),
                 }
             )

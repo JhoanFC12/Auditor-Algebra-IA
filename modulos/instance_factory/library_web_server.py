@@ -243,6 +243,31 @@ class LibraryWebRuntime:
                 result = self._dispatch_api(method, path, query, payload)
                 self._send_json(handler, result)
                 return
+            if path.startswith("/api/automation/"):
+                payload = self._read_json(handler) if method == "POST" else {}
+                runtime = self._factory_runtime_for_request(handler, query, payload)
+                if runtime is not None:
+                    result = self._dispatch_factory_api(handler, method, path, query, payload, runtime=runtime)
+                else:
+                    result = self._dispatch_api(method, path, query, payload)
+                if isinstance(result, _FilePayload):
+                    self._send_file(handler, result.path, result.content_type, cache_control=result.cache_control)
+                else:
+                    self._send_json(handler, result)
+                return
+            if path.startswith("/api/pages/detect/jobs/"):
+                payload = self._read_json(handler) if method == "POST" else {}
+                runtime = self._factory_runtime_for_request(handler, query, payload)
+                if runtime is not None:
+                    result = self._dispatch_factory_api(handler, method, path, query, payload, runtime=runtime)
+                    self._send_json(handler, result)
+                else:
+                    raise WebApiError(
+                        "instance_id requerido para consultar o iniciar jobs de deteccion de paginas.",
+                        status=400,
+                        code="missing_factory_instance",
+                    )
+                return
             if path.startswith("/api/"):
                 payload = self._read_json(handler) if method == "POST" else {}
                 runtime = self._factory_runtime_for_request(handler, query, payload)
@@ -287,6 +312,27 @@ class LibraryWebRuntime:
                 return self.library_api.dispatch(method, path, query, payload)
             if method == "GET" and path == "/api/training/status":
                 return load_training_cycle_status()
+            if method == "GET" and path == "/api/automation/status":
+                return self._library_automation_status()
+            if method == "GET" and path == "/api/automation/instances":
+                return self._library_automation_instances(query)
+            if method == "GET" and path == "/api/automation/schema":
+                return {
+                    "schema_version": "library_automation_schema_v1",
+                    "mode": "library",
+                    "routes": {
+                        "status": "GET /api/automation/status",
+                        "instances": "GET /api/automation/instances?db_name=...&book_id=...",
+                        "factory_queue": "POST /api/automation/queue con instance_id, book_id y db_name",
+                    },
+                    "delegates_to_factory_schema": "GET /api/automation/schema?instance_id=ID",
+                }
+            if path.startswith("/api/automation/"):
+                raise WebApiError(
+                    "instance_id requerido para operar una Fabrica desde Biblioteca. Si no esta preparada, agrega tambien book_id y db_name.",
+                    status=400,
+                    code="missing_factory_instance",
+                )
             if method == "GET" and path == "/api/word/sessions":
                 db_name = self._first(query, "db_name", self.default_db_name)
                 root = self._first(query, "root", "")
@@ -300,8 +346,8 @@ class LibraryWebRuntime:
                 return self.word_service.list_db_problems(
                     db_name=db_name,
                     curso=self._first(query, "curso", ""),
-                    tema_id=self._optional_int(self._first(query, "tema_id", "")),
-                    subtema_id=self._optional_int(self._first(query, "subtema_id", "")),
+                    tema_id=self._optional_meta_ref(self._first(query, "tema_id", "")),
+                    subtema_id=self._optional_meta_ref(self._first(query, "subtema_id", "")),
                     autor=self._first(query, "autor", ""),
                     editorial=self._first(query, "editorial", ""),
                     libro=self._first(query, "libro", ""),
@@ -322,6 +368,11 @@ class LibraryWebRuntime:
                 )
             if method == "POST" and path == "/api/word/open":
                 return self._open_word_file(self._required_str(payload, "word_path"))
+            if method == "POST" and path == "/api/word/save-dialog":
+                return self._ask_word_save_path(
+                    suggested_name=str(payload.get("suggested_name") or ""),
+                    initial_path=str(payload.get("initial_path") or ""),
+                )
             if method == "POST" and path == "/api/word/convert-instance":
                 self.word_service.controller = self._word_controller()
                 self.word_service.practice_controller = self._word_practice_controller(str(payload.get("db_name") or self.default_db_name))
@@ -637,6 +688,47 @@ class LibraryWebRuntime:
             return runtimes[-1]
         return None
 
+    def _library_automation_status(self) -> dict[str, Any]:
+        runtimes = self._all_factory_runtimes()
+        return {
+            "schema_version": "library_automation_status_v1",
+            "mode": "library",
+            "active_factory_runtimes": [
+                {
+                    "instance_id": int(getattr(runtime, "_library_instance_id", 0) or 0),
+                    "book_id": int(getattr(runtime, "_library_book_id", 0) or 0),
+                    "db_name": str(getattr(runtime, "_library_db_name", "") or ""),
+                    "context": getattr(runtime, "context", None).to_dict() if getattr(runtime, "context", None) is not None else {},
+                    "automation": runtime._automation_status().get("current_job", {}) if hasattr(runtime, "_automation_status") else {},
+                    "ocr": runtime._ocr_job_status() if hasattr(runtime, "_ocr_job_status") else {},
+                }
+                for runtime in runtimes
+            ],
+            "usage": {
+                "current_instance": "GET /api/automation/status?instance_id=ID",
+                "prepare_instance": "POST /api/automation/queue con instance_id, book_id y db_name",
+                "list_instances": "GET /api/automation/instances?db_name=...&book_id=...",
+            },
+        }
+
+    def _library_automation_instances(self, query: dict[str, list[str]]) -> dict[str, Any]:
+        db_name = self._first(query, "db_name", self.default_db_name)
+        raw_book_id = self._first(query, "book_id", "")
+        if raw_book_id:
+            book_id = int(raw_book_id)
+            return {
+                "schema_version": "library_automation_instances_v1",
+                "db_name": db_name,
+                "book": self._book_detail(db_name, book_id),
+            }
+        books = self._list_books(db_name, include_instance_health=True)
+        return {
+            "schema_version": "library_automation_instances_v1",
+            "db_name": db_name,
+            "books": [self._book_to_web(row) for row in books],
+            "count": len(books),
+        }
+
     def _snapshot(self, db_name: str = "") -> dict[str, Any]:
         controller = self._require_controller()
         dbs = list(controller.listar_bases_datos())
@@ -732,6 +824,9 @@ class LibraryWebRuntime:
     @staticmethod
     def _book_to_web(book: dict[str, Any]) -> dict[str, Any]:
         payload = dict(book or {})
+        for date_key in ("created_at", "updated_at"):
+            if payload.get(date_key) is not None:
+                payload[date_key] = str(payload.get(date_key))
         health = LibraryWebRuntime._parse_instances_health(payload)
         payload["id"] = int(payload.get("id") or 0)
         payload["instances_total"] = int(payload.get("instances_total") or 0)
@@ -1014,7 +1109,7 @@ class LibraryWebRuntime:
 
     @staticmethod
     def _send_json(handler: BaseHTTPRequestHandler, payload: Any, *, status: int = 200) -> None:
-        raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        raw = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
         accepts_gzip = "gzip" in str(handler.headers.get("Accept-Encoding") or "").lower()
         body = gzip.compress(raw, compresslevel=5) if accepts_gzip and len(raw) >= 1024 else raw
         handler.send_response(status)
@@ -1138,6 +1233,18 @@ class LibraryWebRuntime:
         return int(value)
 
     @staticmethod
+    def _optional_meta_ref(value: Any) -> int | str | None:
+        clean = str(value or "").strip()
+        if not clean or clean == "Todos":
+            return None
+        if clean.startswith(("catalog:", "direct:")):
+            return clean
+        try:
+            return int(clean)
+        except Exception:
+            return clean
+
+    @staticmethod
     def _bool(value: Any, *, default: bool = False) -> bool:
         if value is None or value == "":
             return bool(default)
@@ -1155,10 +1262,24 @@ class LibraryWebRuntime:
             "/api/library/instance/create": {"POST"},
             "/api/library/instance/factory": {"POST"},
             "/api/training/status": {"GET"},
+            "/api/pages/detect/jobs/status": {"GET"},
+            "/api/pages/detect/jobs/start": {"POST"},
+            "/api/endpoint/ocr/status": {"GET"},
+            "/api/endpoint/ocr/resume": {"POST"},
+            "/api/endpoint/ocr/scale-to-zero": {"POST"},
+            "/api/ocr/jobs/status": {"GET"},
+            "/api/ocr/jobs/start": {"POST"},
+            "/api/automation/status": {"GET"},
+            "/api/automation/instances": {"GET"},
+            "/api/automation/schema": {"GET"},
+            "/api/automation/queue": {"POST"},
+            "/api/automation/retry-errors": {"POST"},
+            "/api/automation/cancel": {"POST"},
             "/api/word/sessions": {"GET"},
             "/api/word/problems": {"GET"},
             "/api/word/convert": {"POST"},
             "/api/word/open": {"POST"},
+            "/api/word/save-dialog": {"POST"},
             "/api/word/convert-instance": {"POST"},
             "/api/word/convert-instances": {"POST"},
             "/api/word/convert-problems": {"POST"},
@@ -1199,4 +1320,58 @@ class LibraryWebRuntime:
             "schema_version": "latex_word_open_v1",
             "opened": True,
             "word_path": str(word_path),
+        }
+
+    def _ask_word_save_path(self, *, suggested_name: str = "", initial_path: str = "") -> dict[str, Any]:
+        safe_name = self.word_service._safe_filename(str(suggested_name or "").strip(), fallback="practica_word")
+        if not safe_name.lower().endswith(".docx"):
+            safe_name = f"{safe_name}.docx"
+        initial_dir = Path.cwd()
+        raw_initial = str(initial_path or "").strip()
+        if raw_initial:
+            try:
+                initial_candidate = remap_legacy_drive_path(Path(raw_initial).expanduser(), prefer_existing=False)
+                initial_dir = initial_candidate.parent if initial_candidate.suffix else initial_candidate
+            except Exception:
+                initial_dir = Path.cwd()
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+        except Exception as exc:
+            raise RuntimeError(f"No se pudo cargar el dialogo nativo de guardado: {exc}") from exc
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            try:
+                root.attributes("-topmost", True)
+            except Exception:
+                pass
+            selected = filedialog.asksaveasfilename(
+                parent=root,
+                title="Guardar practica Word",
+                initialdir=str(initial_dir),
+                initialfile=safe_name,
+                defaultextension=".docx",
+                filetypes=[("Documento Word", "*.docx")],
+            )
+        finally:
+            root.destroy()
+        selected_text = str(selected or "").strip()
+        if not selected_text:
+            return {
+                "schema_version": "latex_word_save_dialog_v1",
+                "selected": False,
+                "word_path": "",
+            }
+        try:
+            word_path = remap_legacy_drive_path(Path(selected_text).expanduser(), prefer_existing=False)
+        except Exception as exc:
+            raise ValueError(f"Ruta Word invalida: {exc}") from exc
+        if word_path.suffix.lower() != ".docx":
+            word_path = word_path.with_suffix(".docx")
+        return {
+            "schema_version": "latex_word_save_dialog_v1",
+            "selected": True,
+            "word_path": str(word_path.resolve()),
         }

@@ -18,6 +18,7 @@ from modulos.instance_factory.staging import (
     InstanceStagingStore,
     compact_artifact_dir_name,
 )
+from modulos.modulo13_laboratorio_pdf_segmentacion.controlador_laboratorio_pdf import ProblemPageRecord
 
 
 def structured_report(number: int, statement: str) -> dict:
@@ -367,7 +368,7 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             self.assertEqual(summary["ready"], 1)
             self.assertEqual(summary["subidos_bd"], 1)
 
-    def test_summary_counts_continuation_as_crop_not_problem(self) -> None:
+    def test_summary_counts_continuation_outside_effective_ocr_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             context = InstancePipelineContext(book_code="GEO", instance_type="s02")
@@ -404,9 +405,10 @@ class InstanceFactoryStagingTests(unittest.TestCase):
 
             summary = store.summarize_records()
 
-            self.assertEqual(summary["records_total"], 2)
-            self.assertEqual(summary["crops_found"], 2)
-            self.assertEqual(summary["ocr_done"], 2)
+            self.assertEqual(summary["raw_records_total"], 2)
+            self.assertEqual(summary["records_total"], 1)
+            self.assertEqual(summary["crops_found"], 1)
+            self.assertEqual(summary["ocr_done"], 1)
             self.assertEqual(summary["problems_total"], 1)
             self.assertEqual(summary["primary_records_total"], 1)
             self.assertEqual(summary["normalized_done"], 1)
@@ -2897,6 +2899,1281 @@ class InstanceFactoryStagingTests(unittest.TestCase):
                 "<02.> Halle x. A) $1$ B) $2$",
                 "<03.> Halle x. A) $1$ B) $2$",
             ])
+
+    def test_merge_records_for_ocr_uses_single_effective_image(self) -> None:
+        from PIL import Image
+
+        seen_paths: list[Path] = []
+
+        class FakeExtractor:
+            def extract_from_image(self, **kwargs):
+                seen_paths.append(Path(kwargs["image_path"]))
+                return [], "<01.> Problema fusionado. A) $1$ B) $2$"
+
+        class FakeScanPipeline:
+            def __init__(self, *_args, **_kwargs) -> None:
+                self.extractor = FakeExtractor()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent_crop = root / "parent.png"
+            child_crop = root / "child.png"
+            Image.new("RGB", (120, 40), "white").save(parent_crop)
+            Image.new("RGB", (80, 30), "white").save(child_crop)
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_record(StagingProblemRecord(record_id="r1", crop_id="r1", crop_path=str(parent_crop)))
+            store.upsert_record(StagingProblemRecord(record_id="r2", crop_id="r2", crop_path=str(child_crop)))
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            updated = service.merge_records_for_ocr("r1", ["r2"])
+            merged = next(row for row in updated if str(row.source.get("ocr_input_mode") or "") == "merged_crops_replacement")
+            parent = store.get_record("r1")
+            child = store.get_record("r2")
+            persisted_merged = store.get_record(merged.record_id)
+
+            self.assertEqual([row.record_id for row in updated], [merged.record_id, "r1", "r2"])
+            self.assertIsNotNone(parent)
+            self.assertIsNotNone(child)
+            self.assertIsNotNone(persisted_merged)
+            merged_path = Path(str(persisted_merged.crop_path or ""))
+            self.assertTrue(merged_path.exists())
+            with Image.open(merged_path) as merged:
+                self.assertEqual(merged.width, 120)
+                self.assertGreater(merged.height, 70)
+            self.assertEqual(parent.source.get("replaced_by_record_id"), persisted_merged.record_id)
+            self.assertEqual(child.source.get("replaced_by_record_id"), persisted_merged.record_id)
+            summary = store.summarize_records()
+            self.assertEqual(summary["raw_records_total"], 3)
+            self.assertEqual(summary["records_total"], 1)
+            self.assertEqual(summary["problems_total"], 1)
+            self.assertEqual(summary["primary_records_total"], 1)
+
+            with patch("modulos.modulo0_transcriptor.scan_pipeline.pipeline.ScanPipeline", FakeScanPipeline), patch.object(
+                service,
+                "_validate_ocr_runtime",
+                lambda **_kwargs: None,
+            ):
+                processed = service.run_ocr_and_segmentation(
+                    provider="local",
+                    run_segmentation=False,
+                    run_ocr=True,
+                )
+
+            self.assertEqual(len(processed), 1)
+            self.assertEqual(seen_paths, [merged_path])
+            self.assertEqual(store.get_record(persisted_merged.record_id).raw_ocr, "<01.> Problema fusionado. A) $1$ B) $2$")
+            self.assertFalse(store.get_record("r1").raw_ocr)
+            self.assertFalse(store.get_record("r2").raw_ocr)
+
+    def test_materialization_rebuild_removes_previous_merged_crop_records(self) -> None:
+        from PIL import Image
+
+        class FakeGolden:
+            def __init__(self, root: Path) -> None:
+                self.root = root
+
+            def materialize_problem_crops_for_downstream(self, *_args, **_kwargs):
+                target = self.root / "problem_crops_live"
+                records = target / "records"
+                images = target / "images"
+                records.mkdir(parents=True, exist_ok=True)
+                images.mkdir(parents=True, exist_ok=True)
+                crop_ids = ["r1", "r2"]
+                for index, crop_id in enumerate(crop_ids, start=1):
+                    Image.new("RGB", (120, 40), "white").save(images / f"{crop_id}.png")
+                    payload = {
+                        "schema_version": "problem_crop_live_v1",
+                        "crop_id": crop_id,
+                        "source_pdf_path": str(self.root / "book.pdf"),
+                        "source_page_number": 1,
+                        "source_order": index,
+                        "box_index": index,
+                        "bbox_px": [10, 10 + index * 50, 130, 45 + index * 50],
+                        "crop_image_rel": f"images/{crop_id}.png",
+                        "source_record_id": "page_0001",
+                    }
+                    (records / f"{crop_id}.json").write_text(json.dumps(payload), encoding="utf-8")
+                return target, crop_ids
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent_crop = root / "parent.png"
+            child_crop = root / "child.png"
+            Image.new("RGB", (120, 40), "white").save(parent_crop)
+            Image.new("RGB", (120, 40), "white").save(child_crop)
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="r1",
+                    crop_id="r1",
+                    crop_path=str(parent_crop),
+                    source={
+                        "book_code": "ALG01",
+                        "instance_type": "s01",
+                        "pdf_path": str(root / "book.pdf"),
+                        "page_number": 1,
+                        "source_record_id": "page_0001",
+                        "bbox_px": [10, 60, 130, 95],
+                    },
+                )
+            )
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="r2",
+                    crop_id="r2",
+                    crop_path=str(child_crop),
+                    source={
+                        "book_code": "ALG01",
+                        "instance_type": "s01",
+                        "pdf_path": str(root / "book.pdf"),
+                        "page_number": 1,
+                        "source_record_id": "page_0001",
+                        "bbox_px": [10, 110, 130, 145],
+                    },
+                )
+            )
+            service = InstancePdfPipelineService(context, golden_controller=FakeGolden(root), staging_store=store)
+            merged_rows = service.merge_records_for_ocr("r1", ["r2"])
+            merged_id = next(row.record_id for row in merged_rows if row.record_id not in {"r1", "r2"})
+            before_rebuild = store.summarize_records()
+            self.assertEqual(before_rebuild["raw_records_total"], 3)
+            self.assertEqual(before_rebuild["records_total"], 1)
+
+            rebuilt = service.materialize_crops_to_staging(rows=[])
+
+            self.assertEqual([record.record_id for record in rebuilt], ["r1", "r2"])
+            self.assertIsNone(store.get_record(merged_id))
+            self.assertEqual([record.record_id for record in store.load_records()], ["r1", "r2"])
+            self.assertNotIn("replaced_by_record_id", store.get_record("r1").source)
+            self.assertNotIn("replaced_by_record_id", store.get_record("r2").source)
+            self.assertNotIn("continuacion", store.get_record("r1").normalized)
+            self.assertNotIn("continuacion", store.get_record("r2").normalized)
+            summary = store.summarize_records()
+            self.assertEqual(summary["raw_records_total"], 2)
+            self.assertEqual(summary["records_total"], 2)
+            self.assertEqual(summary["crops_found"], 2)
+
+    def test_continuation_scan_ignores_merged_crop_records(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent_crop = root / "parent.png"
+            child_crop = root / "child.png"
+            Image.new("RGB", (120, 40), "white").save(parent_crop)
+            Image.new("RGB", (120, 40), "white").save(child_crop)
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_record(StagingProblemRecord(record_id="r1", crop_id="r1", crop_path=str(parent_crop)))
+            store.upsert_record(StagingProblemRecord(record_id="r2", crop_id="r2", crop_path=str(child_crop)))
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            service.merge_records_for_ocr("r1", ["r2"])
+            scan = service.scan_continuation_candidates(min_confidence=0.1)
+
+            self.assertEqual(scan["summary"]["total_crops"], 0)
+            self.assertEqual(scan["candidates"], [])
+
+    def test_detect_continuation_candidates_from_visual_layout_before_ocr(self) -> None:
+        from PIL import Image, ImageDraw
+
+        def write_crop(path: Path, *, options: bool = False, paragraph: bool = False) -> None:
+            image = Image.new("RGB", (460, 170), "white")
+            draw = ImageDraw.Draw(image)
+            if paragraph:
+                draw.text((18, 18), "17.", fill="black")
+                draw.text((58, 18), "En un triangulo ABC se cumple que", fill="black")
+                draw.text((58, 42), "AB = AP = PQ y se pide calcular x.", fill="black")
+                draw.text((58, 66), "La figura queda cortada debajo.", fill="black")
+            if options:
+                draw.text((22, 86), "A) 5        B) 8        C) 9", fill="black")
+                draw.text((22, 116), "D) 10       E) 12", fill="black")
+            image.save(path)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            r1 = root / "r1.png"
+            r2 = root / "r2.png"
+            r3 = root / "r3.png"
+            write_crop(r1, paragraph=True)
+            write_crop(r2, options=True)
+            write_crop(r3, paragraph=True, options=True)
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            first = StagingProblemRecord(
+                record_id="r1",
+                crop_id="r1",
+                crop_path=str(r1),
+                source={
+                    "page_number": 1,
+                    "source_order": 1,
+                    "bbox_px": [10, 10, 400, 600],
+                    "continuity_subboxes_checked": True,
+                    "continuity_subboxes": [{"class_name": "problem_number", "conf": 1.0}],
+                },
+            )
+            continuation = StagingProblemRecord(
+                record_id="r2",
+                crop_id="r2",
+                crop_path=str(r2),
+                source={
+                    "page_number": 1,
+                    "source_order": 2,
+                    "bbox_px": [12, 610, 398, 760],
+                    "continuity_subboxes_checked": True,
+                    "continuity_subboxes": [{"class_name": "answer_block", "conf": 1.0}],
+                },
+            )
+            next_problem = StagingProblemRecord(
+                record_id="r3",
+                crop_id="r3",
+                crop_path=str(r3),
+                source={
+                    "page_number": 1,
+                    "source_order": 3,
+                    "bbox_px": [10, 770, 400, 900],
+                    "continuity_subboxes_checked": True,
+                    "continuity_subboxes": [
+                        {"class_name": "problem_number", "conf": 1.0},
+                        {"class_name": "answer_block", "conf": 1.0},
+                    ],
+                },
+            )
+            store.upsert_many([first, continuation, next_problem])
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            def fake_aux_ocr(record, cache=None):
+                raise AssertionError("continuity decisions must not call auxiliary OCR")
+
+            with patch.dict(os.environ, {"PDF_FACTORY_CONTINUITY_DETECTOR": "0"}, clear=False):
+                with patch("modulos.instance_factory.pipeline._auxiliary_continuity_ocr_features", fake_aux_ocr):
+                    candidates = service.detect_continuation_candidates(min_confidence=0.35)
+
+            self.assertEqual(candidates[0]["parent_record_id"], "r1")
+            self.assertEqual(candidates[0]["continuation_record_id"], "r2")
+            self.assertEqual(candidates[0]["features"]["scoring_mode"], "detector_boolean_no_visual_no_ocr")
+            self.assertTrue(candidates[0]["features"]["split_multiple_choice_signal"])
+            self.assertFalse(candidates[0]["features"]["auxiliary_ocr_available"])
+            self.assertTrue(candidates[0]["features"]["parent_detector"]["has_problem_number"])
+            self.assertFalse(candidates[0]["features"]["continuation_detector"]["has_problem_number"])
+            self.assertTrue(candidates[0]["features"]["continuation_detector"]["has_answer_block"])
+            self.assertTrue(candidates[0]["features"]["geometry_confirms_split"])
+            self.assertIn(
+                "regla fuerte: padre numerado sin alternativas + continuacion sin numero con alternativas",
+                candidates[0]["reasons"],
+            )
+            self.assertEqual(candidates[0]["recommendation"], "merge")
+
+            with patch.dict(os.environ, {"PDF_FACTORY_CONTINUITY_DETECTOR": "0"}, clear=False):
+                with patch("modulos.instance_factory.pipeline._auxiliary_continuity_ocr_features", fake_aux_ocr):
+                    scan = service.scan_continuation_candidates(min_confidence=0.35)
+            self.assertEqual(scan["summary"]["total_crops"], 3)
+            self.assertEqual(scan["summary"]["complete_discarded"], 1)
+            self.assertEqual(scan["summary"]["possible_parents"], 1)
+            self.assertEqual(scan["summary"]["possible_continuations"], 1)
+            self.assertEqual(scan["summary"]["merge_recommended"], 1)
+
+    def test_detector_subboxes_can_auto_merge_without_auxiliary_ocr(self) -> None:
+        from PIL import Image, ImageDraw
+
+        def write_crop(path: Path, *, options: bool = False, paragraph: bool = False) -> None:
+            image = Image.new("RGB", (460, 170), "white")
+            draw = ImageDraw.Draw(image)
+            if paragraph:
+                draw.text((18, 18), "17.", fill="black")
+                draw.text((58, 18), "En un triangulo ABC se pide calcular x.", fill="black")
+                draw.text((58, 42), "El enunciado continua en la imagen siguiente.", fill="black")
+            if options:
+                draw.text((22, 86), "A) 5        B) 8        C) 9", fill="black")
+                draw.text((22, 116), "D) 10       E) 12", fill="black")
+            image.save(path)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent_path = root / "parent.png"
+            child_path = root / "child.png"
+            write_crop(parent_path, paragraph=True)
+            write_crop(child_path, options=True)
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="r1",
+                        crop_id="r1",
+                        crop_path=str(parent_path),
+                        source={
+                            "page_number": 1,
+                            "source_order": 1,
+                            "bbox_px": [10, 10, 400, 600],
+                            "continuity_subboxes_checked": True,
+                            "continuity_subboxes": [{"class_name": "problem_number", "conf": 1.0}],
+                        },
+                    ),
+                    StagingProblemRecord(
+                        record_id="r2",
+                        crop_id="r2",
+                        crop_path=str(child_path),
+                        source={
+                            "page_number": 1,
+                            "source_order": 2,
+                            "bbox_px": [12, 610, 398, 760],
+                            "continuity_subboxes_checked": True,
+                            "continuity_subboxes": [{"class_name": "answer_block", "conf": 1.0}],
+                        },
+                    ),
+                ]
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            with patch.dict(os.environ, {"PDF_FACTORY_CONTINUITY_TESSERACT": "0", "PDF_FACTORY_CONTINUITY_DETECTOR": "0"}, clear=False):
+                candidates = service.detect_continuation_candidates(min_confidence=0.35)
+
+            self.assertEqual(candidates[0]["parent_record_id"], "r1")
+            self.assertEqual(candidates[0]["continuation_record_id"], "r2")
+            self.assertEqual(candidates[0]["recommendation"], "merge")
+            self.assertFalse(candidates[0]["features"]["auxiliary_ocr_available"])
+            self.assertFalse(candidates[0]["features"]["visual_confirms_split"])
+            self.assertTrue(candidates[0]["features"]["detector_confirms_split"])
+            self.assertIn("detector v3 confirma", " ".join(candidates[0]["reasons"]))
+
+    def test_top_answer_row_is_not_treated_as_problem_number(self) -> None:
+        from PIL import Image, ImageDraw
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent_path = root / "parent.png"
+            child_path = root / "child.png"
+            parent = Image.new("RGB", (460, 150), "white")
+            parent_draw = ImageDraw.Draw(parent)
+            parent_draw.text((18, 22), "06.", fill="black")
+            parent_draw.text((58, 22), 'Hallar "x" en:', fill="black")
+            parent_draw.text((160, 64), "(a+1)/(x+b) = (a-b)/(a-x)", fill="black")
+            parent.save(parent_path)
+            child = Image.new("RGB", (460, 150), "white")
+            child_draw = ImageDraw.Draw(child)
+            child_draw.text((22, 18), "a) (a+b)/(x+b)        b) (a-b)/(a-x)        c) (a+b)/2", fill="black")
+            child_draw.text((22, 86), "d) (a-b)/2            e) (a+b)/ab", fill="black")
+            child.save(child_path)
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="r1",
+                        crop_id="r1",
+                        crop_path=str(parent_path),
+                        source={
+                            "page_number": 1,
+                            "source_order": 1,
+                            "bbox_px": [10, 10, 400, 160],
+                            "continuity_subboxes_checked": True,
+                            "continuity_subboxes": [{"class_name": "problem_number", "conf": 1.0}],
+                        },
+                    ),
+                    StagingProblemRecord(
+                        record_id="r2",
+                        crop_id="r2",
+                        crop_path=str(child_path),
+                        source={
+                            "page_number": 1,
+                            "source_order": 2,
+                            "bbox_px": [10, 166, 400, 316],
+                            "continuity_subboxes_checked": True,
+                            "continuity_subboxes": [{"class_name": "answer_block", "conf": 1.0}],
+                        },
+                    ),
+                ]
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            with patch.dict(os.environ, {"PDF_FACTORY_CONTINUITY_TESSERACT": "0", "PDF_FACTORY_CONTINUITY_DETECTOR": "0"}, clear=False):
+                child_profile = service._classify_continuation_crop(store.load_records()[1])
+                candidates = service.detect_continuation_candidates(min_confidence=0.35)
+
+            self.assertFalse(child_profile["has_number"])
+            self.assertTrue(child_profile["has_options"])
+            self.assertEqual(candidates[0]["parent_record_id"], "r1")
+            self.assertEqual(candidates[0]["continuation_record_id"], "r2")
+            self.assertEqual(candidates[0]["recommendation"], "merge")
+
+    def test_visual_number_does_not_block_merge_when_detector_only_sees_answers(self) -> None:
+        from PIL import Image, ImageDraw
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent_path = root / "parent.png"
+            child_path = root / "child.png"
+            parent = Image.new("RGB", (460, 150), "white")
+            parent_draw = ImageDraw.Draw(parent)
+            parent_draw.text((18, 22), "52.", fill="black")
+            parent_draw.text((58, 22), 'Resolver en "x":', fill="black")
+            parent_draw.text((160, 64), "a^2/(a-sqrt(x+b)) = sqrt(a(x+3a)+b)", fill="black")
+            parent.save(parent_path)
+            child = Image.new("RGB", (460, 210), "white")
+            child_draw = ImageDraw.Draw(child)
+            child_draw.text((18, 18), "53.", fill="black")
+            child_draw.text((58, 18), "Si las soluciones de una ecuacion son alfa y beta.", fill="black")
+            child_draw.text((24, 108), "a) -5        b) 2        c) -1", fill="black")
+            child_draw.text((24, 148), "d) -3        e) 1", fill="black")
+            child.save(child_path)
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="r1",
+                        crop_id="r1",
+                        crop_path=str(parent_path),
+                        source={"page_number": 1, "source_order": 1, "bbox_px": [10, 10, 400, 160]},
+                    ),
+                    StagingProblemRecord(
+                        record_id="r2",
+                        crop_id="r2",
+                        crop_path=str(child_path),
+                        source={"page_number": 1, "source_order": 2, "bbox_px": [10, 166, 400, 376]},
+                    ),
+                ]
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            def fake_detector(record, cache=None):
+                if record.record_id == "r1":
+                    return {
+                        "available": True,
+                        "subbox_detections_total": 1,
+                        "has_problem_number": True,
+                        "has_answer_block": False,
+                        "complete_problem": False,
+                        "counts": {"problem": 0, "problem_number": 1, "answer_block": 0},
+                    }
+                if record.record_id == "r2":
+                    return {
+                        "available": True,
+                        "subbox_detections_total": 1,
+                        "has_problem_number": False,
+                        "has_answer_block": True,
+                        "complete_problem": False,
+                        "counts": {"problem": 0, "problem_number": 0, "answer_block": 1},
+                    }
+                return {"available": False}
+
+            with patch("modulos.instance_factory.pipeline._continuity_detector_features", fake_detector):
+                child_profile = service._classify_continuation_crop(store.load_records()[1])
+                candidates = service.detect_continuation_candidates(min_confidence=0.1)
+
+            self.assertFalse(child_profile["has_number"])
+            self.assertTrue(child_profile["has_options"])
+            self.assertEqual(candidates[0]["parent_record_id"], "r1")
+            self.assertEqual(candidates[0]["continuation_record_id"], "r2")
+            self.assertEqual(candidates[0]["recommendation"], "merge")
+            self.assertFalse(candidates[0]["features"]["visual_confirms_split"])
+
+    def test_visual_continuation_scoring_does_not_auto_merge_after_complete_options(self) -> None:
+        from PIL import Image, ImageDraw
+
+        def option_crop(path: Path) -> None:
+            image = Image.new("RGB", (460, 170), "white")
+            draw = ImageDraw.Draw(image)
+            draw.text((20, 20), "Calcule x.", fill="black")
+            draw.text((22, 86), "A) 1        B) 2        C) 3", fill="black")
+            draw.text((22, 116), "D) 4        E) 5", fill="black")
+            image.save(path)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent_path = root / "parent.png"
+            child_path = root / "child.png"
+            option_crop(parent_path)
+            option_crop(child_path)
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="r1",
+                        crop_id="r1",
+                        crop_path=str(parent_path),
+                        source={"page_number": 1, "source_order": 1, "bbox_px": [10, 10, 400, 180]},
+                    ),
+                    StagingProblemRecord(
+                        record_id="r2",
+                        crop_id="r2",
+                        crop_path=str(child_path),
+                        source={"page_number": 1, "source_order": 2, "bbox_px": [10, 200, 400, 370]},
+                        raw_ocr="[CONT.] A) 1 B) 2 C) 3 D) 4 E) 5",
+                    ),
+                ]
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            with patch.dict(os.environ, {"PDF_FACTORY_CONTINUITY_TESSERACT": "0", "PDF_FACTORY_CONTINUITY_DETECTOR": "0"}, clear=False):
+                candidates = service.detect_continuation_candidates(min_confidence=0.35)
+
+            self.assertFalse(any(candidate.get("recommendation") == "merge" for candidate in candidates))
+            if candidates:
+                self.assertIn("primer crop ya parece contener alternativas completas", candidates[0]["warnings"])
+
+    def test_numbered_crop_with_options_is_not_continuation_candidate(self) -> None:
+        from PIL import Image, ImageDraw
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent_path = root / "parent.png"
+            child_path = root / "child.png"
+            parent = Image.new("RGB", (460, 210), "white")
+            parent_draw = ImageDraw.Draw(parent)
+            parent_draw.text((18, 18), "07.", fill="black")
+            parent_draw.text((58, 18), "Halle el valor de x.", fill="black")
+            parent_draw.text((24, 92), "A) 10        B) 20        C) 30", fill="black")
+            parent_draw.text((24, 124), "D) 40        E) 50", fill="black")
+            parent.save(parent_path)
+            child = Image.new("RGB", (460, 160), "white")
+            child_draw = ImageDraw.Draw(child)
+            child_draw.text((24, 64), "A) 1        B) 2        C) 3", fill="black")
+            child_draw.text((24, 96), "D) 4        E) 5", fill="black")
+            child.save(child_path)
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="r1",
+                        crop_id="r1",
+                        crop_path=str(parent_path),
+                        source={"page_number": 1, "source_order": 1, "bbox_px": [10, 10, 400, 220]},
+                    ),
+                    StagingProblemRecord(
+                        record_id="r2",
+                        crop_id="r2",
+                        crop_path=str(child_path),
+                        source={"page_number": 1, "source_order": 2, "bbox_px": [10, 230, 400, 390]},
+                    ),
+                ]
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            def fake_aux_ocr(record, cache=None):
+                return {
+                    "available": True,
+                    "starts_problem": record.record_id == "r1",
+                    "has_options": True,
+                    "complete_options": True,
+                    "option_labels": ["A", "B", "C", "D", "E"],
+                }
+
+            with patch.dict(os.environ, {"PDF_FACTORY_CONTINUITY_DETECTOR": "0"}, clear=False):
+                with patch("modulos.instance_factory.pipeline._auxiliary_continuity_ocr_features", fake_aux_ocr):
+                    self.assertEqual(service.detect_continuation_candidates(min_confidence=0.1), [])
+
+    def test_visual_continuation_scoring_ignores_raw_ocr_marker_when_geometry_fails(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent_path = root / "parent.png"
+            child_path = root / "child.png"
+            Image.new("RGB", (300, 120), "white").save(parent_path)
+            Image.new("RGB", (300, 120), "white").save(child_path)
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="r1",
+                        crop_id="r1",
+                        crop_path=str(parent_path),
+                        source={"page_number": 1, "source_order": 1, "bbox_px": [10, 10, 250, 130]},
+                        raw_ocr="<01.> Texto principal",
+                    ),
+                    StagingProblemRecord(
+                        record_id="r2",
+                        crop_id="r2",
+                        crop_path=str(child_path),
+                        source={"page_number": 3, "source_order": 2, "bbox_px": [10, 10, 250, 130]},
+                        raw_ocr="[CONT.] A) 1 B) 2 C) 3 D) 4 E) 5",
+                    ),
+                ]
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            with patch.dict(os.environ, {"PDF_FACTORY_CONTINUITY_DETECTOR": "0"}, clear=False):
+                self.assertEqual(service.detect_continuation_candidates(min_confidence=0.1), [])
+
+    def test_detector_subboxes_drive_continuation_candidate_before_ocr(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent_path = root / "parent.png"
+            child_path = root / "child.png"
+            next_path = root / "next.png"
+            Image.new("RGB", (460, 170), "white").save(parent_path)
+            Image.new("RGB", (460, 150), "white").save(child_path)
+            Image.new("RGB", (460, 180), "white").save(next_path)
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="r1",
+                        crop_id="r1",
+                        crop_path=str(parent_path),
+                        source={"page_number": 1, "source_order": 1, "bbox_px": [10, 10, 400, 600]},
+                    ),
+                    StagingProblemRecord(
+                        record_id="r2",
+                        crop_id="r2",
+                        crop_path=str(child_path),
+                        source={"page_number": 1, "source_order": 2, "bbox_px": [12, 610, 398, 760]},
+                    ),
+                    StagingProblemRecord(
+                        record_id="r3",
+                        crop_id="r3",
+                        crop_path=str(next_path),
+                        source={"page_number": 1, "source_order": 3, "bbox_px": [10, 780, 400, 940]},
+                    ),
+                ]
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            def fake_detector(record, cache=None):
+                if record.record_id == "r1":
+                    return {
+                        "available": True,
+                        "subbox_detections_total": 1,
+                        "has_problem_number": True,
+                        "has_answer_block": False,
+                        "complete_problem": False,
+                        "counts": {"problem": 1, "problem_number": 1, "answer_block": 0},
+                    }
+                if record.record_id == "r2":
+                    return {
+                        "available": True,
+                        "subbox_detections_total": 1,
+                        "has_problem_number": False,
+                        "has_answer_block": True,
+                        "complete_problem": False,
+                        "counts": {"problem": 0, "problem_number": 0, "answer_block": 1},
+                    }
+                return {
+                    "available": True,
+                    "subbox_detections_total": 2,
+                    "has_problem_number": True,
+                    "has_answer_block": True,
+                    "complete_problem": True,
+                    "counts": {"problem": 1, "problem_number": 1, "answer_block": 1},
+                }
+
+            with patch("modulos.instance_factory.pipeline._continuity_detector_features", fake_detector):
+                candidates = service.detect_continuation_candidates(min_confidence=0.35)
+
+            self.assertEqual(candidates[0]["parent_record_id"], "r1")
+            self.assertEqual(candidates[0]["continuation_record_id"], "r2")
+            self.assertEqual(candidates[0]["recommendation"], "merge")
+            self.assertTrue(candidates[0]["features"]["detector_confirms_split"])
+            self.assertTrue(candidates[0]["features"]["detector_available"])
+
+    def test_detector_subboxes_allow_lateral_continuation_without_visual_heuristic(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent_path = root / "parent.png"
+            child_path = root / "child.png"
+            Image.new("RGB", (460, 420), "white").save(parent_path)
+            Image.new("RGB", (460, 120), "white").save(child_path)
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="r1",
+                        crop_id="r1",
+                        crop_path=str(parent_path),
+                        source={
+                            "page_number": 1,
+                            "source_order": 1,
+                            "bbox_px": [100, 277, 600, 1445],
+                            "continuity_subboxes_checked": True,
+                            "continuity_subboxes": [{"class_name": "problem_number", "conf": 1.0}],
+                        },
+                    ),
+                    StagingProblemRecord(
+                        record_id="r2",
+                        crop_id="r2",
+                        crop_path=str(child_path),
+                        source={
+                            "page_number": 1,
+                            "source_order": 2,
+                            "bbox_px": [900, 296, 1300, 499],
+                            "continuity_subboxes_checked": True,
+                            "continuity_subboxes": [{"class_name": "answer_block", "conf": 1.0}],
+                        },
+                    ),
+                ]
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            candidates = service.detect_continuation_candidates(min_confidence=0.35)
+
+            self.assertEqual(candidates[0]["parent_record_id"], "r1")
+            self.assertEqual(candidates[0]["continuation_record_id"], "r2")
+            self.assertEqual(candidates[0]["recommendation"], "merge")
+            self.assertTrue(candidates[0]["features"]["split_multiple_choice_signal"])
+            self.assertTrue(candidates[0]["features"]["detector_confirms_split"])
+            self.assertFalse(candidates[0]["features"]["visual_confirms_split"])
+            self.assertIn("detector v3 confirma", " ".join(candidates[0]["reasons"]))
+
+    def test_page_subboxes_drive_continuation_candidate_without_crop_yolo(self) -> None:
+        from PIL import Image
+
+        class FakeGolden:
+            def __init__(self, page):
+                self.page = page
+
+            def load_instance(self, _name):
+                return [self.page]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            page_path = root / "page.png"
+            parent_path = root / "parent.png"
+            child_path = root / "child.png"
+            Image.new("RGB", (500, 500), "white").save(page_path)
+            Image.new("RGB", (390, 150), "white").save(parent_path)
+            Image.new("RGB", (390, 90), "white").save(child_path)
+            page = ProblemPageRecord(
+                "p1",
+                str(root / "book.pdf"),
+                1,
+                page_path,
+                [(10, 10, 400, 160), (10, 170, 400, 260)],
+                detector_detections=[
+                    {"bbox_px": [18, 18, 60, 42], "class_name": "problem_number", "conf": 0.9},
+                    {"bbox_px": [28, 205, 360, 245], "class_name": "answer_block", "conf": 0.9},
+                ],
+            )
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="r1",
+                        crop_id="r1",
+                        crop_path=str(parent_path),
+                        source={"page_number": 1, "source_record_id": "p1", "source_order": 1, "bbox_px": [10, 10, 400, 160]},
+                    ),
+                    StagingProblemRecord(
+                        record_id="r2",
+                        crop_id="r2",
+                        crop_path=str(child_path),
+                        source={"page_number": 1, "source_record_id": "p1", "source_order": 2, "bbox_px": [10, 170, 400, 260]},
+                    ),
+                ]
+            )
+            service = InstancePdfPipelineService(context, golden_controller=FakeGolden(page), staging_store=store)
+
+            candidates = service.detect_continuation_candidates(min_confidence=0.1)
+
+            self.assertEqual(len(candidates), 1)
+            self.assertEqual(candidates[0]["parent_record_id"], "r1")
+            self.assertEqual(candidates[0]["continuation_record_id"], "r2")
+            self.assertEqual(candidates[0]["recommendation"], "merge")
+            self.assertTrue(candidates[0]["features"]["detector_confirms_split"])
+            self.assertEqual(candidates[0]["features"]["parent_detector"]["source"], "page_detector_subboxes")
+            self.assertEqual(candidates[0]["features"]["continuation_detector"]["source"], "page_detector_subboxes")
+
+    def test_detector_subboxes_override_visual_false_options_for_cross_page_continuation(self) -> None:
+        from PIL import Image, ImageDraw
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            page1_path = root / "page1.png"
+            page2_path = root / "page2.png"
+            parent_path = root / "parent.png"
+            child_path = root / "child.png"
+
+            Image.new("RGB", (2480, 3509), "white").save(page1_path)
+            Image.new("RGB", (2480, 3509), "white").save(page2_path)
+
+            parent = Image.new("RGB", (460, 320), "white")
+            draw = ImageDraw.Draw(parent)
+            draw.text((20, 18), "296.", fill="black")
+            draw.text((70, 18), "Se tiene una region sombreada.", fill="black")
+            for x1, x2 in ((30, 110), (180, 260), (330, 410)):
+                draw.rectangle((x1, 268, x2, 288), fill="black")
+            parent.save(parent_path)
+
+            child = Image.new("RGB", (460, 110), "white")
+            draw = ImageDraw.Draw(child)
+            draw.text((20, 18), "A) 10     B) 20     C) 30", fill="black")
+            draw.text((20, 52), "D) 35     E) 40", fill="black")
+            child.save(child_path)
+
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="r1",
+                        crop_id="r1",
+                        crop_path=str(parent_path),
+                        source={
+                            "page_number": 1,
+                            "source_order": 5,
+                            "bbox_px": [1290, 2356, 2322, 3111],
+                            "page_image": str(page1_path),
+                            "continuity_subboxes_checked": True,
+                            "continuity_subboxes": [
+                                {"bbox_px": [1312, 2377, 1751, 2469], "class_name": "problem_number", "conf": 0.84},
+                            ],
+                        },
+                    ),
+                    StagingProblemRecord(
+                        record_id="r2",
+                        crop_id="r2",
+                        crop_path=str(child_path),
+                        source={
+                            "page_number": 2,
+                            "source_order": 6,
+                            "bbox_px": [139, 308, 1134, 526],
+                            "page_image": str(page2_path),
+                            "continuity_subboxes_checked": True,
+                            "continuity_subboxes": [
+                                {"bbox_px": [153, 323, 1116, 508], "class_name": "answer_block", "conf": 1.0},
+                            ],
+                        },
+                    ),
+                ]
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            with patch.dict(os.environ, {"PDF_FACTORY_CONTINUITY_DETECTOR": "0"}, clear=False):
+                candidates = service.scan_continuation_candidates(min_confidence=0.1)["candidates"]
+
+            self.assertEqual(candidates[0]["parent_record_id"], "r1")
+            self.assertEqual(candidates[0]["continuation_record_id"], "r2")
+            self.assertEqual(candidates[0]["recommendation"], "merge")
+            self.assertTrue(candidates[0]["features"]["detector_confirms_split"])
+
+    def test_continuation_scan_uses_global_source_order_before_page_order(self) -> None:
+        from PIL import Image
+
+        class FakeGolden:
+            def __init__(self, pages):
+                self.pages = pages
+
+            def load_instance(self, _name):
+                return list(self.pages)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            page1_path = root / "page1.png"
+            page2_path = root / "page2.png"
+            parent_path = root / "parent.png"
+            continuation_path = root / "continuation.png"
+            unrelated_path = root / "unrelated.png"
+            Image.new("RGB", (1000, 1000), "white").save(page1_path)
+            Image.new("RGB", (1000, 1000), "white").save(page2_path)
+            Image.new("RGB", (390, 150), "white").save(parent_path)
+            Image.new("RGB", (390, 110), "white").save(continuation_path)
+            Image.new("RGB", (390, 200), "white").save(unrelated_path)
+            page1 = ProblemPageRecord(
+                "p1",
+                str(root / "book.pdf"),
+                1,
+                page1_path,
+                [(10, 800, 400, 950), (10, 100, 400, 300)],
+                detector_detections=[
+                    {"bbox_px": [10, 800, 400, 950], "class_name": "problem", "conf": 0.95},
+                    {"bbox_px": [18, 810, 70, 842], "class_name": "problem_number", "conf": 0.92},
+                    {"bbox_px": [10, 100, 400, 300], "class_name": "problem", "conf": 0.95},
+                    {"bbox_px": [18, 108, 70, 140], "class_name": "problem_number", "conf": 0.92},
+                    {"bbox_px": [35, 245, 370, 285], "class_name": "answer_block", "conf": 0.92},
+                ],
+            )
+            page2 = ProblemPageRecord(
+                "p2",
+                str(root / "book.pdf"),
+                2,
+                page2_path,
+                [(10, 10, 400, 120)],
+                detector_detections=[
+                    {"bbox_px": [10, 10, 400, 120], "class_name": "problem", "conf": 0.95},
+                    {"bbox_px": [35, 60, 370, 105], "class_name": "answer_block", "conf": 0.92},
+                ],
+            )
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="parent",
+                        crop_id="parent",
+                        crop_path=str(parent_path),
+                        source={
+                            "page_number": 1,
+                            "page_image": str(page1_path),
+                            "source_record_id": "p1",
+                            "source_order": 44,
+                            "bbox_px": [10, 800, 400, 950],
+                        },
+                    ),
+                    StagingProblemRecord(
+                        record_id="unrelated",
+                        crop_id="unrelated",
+                        crop_path=str(unrelated_path),
+                        source={
+                            "page_number": 1,
+                            "page_image": str(page1_path),
+                            "source_record_id": "p1",
+                            "source_order": 131,
+                            "bbox_px": [10, 100, 400, 300],
+                        },
+                    ),
+                    StagingProblemRecord(
+                        record_id="continuation",
+                        crop_id="continuation",
+                        crop_path=str(continuation_path),
+                        source={
+                            "page_number": 2,
+                            "page_image": str(page2_path),
+                            "source_record_id": "p2",
+                            "source_order": 45,
+                            "bbox_px": [10, 10, 400, 120],
+                        },
+                    ),
+                ]
+            )
+            service = InstancePdfPipelineService(context, golden_controller=FakeGolden([page1, page2]), staging_store=store)
+
+            scan = service.scan_continuation_candidates(min_confidence=0.1)
+
+            self.assertEqual(len(scan["candidates"]), 1)
+            self.assertEqual(scan["candidates"][0]["parent_record_id"], "parent")
+            self.assertEqual(scan["candidates"][0]["continuation_record_id"], "continuation")
+            self.assertEqual(scan["candidates"][0]["features"]["order_gap"], 1)
+            self.assertEqual(scan["candidates"][0]["recommendation"], "merge")
+
+    def test_continuation_scan_uses_layout_order_when_box_order_is_wrong(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent_path = root / "parent.png"
+            child_path = root / "child.png"
+            complete_path = root / "complete.png"
+            Image.new("RGB", (390, 160), "white").save(parent_path)
+            Image.new("RGB", (390, 120), "white").save(child_path)
+            Image.new("RGB", (390, 260), "white").save(complete_path)
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="child_options",
+                        crop_id="child_options",
+                        crop_path=str(child_path),
+                        source={
+                            "page_number": 1,
+                            "source_order": 1,
+                            "bbox_px": [450, 100, 850, 220],
+                            "continuity_subboxes_checked": True,
+                            "continuity_subboxes": [{"class_name": "answer_block", "conf": 1.0}],
+                        },
+                    ),
+                    StagingProblemRecord(
+                        record_id="complete_problem",
+                        crop_id="complete_problem",
+                        crop_path=str(complete_path),
+                        source={
+                            "page_number": 1,
+                            "source_order": 2,
+                            "bbox_px": [10, 100, 400, 360],
+                            "continuity_subboxes_checked": True,
+                            "continuity_subboxes": [
+                                {"class_name": "problem_number", "conf": 1.0},
+                                {"class_name": "answer_block", "conf": 1.0},
+                            ],
+                        },
+                    ),
+                    StagingProblemRecord(
+                        record_id="parent_number",
+                        crop_id="parent_number",
+                        crop_path=str(parent_path),
+                        source={
+                            "page_number": 1,
+                            "source_order": 3,
+                            "bbox_px": [10, 620, 400, 780],
+                            "continuity_subboxes_checked": True,
+                            "continuity_subboxes": [{"class_name": "problem_number", "conf": 1.0}],
+                        },
+                    ),
+                ]
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            scan = service.scan_continuation_candidates(min_confidence=0.1)
+
+            self.assertEqual(len(scan["candidates"]), 1)
+            self.assertEqual(scan["candidates"][0]["parent_record_id"], "parent_number")
+            self.assertEqual(scan["candidates"][0]["continuation_record_id"], "child_options")
+            self.assertEqual(scan["candidates"][0]["features"]["order_basis"], "layout")
+            self.assertEqual(scan["candidates"][0]["features"]["source_order_gap"], -2)
+            self.assertTrue(scan["candidates"][0]["features"]["split_multiple_choice_signal"])
+            self.assertEqual(scan["candidates"][0]["recommendation"], "merge")
+
+    def test_continuation_scan_ignores_number_and_answer_subbox_records(self) -> None:
+        from PIL import Image
+
+        class FakeGolden:
+            def __init__(self, page):
+                self.page = page
+
+            def load_instance(self, _name):
+                return [self.page]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            page_path = root / "page.png"
+            problem_path = root / "problem.png"
+            number_path = root / "number.png"
+            answer_path = root / "answer.png"
+            Image.new("RGB", (500, 500), "white").save(page_path)
+            Image.new("RGB", (390, 300), "white").save(problem_path)
+            Image.new("RGB", (80, 40), "white").save(number_path)
+            Image.new("RGB", (340, 60), "white").save(answer_path)
+            page = ProblemPageRecord(
+                "p1",
+                str(root / "book.pdf"),
+                1,
+                page_path,
+                [(10, 10, 400, 310)],
+                detector_detections=[
+                    {"bbox_px": [10, 10, 400, 310], "class_name": "problem", "conf": 0.95},
+                    {"bbox_px": [18, 18, 60, 42], "class_name": "problem_number", "conf": 0.9},
+                    {"bbox_px": [28, 245, 360, 295], "class_name": "answer_block", "conf": 0.9},
+                ],
+            )
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="problem",
+                        crop_id="problem",
+                        crop_path=str(problem_path),
+                        source={"page_number": 1, "source_record_id": "p1", "source_order": 1, "bbox_px": [10, 10, 400, 310]},
+                    ),
+                    StagingProblemRecord(
+                        record_id="number",
+                        crop_id="number",
+                        crop_path=str(number_path),
+                        source={"page_number": 1, "source_record_id": "p1", "source_order": 2, "bbox_px": [18, 18, 60, 42]},
+                    ),
+                    StagingProblemRecord(
+                        record_id="answer",
+                        crop_id="answer",
+                        crop_path=str(answer_path),
+                        source={"page_number": 1, "source_record_id": "p1", "source_order": 3, "bbox_px": [28, 245, 360, 295]},
+                    ),
+                ]
+            )
+            service = InstancePdfPipelineService(context, golden_controller=FakeGolden(page), staging_store=store)
+
+            scan = service.scan_continuation_candidates(min_confidence=0.1)
+
+            self.assertEqual(scan["candidates"], [])
+            self.assertEqual(scan["summary"]["total_crops"], 1)
+
+    def test_continuation_scan_ignores_records_without_crop_file(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent_path = root / "parent.png"
+            child_path = root / "child.png"
+            Image.new("RGB", (390, 150), "white").save(parent_path)
+            Image.new("RGB", (390, 100), "white").save(child_path)
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="parent",
+                        crop_id="parent",
+                        crop_path=str(parent_path),
+                        source={"page_number": 1, "source_order": 1, "bbox_px": [10, 10, 400, 160]},
+                    ),
+                    StagingProblemRecord(
+                        record_id="phantom",
+                        crop_id="phantom",
+                        crop_path="",
+                        source={"page_number": 1, "source_order": 2, "bbox_px": [10, 170, 400, 260]},
+                    ),
+                    StagingProblemRecord(
+                        record_id="child",
+                        crop_id="child",
+                        crop_path=str(child_path),
+                        source={"page_number": 1, "source_order": 3, "bbox_px": [10, 270, 400, 370]},
+                    ),
+                ]
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            scan = service.scan_continuation_candidates(min_confidence=0.1)
+
+            self.assertEqual(scan["summary"]["total_crops"], 2)
+            self.assertNotIn("phantom", {row["parent_record_id"] for row in scan["candidates"]})
+            self.assertNotIn("phantom", {row["continuation_record_id"] for row in scan["candidates"]})
+
+    def test_page_subboxes_reject_child_with_own_number_and_options(self) -> None:
+        from PIL import Image
+
+        class FakeGolden:
+            def __init__(self, page):
+                self.page = page
+
+            def load_instance(self, _name):
+                return [self.page]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            page_path = root / "page.png"
+            parent_path = root / "parent.png"
+            child_path = root / "child.png"
+            Image.new("RGB", (500, 500), "white").save(page_path)
+            Image.new("RGB", (390, 150), "white").save(parent_path)
+            Image.new("RGB", (390, 160), "white").save(child_path)
+            page = ProblemPageRecord(
+                "p1",
+                str(root / "book.pdf"),
+                1,
+                page_path,
+                [(10, 10, 400, 160), (10, 170, 400, 330)],
+                detector_detections=[
+                    {"bbox_px": [18, 18, 60, 42], "class_name": "problem_number", "conf": 0.9},
+                    {"bbox_px": [18, 178, 60, 202], "class_name": "problem_number", "conf": 0.9},
+                    {"bbox_px": [28, 260, 360, 310], "class_name": "answer_block", "conf": 0.9},
+                ],
+            )
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="r1",
+                        crop_id="r1",
+                        crop_path=str(parent_path),
+                        source={"page_number": 1, "source_record_id": "p1", "source_order": 1, "bbox_px": [10, 10, 400, 160]},
+                    ),
+                    StagingProblemRecord(
+                        record_id="r2",
+                        crop_id="r2",
+                        crop_path=str(child_path),
+                        source={"page_number": 1, "source_record_id": "p1", "source_order": 2, "bbox_px": [10, 170, 400, 330]},
+                    ),
+                ]
+            )
+            service = InstancePdfPipelineService(context, golden_controller=FakeGolden(page), staging_store=store)
+
+            self.assertEqual(service.detect_continuation_candidates(min_confidence=0.1), [])
+
+    def test_detector_rejects_child_with_own_problem_number(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent_path = root / "parent.png"
+            child_path = root / "child.png"
+            Image.new("RGB", (460, 170), "white").save(parent_path)
+            Image.new("RGB", (460, 150), "white").save(child_path)
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="r1",
+                        crop_id="r1",
+                        crop_path=str(parent_path),
+                        source={"page_number": 1, "source_order": 1, "bbox_px": [10, 10, 400, 600]},
+                    ),
+                    StagingProblemRecord(
+                        record_id="r2",
+                        crop_id="r2",
+                        crop_path=str(child_path),
+                        source={"page_number": 1, "source_order": 2, "bbox_px": [12, 610, 398, 760]},
+                    ),
+                ]
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            def fake_detector(record, cache=None):
+                return {
+                    "available": True,
+                    "subbox_detections_total": 2,
+                    "has_problem_number": True,
+                    "has_answer_block": record.record_id == "r2",
+                    "complete_problem": record.record_id == "r2",
+                    "counts": {"problem": 1, "problem_number": 1, "answer_block": int(record.record_id == "r2")},
+                }
+
+            with patch("modulos.instance_factory.pipeline._continuity_detector_features", fake_detector):
+                self.assertEqual(service.detect_continuation_candidates(min_confidence=0.1), [])
+
+    def test_detector_rejects_number_only_parent_when_child_has_number_and_options(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent_path = root / "parent.png"
+            child_path = root / "child.png"
+            Image.new("RGB", (460, 120), "white").save(parent_path)
+            Image.new("RGB", (460, 180), "white").save(child_path)
+            context = InstancePipelineContext(book_code="ALG01", instance_type="s01", pdf_path=str(root / "book.pdf"))
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_many(
+                [
+                    StagingProblemRecord(
+                        record_id="r1",
+                        crop_id="r1",
+                        crop_path=str(parent_path),
+                        source={"page_number": 1, "source_order": 1, "bbox_px": [10, 10, 400, 130]},
+                    ),
+                    StagingProblemRecord(
+                        record_id="r2",
+                        crop_id="r2",
+                        crop_path=str(child_path),
+                        source={"page_number": 1, "source_order": 2, "bbox_px": [12, 135, 398, 315]},
+                    ),
+                ]
+            )
+            service = InstancePdfPipelineService(context, staging_store=store)
+
+            def fake_detector(record, cache=None):
+                if record.record_id == "r1":
+                    return {
+                        "available": True,
+                        "subbox_detections_total": 1,
+                        "has_problem_number": True,
+                        "has_answer_block": False,
+                        "complete_problem": False,
+                        "counts": {"problem": 1, "problem_number": 1, "answer_block": 0},
+                    }
+                return {
+                    "available": True,
+                    "subbox_detections_total": 2,
+                    "has_problem_number": True,
+                    "has_answer_block": True,
+                    "complete_problem": True,
+                    "counts": {"problem": 1, "problem_number": 1, "answer_block": 1},
+                }
+
+            with patch("modulos.instance_factory.pipeline._continuity_detector_features", fake_detector):
+                self.assertEqual(service.detect_continuation_candidates(min_confidence=0.1), [])
 
     def test_cold_start_503_retry_keeps_ocr_request_alive(self) -> None:
         class Extractor:
