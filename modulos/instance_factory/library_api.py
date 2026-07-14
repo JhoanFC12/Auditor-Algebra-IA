@@ -147,12 +147,14 @@ class LibraryWebApi:
         if len(parts) == 7 and parts[:3] == ["api", "library", "concepts"] and parts[4] == "problems" and parts[6] == "review":
             return {"POST"}
         if len(parts) == 4 and parts[:3] == ["api", "library", "books"]:
-            return {"GET", "POST"}
+            return {"GET", "POST", "DELETE"}
         if len(parts) == 5 and parts[:3] == ["api", "library", "books"] and parts[4] == "instances":
             return {"POST"}
         if len(parts) == 5 and parts[:3] == ["api", "library", "books"] and parts[4] == "state":
             return {"POST"}
         if len(parts) == 5 and parts[:3] == ["api", "library", "instances"] and parts[4] == "state":
+            return {"POST"}
+        if len(parts) == 5 and parts[:3] == ["api", "library", "instances"] and parts[4] == "page-selection":
             return {"POST"}
         if len(parts) == 5 and parts[:3] == ["api", "library", "instances"] and parts[4] == "factory":
             return {"POST"}
@@ -233,6 +235,8 @@ class LibraryWebApi:
             book_id = _int_id(parts[3], "book_id")
             if method == "GET":
                 return self._book_detail(query, book_id)
+            if method == "DELETE":
+                return self._delete_book(query, payload, book_id)
             return self._update_book(query, payload, book_id)
         if len(parts) == 5 and parts[:3] == ["api", "library", "books"] and parts[4] == "instances":
             return self._create_instance(query, payload, _int_id(parts[3], "book_id"))
@@ -240,6 +244,8 @@ class LibraryWebApi:
             return self._update_book_state(query, payload, _int_id(parts[3], "book_id"))
         if len(parts) == 5 and parts[:3] == ["api", "library", "instances"] and parts[4] == "state":
             return self._update_instance_state(payload, _int_id(parts[3], "instance_id"))
+        if len(parts) == 5 and parts[:3] == ["api", "library", "instances"] and parts[4] == "page-selection":
+            return self._update_instance_page_selection(payload, _int_id(parts[3], "instance_id"))
         if len(parts) == 5 and parts[:3] == ["api", "library", "instances"] and parts[4] == "factory":
             return self._prepare_factory(payload, _int_id(parts[3], "instance_id"))
         if len(parts) == 5 and parts[:3] == ["api", "library", "problems"] and parts[4] == "similar":
@@ -410,6 +416,31 @@ class LibraryWebApi:
             "policy": _policy(),
         }
 
+    def _delete_book(self, query: dict[str, list[str]], payload: dict[str, Any], book_id: int) -> dict[str, Any]:
+        db_name = _required_db(query=query, payload=payload)
+        current = self.controller.obtener_libro(db_name, book_id)
+        if not current:
+            raise FileNotFoundError("Libro no encontrado.")
+        title = str(current.get("titulo") or current.get("title") or "").strip()
+        confirmation = str(payload.get("confirmation") or "").strip()
+        if not confirmation or confirmation != title:
+            raise LibraryApiError(
+                "La confirmacion no coincide con el titulo del libro.",
+                status=409,
+                code="book_delete_confirmation_mismatch",
+            )
+        instances = self.controller.listar_instancias_libro(db_name, book_id)
+        self.controller.eliminar_libro(db_name, book_id)
+        return {
+            "schema_version": "library_book_deleted_v1",
+            "db_name": db_name,
+            "book_id": int(book_id),
+            "title": title,
+            "deleted_instances": len(instances),
+            "files_deleted": False,
+            "policy": _policy(),
+        }
+
     def _save_pasted_cover(self, payload: dict[str, Any]) -> dict[str, Any]:
         db_name = _required_db(payload=payload)
         book = self._cover_book_payload(payload, db_name=db_name)
@@ -528,6 +559,87 @@ class LibraryWebApi:
             "db_name": db_name,
             "book_id": book_id,
             "instance_id": instance_id,
+            "instance": updated,
+            "book": self._book_summary(db_name, dict(book)),
+            "policy": _policy(),
+        }
+
+    def _update_instance_page_selection(self, payload: dict[str, Any], instance_id: int) -> dict[str, Any]:
+        db_name = _required_db(payload=payload)
+        book_id = _required_int(payload, "book_id")
+        current = self._instance_by_id(db_name, book_id, instance_id)
+        if current is None:
+            raise FileNotFoundError("Instancia no encontrada.")
+        raw_pages = payload.get("selected_pages")
+        if not isinstance(raw_pages, list):
+            raise ValueError("selected_pages debe ser una lista.")
+        try:
+            page_count = max(0, int(payload.get("page_count") or 0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("page_count debe ser entero.") from exc
+        selected_pages: set[int] = set()
+        for raw_page in raw_pages:
+            try:
+                page = int(raw_page)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("selected_pages solo admite enteros.") from exc
+            if page <= 0 or (page_count and page > page_count):
+                limit = f" entre 1 y {page_count}" if page_count else " mayor que cero"
+                raise ValueError(f"Pagina fuera de rango: {page}; debe ser{limit}.")
+            selected_pages.add(page)
+        ordered_pages = sorted(selected_pages)
+        page_ranges = _page_ranges_from_pages(ordered_pages)
+        range_display = _page_range_display(page_ranges)
+        config_snapshot = _dict_payload(current.get("config_snapshot")) or {}
+        previous_pages = _configured_page_selection(config_snapshot)
+        selection_payload = {
+            "schema_version": "library_instance_page_selection_v1",
+            "selected_pages": ordered_pages,
+            "page_ranges": page_ranges,
+            "page_range_display": range_display,
+            "source": str(payload.get("source") or "web_ui").strip() or "web_ui",
+            "status": "proposed",
+            "review_status": "pending",
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        next_snapshot = {
+            **config_snapshot,
+            "selected_pages": ordered_pages,
+            "page_ranges": page_ranges,
+            "page_range_display": range_display,
+            "page_selection": selection_payload,
+        }
+        previous_selection = _dict_payload(config_snapshot.get("page_selection")) or {}
+        changed = (
+            previous_pages != ordered_pages
+            or previous_selection.get("page_ranges") != page_ranges
+            or str(previous_selection.get("source") or "") != selection_payload["source"]
+            or str(previous_selection.get("status") or "") != "proposed"
+            or str(previous_selection.get("review_status") or "") != "pending"
+        )
+        if changed:
+            merged = {**current, "libro_id": book_id, "config_snapshot": next_snapshot}
+            self.controller.actualizar_instancia(
+                db_name,
+                instance_id,
+                _instance_update_input(asdict(_instance_input(merged, book_id=book_id))),
+            )
+            self._factory_runtime_by_instance.pop((db_name, int(book_id), int(instance_id)), None)
+        book = self.controller.obtener_libro(db_name, book_id) or {"id": book_id}
+        updated = self._instance_by_id(db_name, book_id, instance_id) or {
+            **current,
+            "config_snapshot": next_snapshot,
+        }
+        updated = self._lightweight_instance(db_name, dict(book), dict(updated))
+        return {
+            "schema_version": "library_instance_page_selection_updated_v1",
+            "db_name": db_name,
+            "book_id": book_id,
+            "instance_id": instance_id,
+            "changed": changed,
+            "selected_pages": ordered_pages,
+            "selected_pages_count": len(ordered_pages),
+            "page_ranges": page_ranges,
             "instance": updated,
             "book": self._book_summary(db_name, dict(book)),
             "policy": _policy(),
@@ -1158,6 +1270,65 @@ def _dict_payload(value: Any) -> dict[str, Any] | None:
     if isinstance(value, dict):
         return dict(value)
     return None
+
+
+def _configured_page_selection(config_snapshot: dict[str, Any]) -> list[int]:
+    page_selection = _dict_payload(config_snapshot.get("page_selection")) or {}
+    raw_pages = page_selection.get("selected_pages")
+    if not isinstance(raw_pages, list):
+        raw_pages = config_snapshot.get("selected_pages")
+    pages: set[int] = set()
+    if isinstance(raw_pages, list):
+        for raw_page in raw_pages:
+            try:
+                page = int(raw_page)
+            except (TypeError, ValueError):
+                continue
+            if page > 0:
+                pages.add(page)
+    if pages:
+        return sorted(pages)
+    raw_ranges = page_selection.get("page_ranges")
+    if not isinstance(raw_ranges, list):
+        raw_ranges = config_snapshot.get("page_ranges")
+    if not isinstance(raw_ranges, list):
+        return []
+    for item in raw_ranges:
+        if not isinstance(item, dict):
+            continue
+        try:
+            start = int(item.get("start_page") or item.get("start") or 0)
+            end = int(item.get("end_page") or item.get("end") or start)
+        except (TypeError, ValueError):
+            continue
+        if start > 0 and end >= start:
+            pages.update(range(start, end + 1))
+    return sorted(pages)
+
+
+def _page_ranges_from_pages(pages: list[int]) -> list[dict[str, int]]:
+    if not pages:
+        return []
+    ranges: list[dict[str, int]] = []
+    start = previous = int(pages[0])
+    for raw_page in pages[1:]:
+        page = int(raw_page)
+        if page == previous + 1:
+            previous = page
+            continue
+        ranges.append({"start_page": start, "end_page": previous})
+        start = previous = page
+    ranges.append({"start_page": start, "end_page": previous})
+    return ranges
+
+
+def _page_range_display(page_ranges: list[dict[str, int]]) -> str:
+    parts = []
+    for item in page_ranges:
+        start = int(item.get("start_page") or 0)
+        end = int(item.get("end_page") or start)
+        parts.append(str(start) if start == end else f"{start}-{end}")
+    return ",".join(parts)
 
 
 def _apply_instance_catalog_metadata(row: dict[str, Any]) -> None:

@@ -113,6 +113,11 @@ class InstancePipelineContext:
     db_name: str = ""
     book_id: int | None = None
     staging_root_override: str = ""
+    instance_id: int | None = None
+    selected_pages: list[int] = field(default_factory=list)
+    selected_page_ranges: list[dict[str, int]] = field(default_factory=list)
+    page_selection_review_status: str = ""
+    page_selection_configured: bool = False
 
     @classmethod
     def from_library_instance(
@@ -135,6 +140,14 @@ class InstancePipelineContext:
         pdf_path = str(book.get("pdf_path") or book.get("pdf") or "").strip()
         resolved_pdf = remap_legacy_drive_path(Path(pdf_path).expanduser(), prefer_existing=True) if pdf_path else Path("")
         raw_session = session_path if session_path is not None else instance.get("session_path")
+        config_snapshot = instance.get("config_snapshot")
+        if not isinstance(config_snapshot, dict):
+            config_snapshot = {}
+        page_selection = config_snapshot.get("page_selection")
+        if not isinstance(page_selection, dict):
+            page_selection = {}
+        selected_pages = _configured_selected_pages(config_snapshot, page_selection)
+        selected_page_ranges = _configured_page_ranges(config_snapshot, page_selection, selected_pages)
         return cls(
             book_code=book_code,
             instance_type=instance_type,
@@ -144,6 +157,19 @@ class InstancePipelineContext:
             session_path=str(raw_session or "").strip(),
             db_name=str(db_name or "").strip(),
             book_id=int(book.get("id") or 0) or None,
+            instance_id=int(instance.get("id") or instance.get("instance_id") or 0) or None,
+            selected_pages=selected_pages,
+            selected_page_ranges=selected_page_ranges,
+            page_selection_review_status=str(
+                page_selection.get("review_status")
+                or config_snapshot.get("review_status")
+                or ""
+            ).strip(),
+            page_selection_configured=bool(
+                page_selection
+                or "selected_pages" in config_snapshot
+                or "page_ranges" in config_snapshot
+            ),
         )
 
     @property
@@ -192,7 +218,83 @@ class InstancePipelineContext:
             "db_name": self.db_name,
             "book_id": self.book_id,
             "staging_root_override": self.staging_root_override,
+            "instance_id": self.instance_id,
+            "selected_pages": list(self.selected_pages),
+            "selected_page_ranges": [dict(item) for item in self.selected_page_ranges],
+            "page_selection_review_status": self.page_selection_review_status,
+            "page_selection_configured": bool(self.page_selection_configured),
         }
+
+
+def _configured_selected_pages(
+    config_snapshot: dict[str, Any],
+    page_selection: dict[str, Any],
+) -> list[int]:
+    raw_pages = page_selection.get("selected_pages")
+    if not isinstance(raw_pages, list):
+        raw_pages = config_snapshot.get("selected_pages")
+    pages: set[int] = set()
+    if isinstance(raw_pages, list):
+        for raw_page in raw_pages:
+            try:
+                page = int(raw_page)
+            except (TypeError, ValueError):
+                continue
+            if page > 0:
+                pages.add(page)
+    if pages:
+        return sorted(pages)
+
+    raw_ranges = page_selection.get("page_ranges")
+    if not isinstance(raw_ranges, list):
+        raw_ranges = config_snapshot.get("page_ranges")
+    if not isinstance(raw_ranges, list):
+        return []
+    for item in raw_ranges:
+        if not isinstance(item, dict):
+            continue
+        try:
+            start = int(item.get("start_page") or item.get("start") or 0)
+            end = int(item.get("end_page") or item.get("end") or start)
+        except (TypeError, ValueError):
+            continue
+        if start <= 0 or end < start:
+            continue
+        pages.update(range(start, end + 1))
+    return sorted(pages)
+
+
+def _configured_page_ranges(
+    config_snapshot: dict[str, Any],
+    page_selection: dict[str, Any],
+    selected_pages: list[int],
+) -> list[dict[str, int]]:
+    raw_ranges = page_selection.get("page_ranges")
+    if not isinstance(raw_ranges, list):
+        raw_ranges = config_snapshot.get("page_ranges")
+    ranges: list[dict[str, int]] = []
+    if isinstance(raw_ranges, list):
+        for item in raw_ranges:
+            if not isinstance(item, dict):
+                continue
+            try:
+                start = int(item.get("start_page") or item.get("start") or 0)
+                end = int(item.get("end_page") or item.get("end") or start)
+            except (TypeError, ValueError):
+                continue
+            if start > 0 and end >= start:
+                ranges.append({"start_page": start, "end_page": end})
+    if ranges or not selected_pages:
+        return ranges
+    start = previous = selected_pages[0]
+    for page in selected_pages[1:]:
+        if page == previous + 1:
+            previous = page
+            continue
+        ranges.append({"start_page": start, "end_page": previous})
+        start = previous = page
+    ranges.append({"start_page": start, "end_page": previous})
+    return ranges
 
 
 @dataclass

@@ -1905,7 +1905,18 @@ class InstanceFactoryStagingTests(unittest.TestCase):
             "pdf_path": "E:/Banco/libro.pdf",
             "workspace_dir": "E:/Banco/ALG01",
         }
-        item = {"tipo": "S05", "session_path": "E:/Banco/ALG01/sessions/S05.json"}
+        item = {
+            "id": 77,
+            "tipo": "S05",
+            "session_path": "E:/Banco/ALG01/sessions/S05.json",
+            "config_snapshot": {
+                "page_ranges": [
+                    {"start_page": 3, "end_page": 5},
+                    {"start_page": 9, "end_page": 9},
+                ],
+                "page_selection": {"review_status": "pending"},
+            },
+        }
 
         context = InstancePipelineContext.from_library_instance(book, item, db_name="demo")
 
@@ -1914,6 +1925,17 @@ class InstanceFactoryStagingTests(unittest.TestCase):
         self.assertEqual(context.project_name, "Algebra")
         self.assertEqual(context.db_name, "demo")
         self.assertEqual(context.book_id, 42)
+        self.assertEqual(context.instance_id, 77)
+        self.assertEqual(context.selected_pages, [3, 4, 5, 9])
+        self.assertEqual(
+            context.selected_page_ranges,
+            [
+                {"start_page": 3, "end_page": 5},
+                {"start_page": 9, "end_page": 9},
+            ],
+        )
+        self.assertTrue(context.page_selection_configured)
+        self.assertEqual(context.page_selection_review_status, "pending")
         self.assertTrue(context.pdf_path.endswith("libro.pdf"))
 
     def test_page_box_change_invalidates_downstream_staging_records(self) -> None:

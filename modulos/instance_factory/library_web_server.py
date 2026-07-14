@@ -161,6 +161,9 @@ class LibraryWebRuntime:
             def do_POST(self) -> None:  # noqa: N802
                 runtime._handle_request(self, method="POST")
 
+            def do_DELETE(self) -> None:  # noqa: N802
+                runtime._handle_request(self, method="DELETE")
+
             def do_OPTIONS(self) -> None:  # noqa: N802
                 runtime._send_options(self)
 
@@ -239,7 +242,7 @@ class LibraryWebRuntime:
                 self._send_json(handler, result)
                 return
             if path.startswith("/api/library/"):
-                payload = self._read_json(handler) if method == "POST" else {}
+                payload = self._read_json(handler) if method in {"POST", "DELETE"} else {}
                 result = self._dispatch_api(method, path, query, payload)
                 self._send_json(handler, result)
                 return
@@ -1097,7 +1100,7 @@ class LibraryWebRuntime:
     @staticmethod
     def _send_cors_headers(handler: BaseHTTPRequestHandler) -> None:
         handler.send_header("Access-Control-Allow-Origin", "*")
-        handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        handler.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         handler.send_header("Access-Control-Allow-Headers", "Content-Type")
 
     @staticmethod

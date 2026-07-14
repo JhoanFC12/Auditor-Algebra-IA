@@ -270,6 +270,9 @@ class FactoryWebRuntime:
             def do_POST(self) -> None:  # noqa: N802
                 runtime._handle_request(self, method="POST")
 
+            def do_DELETE(self) -> None:  # noqa: N802
+                runtime._handle_request(self, method="DELETE")
+
             def do_OPTIONS(self) -> None:  # noqa: N802
                 runtime._send_options(self)
 
@@ -298,7 +301,7 @@ class FactoryWebRuntime:
         query = urllib.parse.parse_qs(parsed.query)
         try:
             if path.startswith("/api/"):
-                payload = self._read_json(handler) if method == "POST" else {}
+                payload = self._read_json(handler) if method in {"POST", "DELETE"} else {}
                 result = self._dispatch_api(method, path, query, payload)
                 if isinstance(result, _FilePayload):
                     self._send_file(handler, result.path, result.content_type, cache_control=result.cache_control)
@@ -2905,7 +2908,7 @@ class FactoryWebRuntime:
     @staticmethod
     def _send_cors_headers(handler: BaseHTTPRequestHandler) -> None:
         handler.send_header("Access-Control-Allow-Origin", "*")
-        handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        handler.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         handler.send_header("Access-Control-Allow-Headers", "Content-Type")
 
     @staticmethod

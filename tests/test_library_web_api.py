@@ -89,6 +89,7 @@ class _FakeController:
         self.created_instances = []
         self.updated_books = []
         self.updated_instances = []
+        self.deleted_books = []
         self.book_list_calls = []
         self.dashboard_calls = []
         self.instance_list_calls = []
@@ -186,6 +187,12 @@ class _FakeController:
         for row in self.instances[int(payload.libro_id)]:
             if int(row["id"]) == int(instancia_id):
                 row.update(asdict(payload))
+
+    def eliminar_libro(self, _db_name, libro_id):
+        book_id = int(libro_id)
+        self.deleted_books.append(book_id)
+        self.books.pop(book_id, None)
+        self.instances.pop(book_id, None)
 
 
 class LibraryWebApiTests(unittest.TestCase):
@@ -307,6 +314,45 @@ class LibraryWebApiTests(unittest.TestCase):
                 self.assertEqual(controller.updated_instances[0][0], 11)
                 self.assertEqual(controller.updated_instances[0][1].tipo, "S01 editada")
                 self.assertEqual(controller.updated_instances[0][1].total_esperado, 12)
+
+                selection = api.dispatch(
+                    "POST",
+                    "/api/library/instances/11/page-selection",
+                    {},
+                    {
+                        "db_name": "demo_db",
+                        "book_id": 1,
+                        "selected_pages": [4, 2, 3, 9, 4],
+                        "page_count": 10,
+                        "source": "web_ui",
+                    },
+                )
+                self.assertTrue(selection["changed"])
+                self.assertEqual(selection["selected_pages"], [2, 3, 4, 9])
+                self.assertEqual(
+                    selection["page_ranges"],
+                    [
+                        {"start_page": 2, "end_page": 4},
+                        {"start_page": 9, "end_page": 9},
+                    ],
+                )
+                saved_snapshot = controller.updated_instances[-1][1].config_snapshot
+                self.assertEqual(saved_snapshot["selected_pages"], [2, 3, 4, 9])
+                self.assertEqual(saved_snapshot["page_selection"]["review_status"], "pending")
+
+                selection_again = api.dispatch(
+                    "POST",
+                    "/api/library/instances/11/page-selection",
+                    {},
+                    {
+                        "db_name": "demo_db",
+                        "book_id": 1,
+                        "selected_pages": [2, 3, 4, 9],
+                        "page_count": 10,
+                        "source": "web_ui",
+                    },
+                )
+                self.assertFalse(selection_again["changed"])
 
                 factory = api.dispatch("POST", "/api/library/instances/11/factory", {}, {"db_name": "demo_db", "book_id": 1, "open": True})
                 self.assertEqual(factory["context"]["book_code"], "ALG01-EDIT")
@@ -824,6 +870,33 @@ class LibraryWebApiTests(unittest.TestCase):
         self.assertEqual(updated_instance["instance"]["tipo"], "S01 editada")
         self.assertNotIn("instances", updated_instance)
         self.assertNotIn("dashboard", updated_instance)
+
+    def test_library_book_delete_requires_exact_title_and_removes_book(self) -> None:
+        controller = _FakeController()
+        api = LibraryWebApi(controller=controller)
+
+        self.assertEqual(api.allowed_methods("/api/library/books/1"), {"GET", "POST", "DELETE"})
+        with self.assertRaises(LibraryApiError) as mismatch:
+            api.dispatch(
+                "DELETE",
+                "/api/library/books/1",
+                {},
+                {"db_name": "demo_db", "confirmation": "Libro equivocado"},
+            )
+        self.assertEqual(mismatch.exception.status, 409)
+
+        deleted = api.dispatch(
+            "DELETE",
+            "/api/library/books/1",
+            {},
+            {"db_name": "demo_db", "confirmation": "Algebra"},
+        )
+
+        self.assertEqual(deleted["schema_version"], "library_book_deleted_v1")
+        self.assertEqual(deleted["deleted_instances"], 1)
+        self.assertFalse(deleted["files_deleted"])
+        self.assertEqual(controller.deleted_books, [1])
+        self.assertNotIn(1, controller.books)
 
     def test_timeline_stage_from_counts_prioritizes_bd_and_ocr(self) -> None:
         uploaded = _timeline_stage_from_counts({"subidos_bd": 12, "ocr_done": 12})

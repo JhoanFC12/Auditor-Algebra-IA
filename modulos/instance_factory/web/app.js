@@ -189,6 +189,9 @@ const state = {
   promotionUploadReport: null,
 };
 
+let pageSelectionPersistTimer = null;
+let pageSelectionPersistRevision = 0;
+
 function createEmptyWordProblemSelection() {
   return {
     loading: false,
@@ -962,6 +965,50 @@ function persistFactoryUiState() {
   } catch (_) {}
 }
 
+function persistSelectedPagesChange() {
+  persistFactoryUiState();
+  scheduleCatalogPageSelectionPersist();
+}
+
+function scheduleCatalogPageSelectionPersist() {
+  const params = currentFactoryRequestParams();
+  const instanceId = String(params.get("instance_id") || "").trim();
+  const bookId = String(params.get("book_id") || "").trim();
+  const dbName = String(params.get("db_name") || "").trim();
+  if (!instanceId || !bookId || !dbName) return;
+  window.clearTimeout(pageSelectionPersistTimer);
+  const revision = ++pageSelectionPersistRevision;
+  pageSelectionPersistTimer = window.setTimeout(() => {
+    saveCatalogPageSelection({ instanceId, bookId, dbName, revision })
+      .catch((err) => setStatus(`No se pudo guardar la seleccion de paginas: ${err.message}`));
+  }, 300);
+}
+
+async function saveCatalogPageSelection({ instanceId, bookId, dbName, revision }) {
+  const selectedPages = [...state.selectedPages].sort((a, b) => a - b);
+  const result = await api(`/api/library/instances/${encodeURIComponent(instanceId)}/page-selection`, {
+    method: "POST",
+    body: {
+      db_name: dbName,
+      book_id: Number(bookId),
+      selected_pages: selectedPages,
+      page_count: Number(state.snapshot?.pdf?.page_count || 0),
+      source: "web_ui",
+    },
+  });
+  if (revision !== pageSelectionPersistRevision) return result;
+  if (state.snapshot?.context) {
+    state.snapshot.context.selected_pages = [...selectedPages];
+    state.snapshot.context.selected_page_ranges = Array.isArray(result?.page_ranges) ? result.page_ranges : [];
+    state.snapshot.context.page_selection_configured = true;
+    state.snapshot.context.page_selection_review_status = "pending";
+  }
+  if (result?.instance && state.currentInstance) {
+    state.currentInstance = { ...state.currentInstance, ...result.instance };
+  }
+  return result;
+}
+
 function restoreFactoryUiState({ preserveCurrentStage = false } = {}) {
   if (!state.snapshot) return;
   const persisted = loadPersistedFactoryUiState();
@@ -985,12 +1032,17 @@ function restoreFactoryUiState({ preserveCurrentStage = false } = {}) {
     : "all";
   const detectedPages = detectedPageNumbers(pages);
   const persistedPages = sortedPageNumbers(persisted.selectedPages || []).filter((page) => !pageCount || page <= pageCount);
+  const configuredPages = sortedPageNumbers(state.snapshot.context?.selected_pages || [])
+    .filter((page) => !pageCount || page <= pageCount);
+  const hasConfiguredSelection = Boolean(state.snapshot.context?.page_selection_configured);
   const legacyDefaultPageOne = persistedPages.length === 1
     && persistedPages[0] === 1
     && !detectedPages.length
     && !pages.length
     && !records.length;
-  const selectedPages = legacyDefaultPageOne ? [] : (persistedPages.length ? persistedPages : detectedPages);
+  const selectedPages = hasConfiguredSelection
+    ? configuredPages
+    : (legacyDefaultPageOne ? [] : (persistedPages.length ? persistedPages : detectedPages));
   state.selectedPages = new Set(selectedPages);
 
   const firstSelectedPage = [...state.selectedPages].sort((a, b) => a - b)[0] || 1;
@@ -1709,7 +1761,7 @@ function libraryCourseOptions() {
   const key = `courses:${Number(state.library.dataVersion || 0)}`;
   if (Array.isArray(cache[key])) return cache[key];
   const byCourse = new Map();
-  for (const book of state.library.books || []) {
+  for (const book of (state.library.books || []).filter(libraryBookIsVisible)) {
     const label = libraryBookCourseLabel(book);
     const courseKey = libraryCourseKey(label);
     const current = byCourse.get(courseKey) || { key: courseKey, label, count: 0, active: 0, lastTouched: 0 };
@@ -1771,8 +1823,9 @@ function ensureLibrarySelection() {
     state.library.selectedBookId = books[0]?.id || "";
   }
   const book = selectedLibraryBook();
-  if (!book || !book.instances.some((item) => item.id === state.library.selectedInstanceId)) {
-    state.library.selectedInstanceId = book?.instances[0]?.id || "";
+  const instances = filteredInstances(book?.instances || []);
+  if (!book || !instances.some((item) => item.id === state.library.selectedInstanceId)) {
+    state.library.selectedInstanceId = instances[0]?.id || "";
   }
 }
 
@@ -2603,7 +2656,7 @@ function librarySortDescription() {
 
 function renderLibraryCourseStrip(courseOptions) {
   const selected = String(state.library.course || "all");
-  const total = Number((state.library.books || []).length || 0);
+  const total = Number((state.library.books || []).filter(libraryBookIsVisible).length || 0);
   return `
     <div class="library-course-strip" aria-label="Carpetas por curso">
       <button class="library-course-chip ${selected === "all" ? "active" : ""}" data-library-course="all" type="button">
@@ -2634,6 +2687,7 @@ function renderLibraryBookStage() {
       </div>
       <div class="stage-actions">
         <button id="editSelectedBookBtn" type="button">Editar libro</button>
+        <button id="deleteSelectedBookBtn" class="danger" type="button">Eliminar libro</button>
         <button id="createInstanceBtn" class="secondary" type="button">Crear instancia</button>
       </div>
     </div>
@@ -3800,6 +3854,7 @@ function bindLibraryContentEvents() {
     state.library.editingBookId = "";
     renderLibraryContent();
   };
+  if ($("deleteSelectedBookBtn")) $("deleteSelectedBookBtn").onclick = deleteSelectedLibraryBook;
   if ($("cancelInstanceForm")) $("cancelInstanceForm").onclick = () => {
     state.library.showInstanceForm = false;
     state.library.editingInstanceId = "";
@@ -5186,6 +5241,45 @@ async function submitBookForm(event) {
   }, editing ? "Libro actualizado." : "Libro registrado.");
 }
 
+async function deleteSelectedLibraryBook() {
+  const book = selectedLibraryBook();
+  if (!book) return setStatus("Selecciona un libro para eliminar.");
+  const progress = bookProgressIndicators(book);
+  const title = String(book.title || book.titulo || "").trim();
+  const instanceCount = Number(progress.total || book.instances?.length || 0);
+  const inDb = Number(progress.inDb || 0);
+  const databaseWarning = inDb > 0
+    ? `\n\nAtencion: ${inDb} instancia(s) figuran con problemas en la base de datos.`
+    : "";
+  const confirmed = window.confirm(
+    `Eliminar \"${title}\" de la Biblioteca?\n\nSe eliminaran ${instanceCount} instancia(s) asociadas.${databaseWarning}\n\nEl PDF y las carpetas del disco NO se borraran. Esta accion no se puede deshacer.`,
+  );
+  if (!confirmed) return setStatus("Eliminacion cancelada.");
+  await runAction("Eliminando libro...", async () => {
+    const result = await api(`/api/library/books/${encodeURIComponent(book.id)}`, {
+      method: "DELETE",
+      body: {
+        db_name: state.library.selectedDb || "",
+        confirmation: title,
+      },
+    });
+    const deletedId = String(result?.book_id || book.id || "");
+    state.library.books = (state.library.books || []).filter((row) => String(row.id) !== deletedId);
+    delete state.library.details[deletedId];
+    state.library.selectedBookId = "";
+    state.library.selectedInstanceId = "";
+    state.library.screen = "books";
+    state.library.showBookForm = false;
+    state.library.showInstanceForm = false;
+    state.library.editingBookId = "";
+    state.library.editingInstanceId = "";
+    invalidateLibraryComputedCache();
+    ensureLibrarySelection();
+    renderLibrary();
+    return `Libro eliminado: ${title}. Los archivos del disco se conservaron.`;
+  }, "Libro eliminado.");
+}
+
 function bookFormPayload() {
   return {
     db_name: state.library.selectedDb || "",
@@ -5795,12 +5889,12 @@ function renderPagesStage() {
   $("togglePdf").onclick = () => {
     if (state.selectedPages.has(state.pdfPage)) state.selectedPages.delete(state.pdfPage);
     else state.selectedPages.add(state.pdfPage);
-    persistFactoryUiState();
+    persistSelectedPagesChange();
     updatePagesStageSelectionUi();
   };
   $("applyRange").onclick = () => {
     state.selectedPages = parseRange($("rangeInput").value, pageCount);
-    persistFactoryUiState();
+    persistSelectedPagesChange();
     updatePagesStageSelectionUi();
   };
   $("rangeInput").onkeydown = (event) => {
@@ -5808,12 +5902,12 @@ function renderPagesStage() {
   };
   $("selectAllPages").onclick = () => {
     state.selectedPages = new Set(Array.from({ length: pageCount }, (_, index) => index + 1));
-    persistFactoryUiState();
+    persistSelectedPagesChange();
     updatePagesStageSelectionUi();
   };
   $("clearPages").onclick = () => {
     state.selectedPages = new Set();
-    persistFactoryUiState();
+    persistSelectedPagesChange();
     updatePagesStageSelectionUi();
   };
   $("syncDetectedPages").onchange = () => {
@@ -5869,7 +5963,7 @@ function renderPagePicker(pageCount) {
     if (state.selectedPages.has(page)) state.selectedPages.delete(page);
     else state.selectedPages.add(page);
     state.pdfPage = page;
-    persistFactoryUiState();
+    persistSelectedPagesChange();
     drawImageOnCanvas($("pdfCanvas"), pdfPageImageUrl(state.pdfPage, 150));
     prefetchPdfPages(state.pdfPage, pageCount, 150);
     updatePagesStageSelectionUi();
@@ -5950,7 +6044,7 @@ function renderSelectedPagesList() {
     <div class="row-card page-row ${page === state.pdfPage ? "active" : ""}" data-page="${page}">
       <div>
         <strong>Pagina ${page}</strong>
-        <div class="muted">Seleccionada para deteccion.</div>
+        <div class="muted">Seleccionada para esta instancia.</div>
       </div>
       <button data-remove-page="${page}" title="Quitar pagina">X</button>
     </div>
@@ -5966,7 +6060,7 @@ function renderSelectedPagesList() {
     btn.onclick = (event) => {
       event.stopPropagation();
       state.selectedPages.delete(Number(btn.dataset.removePage));
-      persistFactoryUiState();
+      persistSelectedPagesChange();
       updatePagesStageSelectionUi();
     };
   });
@@ -12047,6 +12141,7 @@ function filteredBooks(applyStatus = true) {
   const key = `filtered:${Number(state.library.dataVersion || 0)}:${applyStatus ? "1" : "0"}:${state.library.status}:${selectedCourse}:${sortMode}:${query}`;
   if (Array.isArray(cache[key])) return cache[key];
   const rows = (state.library.books || []).filter((book) => {
+    if (!libraryBookIsVisible(book)) return false;
     const haystack = book._searchKey || buildLibrarySearchKey(book);
     const matchesQuery = !query || haystack.includes(query);
     const matchesCourse = selectedCourse === "all" || libraryCourseKey(libraryBookCourseLabel(book)) === selectedCourse;
@@ -12167,9 +12262,18 @@ function libraryBookWorkRank(book) {
 }
 
 function filteredInstances(instances) {
-  const rows = Array.isArray(instances) && instances._naturalSorted ? instances : naturalSortInstances(instances || []);
+  const visible = (instances || []).filter(libraryInstanceIsVisible);
+  const rows = Array.isArray(visible) && visible._naturalSorted ? visible : naturalSortInstances(visible);
   if (state.library.status === "all") return rows;
   return rows.filter((item) => instanceWorkflowStatus(item) === state.library.status);
+}
+
+function libraryBookIsVisible(book) {
+  return Boolean(book) && (book.active ?? book.activo ?? true) !== false;
+}
+
+function libraryInstanceIsVisible(instance) {
+  return Boolean(instance) && (instance.active ?? instance.activo ?? true) !== false;
 }
 
 function wordProblemSelectionState() {
@@ -12905,7 +13009,8 @@ function libraryEditingInstance(book = selectedLibraryBook()) {
 function selectedLibraryInstance() {
   const book = selectedLibraryBook();
   if (!book) return null;
-  return (book.instances || []).find((item) => String(item.id) === String(state.library.selectedInstanceId)) || filteredInstances(book.instances || [])[0] || null;
+  const instances = filteredInstances(book.instances || []);
+  return instances.find((item) => String(item.id) === String(state.library.selectedInstanceId)) || instances[0] || null;
 }
 
 function findLibraryInstance(id) {
@@ -12921,10 +13026,10 @@ function libraryCounts() {
   const cache = libraryComputedCache();
   const key = `counts:${Number(state.library.dataVersion || 0)}`;
   if (cache[key]) return cache[key];
-  const books = state.library.books || [];
+  const books = (state.library.books || []).filter(libraryBookIsVisible);
   const counts = books.reduce((acc, book) => {
     acc.books += 1;
-    const instances = book.instances || [];
+    const instances = (book.instances || []).filter(libraryInstanceIsVisible);
     if (instances.length) {
       const counts = statusCounts(instances);
       acc.instances += instances.length;
@@ -13104,7 +13209,7 @@ function normalizeBookIndicators(book) {
   const rawIndicators = book?.indicators && typeof book.indicators === "object" ? book.indicators : {};
   const health = Array.isArray(book?.instances_health) ? book.instances_health : [];
   const dashboardInstances = Array.isArray(book?.dashboard?.instancias) ? book.dashboard.instancias : [];
-  const instances = Array.isArray(book?.instances) ? book.instances : [];
+  const instances = Array.isArray(book?.instances) ? book.instances.filter(libraryInstanceIsVisible) : [];
   const total = Math.max(
     Number(rawIndicators.total_instancias || 0),
     Number(book?.instances_total || 0),

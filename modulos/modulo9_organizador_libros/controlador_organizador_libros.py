@@ -196,18 +196,18 @@ class BookProgressController:
                     LEFT JOIN (
                         SELECT
                             i.libro_id,
-                            COUNT(*)::int AS instances_total,
-                            COALESCE(SUM(GREATEST(COALESCE(i.total_esperado, 0), 0)), 0)::int AS instances_expected_total,
+                            COUNT(*) FILTER (WHERE COALESCE(i.activo, TRUE))::int AS instances_total,
+                            COALESCE(SUM(GREATEST(COALESCE(i.total_esperado, 0), 0)) FILTER (WHERE COALESCE(i.activo, TRUE)), 0)::int AS instances_expected_total,
                             COALESCE(
                                 string_agg(
                                     DISTINCT NULLIF(LOWER(COALESCE(i.{instance_col}, '')), ''),
                                     ', '
                                     ORDER BY NULLIF(LOWER(COALESCE(i.{instance_col}, '')), '')
-                                ),
+                                ) FILTER (WHERE COALESCE(i.activo, TRUE)),
                                 '-'
                             ) AS instances_names,
-                            COUNT(*) FILTER (WHERE COALESCE(i.session_path, '') <> '')::int AS instances_session_count,
-                            COUNT(*) FILTER (WHERE COALESCE(i.soluciones_dir, '') <> '')::int AS instances_solutions_count
+                            COUNT(*) FILTER (WHERE COALESCE(i.activo, TRUE) AND COALESCE(i.session_path, '') <> '')::int AS instances_session_count,
+                            COUNT(*) FILTER (WHERE COALESCE(i.activo, TRUE) AND COALESCE(i.soluciones_dir, '') <> '')::int AS instances_solutions_count
                         FROM libro_instancias_escaneo i
                         GROUP BY i.libro_id
                     ) inst ON inst.libro_id = b.id
@@ -253,18 +253,18 @@ class BookProgressController:
                     LEFT JOIN (
                         SELECT
                             i.libro_id,
-                            COUNT(*)::int AS instances_total,
-                            COALESCE(SUM(GREATEST(COALESCE(i.total_esperado, 0), 0)), 0)::int AS instances_expected_total,
+                            COUNT(*) FILTER (WHERE COALESCE(i.activo, TRUE))::int AS instances_total,
+                            COALESCE(SUM(GREATEST(COALESCE(i.total_esperado, 0), 0)) FILTER (WHERE COALESCE(i.activo, TRUE)), 0)::int AS instances_expected_total,
                             COALESCE(
                                 string_agg(
                                     DISTINCT NULLIF(LOWER(COALESCE(i.{instance_col}, '')), ''),
                                     ', '
                                     ORDER BY NULLIF(LOWER(COALESCE(i.{instance_col}, '')), '')
-                                ),
+                                ) FILTER (WHERE COALESCE(i.activo, TRUE)),
                                 '-'
                             ) AS instances_names,
-                            COUNT(*) FILTER (WHERE COALESCE(i.session_path, '') <> '')::int AS instances_session_count,
-                            COUNT(*) FILTER (WHERE COALESCE(i.soluciones_dir, '') <> '')::int AS instances_solutions_count
+                            COUNT(*) FILTER (WHERE COALESCE(i.activo, TRUE) AND COALESCE(i.session_path, '') <> '')::int AS instances_session_count,
+                            COUNT(*) FILTER (WHERE COALESCE(i.activo, TRUE) AND COALESCE(i.soluciones_dir, '') <> '')::int AS instances_solutions_count
                         FROM libro_instancias_escaneo i
                         GROUP BY i.libro_id
                     ) inst ON inst.libro_id = b.id
@@ -902,6 +902,7 @@ class BookProgressController:
         if not libro:
             raise ValueError("Libro no encontrado.")
         instance_rows = [dict(row) for row in instance_rows] if instance_rows is not None else self.listar_instancias_libro(db_name, libro_id)
+        instance_rows = [row for row in instance_rows if bool(row.get("activo", True))]
         libro_codigo = str(libro.get("codigo") or "").strip()
         try:
             uploaded_by_type = self._query_uploaded_problem_stats_by_instance(
