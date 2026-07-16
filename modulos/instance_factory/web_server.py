@@ -21,7 +21,7 @@ from modulos.modulo13_laboratorio_pdf_segmentacion.controlador_laboratorio_pdf i
     DEFAULT_PROBLEM_CROPS_LIVE_ROOT,
 )
 
-from .models import InstancePipelineContext, PipelineStep, StageStatus, StagingProblemRecord
+from .models import InstancePipelineContext, PipelineStep, StageStatus, StagingProblemRecord, utc_now_text
 from .pipeline import InstancePdfPipelineService
 from .model_inventory import build_server_model_inventory
 from .library_api import LibraryApiError, LibraryWebApi
@@ -30,6 +30,15 @@ from .hf_endpoint_manager import HfEndpointManager
 from .normalizer_training_bank import load_manifest as load_normalizer_training_manifest
 from .training_registry import load_training_cycle_status, start_new_training_cycle, task_by_key
 from .db_promotion import promote_staging_records_to_db
+from .problem_solution_linking import (
+    build_problem_solution_bundle,
+    candidate_evidence_fingerprint,
+    generate_candidate_links,
+    project_problem_units,
+    retarget_candidate_problem,
+    review_candidate_link,
+    validate_solution_unit,
+)
 
 
 WEB_APP_ASSET_NAMES = ("index.html", "app.js", "styles.css")
@@ -44,6 +53,7 @@ WEB_BACKEND_SOURCE_NAMES = (
     "pipeline.py",
     "normalizer_inference.py",
     "staging.py",
+    "problem_solution_linking.py",
     "db_promotion.py",
     "training_registry.py",
     "../modulo9_organizador_libros/controlador_organizador_libros.py",
@@ -378,7 +388,13 @@ class FactoryWebRuntime:
             return self._cancel_automation_job(payload)
         with self._lock:
             if path.startswith("/api/library/"):
-                return self.library_api.dispatch(method, path, query, payload)
+                result = self.library_api.dispatch(method, path, query, payload)
+                if method == "POST" and path.endswith("/page-selection") and isinstance(result, dict):
+                    self._sync_problem_solution_context_from_page_selection(result)
+                    sync_context = getattr(self.service.staging, "sync_problem_solution_context", None)
+                    if callable(sync_context):
+                        sync_context()
+                return result
             self._ensure_allowed_method(method, path)
             if method == "POST":
                 self._invalidate_response_caches()
@@ -411,9 +427,64 @@ class FactoryWebRuntime:
             if method == "GET" and path == "/api/record":
                 record_id = self._first(query, "record_id", "")
                 return self._record_detail(record_id)
+            if method == "GET" and path == "/api/problem-solutions":
+                return self._problem_solution_snapshot()
+            if method == "POST" and path == "/api/problem-solutions/solution-units":
+                expected_revision = self._required_problem_solution_revision(payload)
+                units = payload.get("solution_units", payload.get("units"))
+                if not isinstance(units, list):
+                    raise WebApiError(
+                        "solution_units debe ser una lista.",
+                        status=400,
+                        code="invalid_solution_units",
+                    )
+                clean_units = [dict(item) for item in units if isinstance(item, dict)]
+                unit_issues = [
+                    issue
+                    for unit in clean_units
+                    for issue in self._solution_unit_issues(unit)
+                ]
+                if len(clean_units) != len(units):
+                    unit_issues.append("solution_unit:invalid_object")
+                if unit_issues:
+                    raise WebApiError(
+                        "; ".join(dict.fromkeys(unit_issues)),
+                        status=400,
+                        code="invalid_solution_unit",
+                    )
+                try:
+                    self.service.staging.upsert_solution_units(
+                        clean_units,
+                        expected_revision=expected_revision,
+                    )
+                except ValueError as exc:
+                    raise WebApiError(
+                        str(exc),
+                        status=400,
+                        code="invalid_solution_unit",
+                    ) from exc
+                except RuntimeError as exc:
+                    if "revision_conflict" in str(exc):
+                        raise WebApiError(
+                            "Las soluciones cambiaron en otra pestaña; recarga antes de guardar.",
+                            status=409,
+                            code="problem_solution_revision_conflict",
+                        ) from exc
+                    raise
+                return self._problem_solution_snapshot()
+            if method == "POST" and path == "/api/problem-solutions/generate":
+                return self._generate_problem_solution_candidates(payload)
+            if method == "POST" and path == "/api/problem-solutions/review":
+                return self._review_problem_solution_candidate(payload)
+            if method == "POST" and path == "/api/problem-solutions/problem-status":
+                return self._set_problem_solution_record_status(payload)
             if method == "GET" and path == "/api/promotion":
                 record_id = self._first(query, "record_id", "")
-                return self.service.staging.build_promotion_candidate(record_id)
+                candidate = self.service.staging.build_promotion_candidate(record_id)
+                bundle_summary = dict(dict(candidate.get("payload") or {}).get("problem_solution_bundle") or {})
+                candidate["bundle_id"] = str(bundle_summary.get("bundle_id") or "")
+                candidate["solution_count"] = int(bundle_summary.get("solutions_total") or 0)
+                return candidate
             if method == "POST" and path == "/api/promotion/upload":
                 dry_run = self._bool(payload.get("dry_run"), default=False)
                 if not dry_run and not self._bool(payload.get("confirm"), default=False):
@@ -1759,6 +1830,597 @@ class FactoryWebRuntime:
                 kwargs["delay_s"] = delay_s
             return scale_if_idle(**kwargs)
         return self.endpoint_manager.scale_to_zero()
+
+    def _problem_solution_snapshot(self) -> dict[str, Any]:
+        workspace = dict(self.service.staging.problem_solution_snapshot() or {})
+        problem_units = project_problem_units(self.service.staging.load_records(), self.context)
+        problem_units_by_id: dict[str, dict[str, Any]] = {}
+        for unit in problem_units:
+            for raw_id in (unit.get("unit_id"), unit.get("record_id")):
+                unit_id = str(raw_id or "").strip()
+                if unit_id:
+                    problem_units_by_id[unit_id] = unit
+        solution_units = [
+            copy.deepcopy(dict(item))
+            for item in list(workspace.get("solution_units") or [])
+            if isinstance(item, dict)
+        ]
+        solution_units_by_id = {
+            str(unit.get("solution_unit_id") or unit.get("unit_id") or "").strip(): unit
+            for unit in solution_units
+            if str(unit.get("solution_unit_id") or unit.get("unit_id") or "").strip()
+        }
+        candidates: list[dict[str, Any]] = []
+        for raw in list(workspace.get("candidate_links") or []):
+            if not isinstance(raw, dict):
+                continue
+            row = copy.deepcopy(raw)
+            review_status = str(row.get("review_status") or "").strip()
+            status = str(row.get("status") or "review_required").strip() or "review_required"
+            public_status = {
+                "high_confidence": "link_proposed_high",
+                "weak": "weak_candidate",
+            }.get(status, status)
+            row["decision"] = {
+                "confirmed": "human_confirmed",
+                "rejected": "rejected",
+                "orphan": "orphan",
+            }.get(review_status, public_status)
+            problem_ref = dict(row.get("problem_ref") or {})
+            solution_ref = dict(row.get("solution_ref") or {})
+            problem_unit = problem_units_by_id.get(
+                str(problem_ref.get("unit_id") or problem_ref.get("record_id") or "").strip()
+            )
+            solution_unit = solution_units_by_id.get(
+                str(solution_ref.get("unit_id") or row.get("solution_unit_id") or "").strip()
+            )
+            evidence: dict[str, Any] = {"problem": {}, "solution": {}}
+            if problem_unit:
+                evidence["problem"] = copy.deepcopy(problem_unit)
+                crop_path = str(problem_unit.get("crop_path") or "").strip()
+                evidence["problem"]["image_url"] = self._register_file(Path(crop_path)) if crop_path else ""
+            if solution_unit:
+                evidence["solution"] = copy.deepcopy(solution_unit)
+                fragments: list[dict[str, Any]] = []
+                for raw_fragment in list(solution_unit.get("fragments") or []):
+                    if not isinstance(raw_fragment, dict):
+                        continue
+                    fragment = copy.deepcopy(raw_fragment)
+                    crop_path = str(fragment.get("crop_path") or "").strip()
+                    fragment["image_url"] = self._register_file(Path(crop_path)) if crop_path else ""
+                    fragments.append(fragment)
+                evidence["solution"]["fragments"] = fragments
+            row["evidence"] = evidence
+            candidates.append(row)
+
+        bundles: list[dict[str, Any]] = []
+        for raw in list(workspace.get("bundles") or []):
+            if not isinstance(raw, dict):
+                continue
+            row = copy.deepcopy(raw)
+            issues = self.service.staging.problem_solution_bundle_issues(row)
+            row["blocking_issues"] = issues
+            row["solution_count"] = len(list(row.get("solutions") or []))
+            row["ready_for_db"] = str(row.get("status") or "") == "human_confirmed" and not issues
+            row["promotion_status"] = "ready_for_db" if row["ready_for_db"] else ("stale" if issues else "pending_review")
+            row["stale_reason"] = "; ".join(issues)
+            bundles.append(row)
+
+        structure = copy.deepcopy(dict(getattr(self.context, "problem_solution_structure", {}) or {}))
+        return {
+            "schema_version": "problem_solution_web_snapshot_v1",
+            "revision": int(workspace.get("revision") or 0),
+            "structure": structure,
+            "problem_units": problem_units,
+            "solution_units": solution_units,
+            "candidate_links": candidates,
+            "bundles": bundles,
+            "review_events": copy.deepcopy(list(workspace.get("review_events") or [])),
+            "problem_statuses": copy.deepcopy(dict(workspace.get("problem_statuses") or {})),
+            "invalidated_candidate_links": copy.deepcopy(
+                list(workspace.get("invalidated_candidate_links") or [])
+            ),
+            "counts": {
+                "problem_units": len(problem_units),
+                "solution_units": len(list(workspace.get("solution_units") or [])),
+                "candidate_links": len(candidates),
+                "bundles": len(bundles),
+                "ready_bundles": sum(bool(row.get("ready_for_db")) for row in bundles),
+                "stale_bundles": sum(bool(row.get("blocking_issues")) for row in bundles),
+                "invalidated_candidates": len(list(workspace.get("invalidated_candidate_links") or [])),
+            },
+            "policy": {
+                "target": "staging_only",
+                "human_confirmation_required": True,
+                "automatic_db_write": False,
+            },
+        }
+
+    def _sync_problem_solution_context_from_page_selection(self, result: dict[str, Any]) -> None:
+        """Keep the running factory context aligned with a Biblioteca page-map save."""
+
+        selected_pages = [int(value) for value in list(result.get("selected_pages") or [])]
+        selected_ranges = [
+            copy.deepcopy(dict(item))
+            for item in list(result.get("page_ranges") or [])
+            if isinstance(item, dict)
+        ]
+        solution_pages = [int(value) for value in list(result.get("solution_selected_pages") or [])]
+        solution_ranges = [
+            copy.deepcopy(dict(item))
+            for item in list(result.get("solution_page_ranges") or [])
+            if isinstance(item, dict)
+        ]
+        solution_selection = copy.deepcopy(dict(result.get("solution_page_selection") or {}))
+        structure = copy.deepcopy(dict(result.get("problem_solution_structure") or {}))
+        targets: list[Any] = [self.context, getattr(self.service, "context", None)]
+        staging = getattr(self.service, "staging", None)
+        targets.append(getattr(staging, "context", None))
+        seen: set[int] = set()
+        for target in targets:
+            if target is None or id(target) in seen:
+                continue
+            seen.add(id(target))
+            target.selected_pages = list(selected_pages)
+            target.selected_page_ranges = copy.deepcopy(selected_ranges)
+            target.page_selection_review_status = "pending"
+            target.page_selection_configured = True
+            target.solution_selected_pages = list(solution_pages)
+            target.solution_selected_page_ranges = copy.deepcopy(solution_ranges)
+            target.solution_page_selection_review_status = str(
+                solution_selection.get("review_status") or "pending"
+            )
+            target.solution_page_selection_configured = True
+            target.solution_page_selection = copy.deepcopy(solution_selection)
+            target.problem_solution_structure = copy.deepcopy(structure)
+
+    def _solution_unit_issues(self, unit: dict[str, Any]) -> list[str]:
+        normalized = copy.deepcopy(dict(unit or {}))
+        structure = dict(getattr(self.context, "problem_solution_structure", {}) or {})
+        expected_scope = {
+            "book_code": str(getattr(self.context, "book_code", "") or "").strip(),
+            "instance_type": str(getattr(self.context, "instance_type", "") or "").strip(),
+            "exercise_set_id": str(structure.get("exercise_set_id") or "").strip(),
+        }
+        raw_scope = dict(normalized.get("scope") or {}) if isinstance(normalized.get("scope"), dict) else {}
+        for key, expected in expected_scope.items():
+            value = str(normalized.get(key) or raw_scope.get(key) or expected or "").strip()
+            normalized[key] = value
+            raw_scope[key] = value
+        normalized["scope"] = raw_scope
+        return validate_solution_unit(normalized, expected_scope=expected_scope)
+
+    def _generate_problem_solution_candidates(self, payload: dict[str, Any]) -> dict[str, Any]:
+        snapshot = self.service.staging.problem_solution_snapshot()
+        expected_revision = self._required_problem_solution_revision(payload)
+        structure = copy.deepcopy(dict(getattr(self.context, "problem_solution_structure", {}) or {}))
+        pattern = str(payload.get("pattern") or structure.get("structure_mode") or "unknown").strip().lower()
+        exercise_set_id = str(payload.get("exercise_set_id") or structure.get("exercise_set_id") or "").strip()
+        source_mapping_confirmed = self._bool(payload.get("source_mapping_confirmed"), default=False)
+        page_map_fingerprint = ""
+        page_map_fingerprint_fn = getattr(
+            self.service.staging,
+            "_problem_solution_page_map_fingerprint",
+            None,
+        )
+        if callable(page_map_fingerprint_fn):
+            page_map_fingerprint = str(page_map_fingerprint_fn() or "")
+        problem_units = project_problem_units(self.service.staging.load_records(), self.context)
+        solution_units = [
+            dict(item) for item in list(snapshot.get("solution_units") or []) if isinstance(item, dict)
+        ]
+        if not solution_units:
+            raise WebApiError(
+                "No hay unidades de solucion revisadas para enlazar.",
+                status=400,
+                code="missing_solution_units",
+            )
+        if not problem_units:
+            raise WebApiError(
+                "No hay problemas de staging disponibles para enlazar.",
+                status=400,
+                code="missing_problem_units",
+            )
+        if pattern in {"unknown", "no_solutions", ""}:
+            raise WebApiError(
+                "Define primero si el libro usa secciones separadas o problema seguido de solucion.",
+                status=400,
+                code="structure_mode_required",
+            )
+        patterns = ["separate_sections", "interleaved"] if pattern == "hybrid" else [pattern]
+        candidates: list[dict[str, Any]] = []
+        for current_pattern in patterns:
+            candidates.extend(
+                generate_candidate_links(
+                    problem_units,
+                    solution_units,
+                    pattern=current_pattern,
+                    exercise_set_id=exercise_set_id,
+                    source_mapping_confirmed=source_mapping_confirmed,
+                    structure={
+                        **structure,
+                        "source_mapping_confirmed": source_mapping_confirmed,
+                        "section_pair_confirmed": source_mapping_confirmed and current_pattern == "separate_sections",
+                        "solution_page_selection_configured": bool(
+                            getattr(self.context, "solution_page_selection_configured", False)
+                        ),
+                        "solution_selected_pages": list(
+                            getattr(self.context, "solution_selected_pages", []) or []
+                        ),
+                    },
+                )
+            )
+        for candidate in candidates:
+            candidate["provenance"] = {
+                "linker_version": "problem_solution_rules_v1",
+                "structure_mode": pattern,
+                "source_mapping_confirmed": source_mapping_confirmed,
+                "page_map_fingerprint": page_map_fingerprint,
+            }
+        existing_by_id = {
+            str(row.get("candidate_link_id") or ""): dict(row)
+            for row in list(snapshot.get("candidate_links") or [])
+            if isinstance(row, dict) and str(row.get("candidate_link_id") or "")
+        }
+        current_problem_sources: dict[str, str] = {}
+        for problem_unit in problem_units:
+            source_fingerprint = str(problem_unit.get("source_fingerprint") or "")
+            for key in ("unit_id", "record_id"):
+                identifier = str(problem_unit.get(key) or "").strip()
+                if identifier:
+                    current_problem_sources[identifier] = source_fingerprint
+        for candidate in candidates:
+            existing = existing_by_id.get(str(candidate.get("candidate_link_id") or ""))
+            if not existing or not isinstance(existing.get("human_review"), dict):
+                continue
+            original_problem_ref = dict(existing.get("original_problem_ref") or {})
+            if original_problem_ref:
+                generated_origin = copy.deepcopy(existing)
+                generated_origin["problem_ref"] = original_problem_ref
+                generated_origin.pop("original_problem_ref", None)
+                generated_origin.pop("problem_ref_history", None)
+                current_target_ref = dict(existing.get("problem_ref") or {})
+                current_target_id = str(
+                    current_target_ref.get("unit_id") or current_target_ref.get("record_id") or ""
+                ).strip()
+                target_is_current = bool(
+                    current_target_id
+                    and str(current_target_ref.get("source_fingerprint") or "")
+                    == current_problem_sources.get(current_target_id, "")
+                )
+                same_origin = (
+                    candidate_evidence_fingerprint(generated_origin)
+                    == candidate_evidence_fingerprint(candidate)
+                )
+                if same_origin and target_is_current:
+                    candidate.clear()
+                    candidate.update(copy.deepcopy(existing))
+                    continue
+            same_sources = all(
+                str(dict(existing.get(ref_key) or {}).get("source_fingerprint") or "")
+                == str(dict(candidate.get(ref_key) or {}).get("source_fingerprint") or "")
+                for ref_key in ("problem_ref", "solution_ref")
+            )
+            same_evidence = candidate_evidence_fingerprint(existing) == candidate_evidence_fingerprint(candidate)
+            if not same_sources or not same_evidence:
+                continue
+            for key in ("human_review", "review_status", "selected_problem_unit_id"):
+                if key in existing:
+                    candidate[key] = copy.deepcopy(existing[key])
+        try:
+            self.service.staging.write_candidate_links(candidates, expected_revision=expected_revision)
+        except RuntimeError as exc:
+            if "revision_conflict" in str(exc):
+                raise WebApiError(
+                    "El mapa cambio en otra pestaña; recarga antes de generar de nuevo.",
+                    status=409,
+                    code="problem_solution_revision_conflict",
+                ) from exc
+            raise
+        return self._problem_solution_snapshot()
+
+    def _review_problem_solution_candidate(self, payload: dict[str, Any]) -> dict[str, Any]:
+        candidate_id = self._required_str(payload, "candidate_link_id")
+        action = self._required_str(payload, "action").lower()
+        allowed_actions = {"confirm", "reassign", "reject", "mark_orphan"}
+        if action not in allowed_actions:
+            raise WebApiError(
+                f"Accion no permitida: {action}.",
+                status=400,
+                code="invalid_link_review_action",
+            )
+        reviewer = self._required_str(payload, "reviewer")
+        snapshot = self.service.staging.problem_solution_snapshot()
+        expected_revision = self._required_problem_solution_revision(payload)
+        candidates = [
+            dict(item) for item in list(snapshot.get("candidate_links") or []) if isinstance(item, dict)
+        ]
+        index = next(
+            (position for position, row in enumerate(candidates) if str(row.get("candidate_link_id") or "") == candidate_id),
+            -1,
+        )
+        if index < 0:
+            raise WebApiError("Propuesta no encontrada.", status=404, code="candidate_link_not_found")
+        previous_candidate = copy.deepcopy(candidates[index])
+        problem_units = project_problem_units(self.service.staging.load_records(), self.context)
+        problem_units_by_id: dict[str, dict[str, Any]] = {}
+        for row in problem_units:
+            problem_units_by_id[str(row.get("unit_id") or "")] = row
+            problem_units_by_id[str(row.get("record_id") or "")] = row
+
+        requested_problem_unit_id = str(payload.get("problem_unit_id") or "").strip()
+        if action == "reassign" and not requested_problem_unit_id:
+            raise WebApiError(
+                "Selecciona el problema de destino para reasignar.",
+                status=400,
+                code="reassignment_problem_required",
+            )
+        candidate_for_review = candidates[index]
+        problem_unit_id = requested_problem_unit_id
+        if action in {"confirm", "reassign"}:
+            if not problem_unit_id:
+                current_ref = dict(candidate_for_review.get("problem_ref") or {})
+                problem_unit_id = str(
+                    current_ref.get("unit_id") or current_ref.get("record_id") or ""
+                ).strip()
+            target_problem = problem_units_by_id.get(problem_unit_id)
+            if target_problem is None:
+                raise WebApiError(
+                    "El problema elegido ya no existe en staging.",
+                    status=409,
+                    code="stale_problem_unit",
+                )
+            problem_unit_id = str(
+                target_problem.get("unit_id") or target_problem.get("record_id") or problem_unit_id
+            ).strip()
+            try:
+                candidate_for_review = retarget_candidate_problem(
+                    candidate_for_review,
+                    target_problem,
+                )
+            except ValueError as exc:
+                raise WebApiError(
+                    str(exc),
+                    status=409,
+                    code="stale_problem_unit",
+                ) from exc
+        mapped_action = {"reassign": "change", "mark_orphan": "orphan"}.get(action, action)
+        reviewed = review_candidate_link(
+            candidate_for_review,
+            action=mapped_action,
+            problem_unit_id=problem_unit_id,
+            reviewer=reviewer,
+            comment=str(payload.get("comment") or ""),
+            reviewed_at=utc_now_text(),
+        )
+        candidates[index] = reviewed
+        solution_units = [
+            dict(item)
+            for item in list(snapshot.get("solution_units") or [])
+            if isinstance(item, dict)
+        ]
+        event = copy.deepcopy(dict(reviewed.get("human_review") or {}))
+        event.update(
+            {
+                "target_type": "candidate_link",
+                "target_id": candidate_id,
+                "candidate_link_id": candidate_id,
+                "before": {
+                    "status": str(previous_candidate.get("review_status") or "generated")
+                },
+                "after": {"status": str(reviewed.get("review_status") or "")},
+            }
+        )
+        affected_problem_ids: set[str] = set()
+        if str(previous_candidate.get("review_status") or "") == "confirmed":
+            affected_problem_ids.add(str(previous_candidate.get("selected_problem_unit_id") or "").strip())
+        if str(reviewed.get("review_status") or "") == "confirmed":
+            affected_problem_ids.add(
+                str(reviewed.get("selected_problem_unit_id") or problem_unit_id).strip()
+            )
+        affected_problem_ids.discard("")
+        bundle_writes: list[dict[str, Any]] = []
+        bundle_removals: list[str] = []
+        provenance = {
+            "structure_map_version": str(
+                dict(getattr(self.context, "problem_solution_structure", {}) or {}).get("schema_version")
+                or "problem_solution_structure_v1"
+            ),
+            "solution_status": str(
+                dict(getattr(self.context, "problem_solution_structure", {}) or {}).get("solution_status")
+                or ""
+            ),
+            "box_review_version": "ingrid_review_v1",
+            "linker_version": "problem_solution_rules_v1",
+        }
+        for selected_problem_id in sorted(affected_problem_ids):
+            problem_unit = problem_units_by_id.get(selected_problem_id)
+            if problem_unit is None:
+                raise WebApiError(
+                    "El problema elegido ya no existe en staging.",
+                    status=409,
+                    code="stale_problem_unit",
+                )
+            record_id = str(problem_unit.get("record_id") or "")
+            existing = self.service.staging.bundle_for_record(record_id)
+            confirmed_links = [
+                row
+                for row in candidates
+                if str(row.get("review_status") or "") == "confirmed"
+                and str(row.get("selected_problem_unit_id") or "") == selected_problem_id
+            ]
+            if not confirmed_links:
+                existing_bundle_id = str((existing or {}).get("bundle_id") or "").strip()
+                if existing_bundle_id:
+                    bundle_removals.append(existing_bundle_id)
+                continue
+            document_relation = self._validated_problem_solution_document_relation(
+                payload.get("document_relation"),
+                fallback=(existing or {}).get("document_relation"),
+                reviewer=reviewer,
+            )
+            bundle_writes.append(
+                self._build_problem_solution_bundle_for_review(
+                    problem_unit=problem_unit,
+                    solution_units=solution_units,
+                    reviewed_links=confirmed_links,
+                    bundle_id=str((existing or {}).get("bundle_id") or ""),
+                    revision=int((existing or {}).get("revision") or 1),
+                    document_relation=document_relation,
+                    provenance=provenance,
+                )
+            )
+        try:
+            self.service.staging.apply_problem_solution_review(
+                candidates=candidates,
+                review_event=event,
+                bundle_writes=bundle_writes,
+                bundle_removals=bundle_removals,
+                expected_revision=expected_revision,
+            )
+        except (ValueError, KeyError) as exc:
+            raise WebApiError(
+                str(exc),
+                status=400,
+                code="invalid_problem_solution_bundle",
+            ) from exc
+        except RuntimeError as exc:
+            if "revision_conflict" in str(exc):
+                raise WebApiError(
+                    "La revision cambio en otra pestaña; recarga antes de guardar.",
+                    status=409,
+                    code="problem_solution_revision_conflict",
+                ) from exc
+            raise
+        return self._problem_solution_snapshot()
+
+    def _set_problem_solution_record_status(self, payload: dict[str, Any]) -> dict[str, Any]:
+        record_id = self._required_str(payload, "record_id")
+        status = self._required_str(payload, "status").lower()
+        reviewer = self._required_str(payload, "reviewer")
+        expected_revision = self._required_problem_solution_revision(payload)
+        setter = getattr(self.service.staging, "set_problem_solution_record_status", None)
+        if not callable(setter):
+            raise WebApiError(
+                "El staging actual no soporta decisiones de ausencia de solucion.",
+                status=501,
+                code="problem_solution_record_status_unsupported",
+            )
+        try:
+            setter(
+                record_id,
+                status=status,
+                reviewer=reviewer,
+                comment=str(payload.get("comment") or ""),
+                expected_revision=expected_revision,
+            )
+        except KeyError as exc:
+            raise WebApiError(
+                "Problema no encontrado en staging.",
+                status=404,
+                code="problem_record_not_found",
+            ) from exc
+        except ValueError as exc:
+            raise WebApiError(str(exc), status=400, code="invalid_problem_solution_record_status") from exc
+        except RuntimeError as exc:
+            if "revision_conflict" in str(exc):
+                raise WebApiError(
+                    "La revision cambio en otra pestaña; recarga antes de guardar.",
+                    status=409,
+                    code="problem_solution_revision_conflict",
+                ) from exc
+            raise
+        return self._problem_solution_snapshot()
+
+    @staticmethod
+    def _build_problem_solution_bundle_for_review(**kwargs: Any) -> dict[str, Any]:
+        try:
+            return build_problem_solution_bundle(**kwargs)
+        except ValueError as exc:
+            raise WebApiError(
+                str(exc),
+                status=409,
+                code="stale_problem_solution_evidence",
+            ) from exc
+
+    def _validated_problem_solution_document_relation(
+        self,
+        raw: Any,
+        *,
+        fallback: Any,
+        reviewer: str,
+    ) -> dict[str, Any]:
+        relation = copy.deepcopy(
+            dict(raw)
+            if isinstance(raw, dict) and raw
+            else (dict(fallback) if isinstance(fallback, dict) else {})
+        )
+        structure = dict(getattr(self.context, "problem_solution_structure", {}) or {})
+        external_required = str(structure.get("solution_status") or "").strip().lower() == "external_source"
+        external = bool(relation.get("external"))
+        if external_required and not external:
+            raise WebApiError(
+                "Confirma que el solucionario pertenece a un documento externo.",
+                status=400,
+                code="external_solution_document_required",
+            )
+        if external_required or external:
+            document_reference = str(
+                relation.get("document_id")
+                or relation.get("document_reference")
+                or relation.get("source_pdf_id")
+                or relation.get("source_pdf_path")
+                or ""
+            ).strip()
+            if str(relation.get("status") or "").strip().lower() != "confirmed":
+                raise WebApiError(
+                    "La relacion con el solucionario externo requiere confirmacion humana explicita.",
+                    status=400,
+                    code="external_solution_relation_unconfirmed",
+                )
+            if not document_reference:
+                raise WebApiError(
+                    "Indica el PDF o identificador del solucionario externo.",
+                    status=400,
+                    code="external_solution_document_reference_required",
+                )
+            relation.update(
+                {
+                    "external": True,
+                    "status": "confirmed",
+                    "document_reference": document_reference,
+                    "confirmed_by": str(relation.get("confirmed_by") or reviewer),
+                    "confirmed_at": str(relation.get("confirmed_at") or utc_now_text()),
+                }
+            )
+            return relation
+        return {
+            **relation,
+            "external": False,
+            "status": str(relation.get("status") or "same_document"),
+        }
+
+    @staticmethod
+    def _optional_revision(value: Any) -> int | None:
+        if value in (None, ""):
+            return None
+        try:
+            revision = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("expected_revision debe ser entero.") from exc
+        if revision < 0:
+            raise ValueError("expected_revision no puede ser negativo.")
+        return revision
+
+    def _required_problem_solution_revision(self, payload: dict[str, Any]) -> int:
+        revision = self._optional_revision(payload.get("expected_revision"))
+        if revision is None:
+            raise WebApiError(
+                "expected_revision es requerido; recarga el mapa antes de modificar enlaces.",
+                status=428,
+                code="problem_solution_revision_required",
+            )
+        return revision
 
     def _promotion_db_name(self, payload: dict[str, Any]) -> str:
         library_db = str(getattr(self, "_library_db_name", "") or "").strip()
@@ -3106,6 +3768,11 @@ class FactoryWebRuntime:
             "/api/record": {"GET"},
             "/api/promotion": {"GET"},
             "/api/promotion/upload": {"POST"},
+            "/api/problem-solutions": {"GET"},
+            "/api/problem-solutions/solution-units": {"POST"},
+            "/api/problem-solutions/generate": {"POST"},
+            "/api/problem-solutions/review": {"POST"},
+            "/api/problem-solutions/problem-status": {"POST"},
             "/api/endpoint/ocr/status": {"GET"},
             "/api/ocr/jobs/status": {"GET"},
             "/api/normalize/ai/jobs/status": {"GET"},

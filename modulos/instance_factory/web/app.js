@@ -139,6 +139,16 @@ const state = {
   stage: "pages",
   pdfPage: 1,
   selectedPages: new Set(),
+  solutionPages: new Set(),
+  pageRoleMode: "problem",
+  problemSolutionStructure: {
+    structure_mode: "unknown",
+    solution_status: "pending_review",
+    exercise_set_id: "",
+  },
+  problemSolutionWorkspace: null,
+  problemSolutionLoading: false,
+  problemSolutionError: "",
   selectedPageRecordId: "",
   syncDetectedPages: false,
   selectedRecordId: "",
@@ -950,6 +960,9 @@ function persistFactoryUiState() {
       stage: state.stage,
       pdfPage: state.pdfPage,
       selectedPages: [...state.selectedPages].sort((a, b) => a - b),
+      solutionPages: [...state.solutionPages].sort((a, b) => a - b),
+      pageRoleMode: state.pageRoleMode,
+      problemSolutionStructure: { ...state.problemSolutionStructure },
       selectedPageRecordId: state.selectedPageRecordId,
       syncDetectedPages: Boolean(state.syncDetectedPages),
       selectedRecordId: state.selectedRecordId,
@@ -986,12 +999,18 @@ function scheduleCatalogPageSelectionPersist() {
 
 async function saveCatalogPageSelection({ instanceId, bookId, dbName, revision }) {
   const selectedPages = [...state.selectedPages].sort((a, b) => a - b);
+  const solutionPages = [...state.solutionPages].sort((a, b) => a - b);
+  const structure = state.problemSolutionStructure || {};
   const result = await api(`/api/library/instances/${encodeURIComponent(instanceId)}/page-selection`, {
     method: "POST",
     body: {
       db_name: dbName,
       book_id: Number(bookId),
       selected_pages: selectedPages,
+      solution_selected_pages: solutionPages,
+      structure_mode: String(structure.structure_mode || "unknown"),
+      solution_status: String(structure.solution_status || "pending_review"),
+      exercise_set_id: String(structure.exercise_set_id || ""),
       page_count: Number(state.snapshot?.pdf?.page_count || 0),
       source: "web_ui",
     },
@@ -1002,9 +1021,21 @@ async function saveCatalogPageSelection({ instanceId, bookId, dbName, revision }
     state.snapshot.context.selected_page_ranges = Array.isArray(result?.page_ranges) ? result.page_ranges : [];
     state.snapshot.context.page_selection_configured = true;
     state.snapshot.context.page_selection_review_status = "pending";
+    state.snapshot.context.solution_selected_pages = [...solutionPages];
+    state.snapshot.context.solution_selected_page_ranges = Array.isArray(result?.solution_page_ranges)
+      ? result.solution_page_ranges
+      : [];
+    state.snapshot.context.solution_page_selection_configured = true;
+    state.snapshot.context.problem_solution_structure = {
+      ...(result?.problem_solution_structure || structure),
+    };
   }
   if (result?.instance && state.currentInstance) {
     state.currentInstance = { ...state.currentInstance, ...result.instance };
+  }
+  if (state.problemSolutionWorkspace) {
+    state.problemSolutionWorkspace = await api("/api/problem-solutions");
+    if ($("problemSolutionHost")) await renderProblemSolutionReview();
   }
   return result;
 }
@@ -1044,6 +1075,49 @@ function restoreFactoryUiState({ preserveCurrentStage = false } = {}) {
     ? configuredPages
     : (legacyDefaultPageOne ? [] : (persistedPages.length ? persistedPages : detectedPages));
   state.selectedPages = new Set(selectedPages);
+
+  const persistedSolutionPages = sortedPageNumbers(persisted.solutionPages || [])
+    .filter((page) => !pageCount || page <= pageCount);
+  const configuredSolutionPages = sortedPageNumbers(state.snapshot.context?.solution_selected_pages || [])
+    .filter((page) => !pageCount || page <= pageCount);
+  const hasConfiguredSolutionSelection = Boolean(state.snapshot.context?.solution_page_selection_configured)
+    || Boolean(Object.keys(state.snapshot.context?.solution_page_selection || {}).length);
+  state.solutionPages = new Set(
+    hasConfiguredSolutionSelection ? configuredSolutionPages : persistedSolutionPages,
+  );
+  state.pageRoleMode = ["problem", "solution", "both"].includes(String(persisted.pageRoleMode || ""))
+    ? String(persisted.pageRoleMode)
+    : "problem";
+  const persistedStructure = persisted.problemSolutionStructure && typeof persisted.problemSolutionStructure === "object"
+    ? persisted.problemSolutionStructure
+    : {};
+  const contextStructure = state.snapshot.context?.problem_solution_structure || {};
+  const contextStructureConfigured = Boolean(
+    contextStructure.source
+    || contextStructure.updated_at
+    || contextStructure.review_status
+    || String(contextStructure.structure_mode || "unknown") !== "unknown"
+    || String(contextStructure.solution_status || "pending_review") !== "pending_review"
+    || String(contextStructure.exercise_set_id || "")
+  );
+  const effectiveStructure = contextStructureConfigured ? contextStructure : persistedStructure;
+  state.problemSolutionStructure = {
+    structure_mode: String(
+      state.snapshot.context?.structure_mode
+      || effectiveStructure.structure_mode
+      || "unknown"
+    ),
+    solution_status: String(
+      state.snapshot.context?.solution_status
+      || effectiveStructure.solution_status
+      || "pending_review"
+    ),
+    exercise_set_id: String(
+      state.snapshot.context?.exercise_set_id
+      || effectiveStructure.exercise_set_id
+      || ""
+    ),
+  };
 
   const firstSelectedPage = [...state.selectedPages].sort((a, b) => a - b)[0] || 1;
   state.pdfPage = boundPageNumber(persisted.pdfPage || firstSelectedPage, pageCount || Math.max(1, firstSelectedPage));
@@ -5839,24 +5913,136 @@ function syncWorkspaceMode() {
   workspace.classList.toggle("batch-focus-mode", state.view === "factory" && Boolean(state.batchMode));
 }
 
+function pageRoleState(page) {
+  const problem = state.selectedPages.has(Number(page));
+  const solution = state.solutionPages.has(Number(page));
+  if (problem && solution) return "both";
+  if (problem) return "problem";
+  if (solution) return "solution";
+  return "none";
+}
+
+function pageRoleClasses(page) {
+  const role = pageRoleState(page);
+  return role === "none" ? "" : `selected selected-${role}`;
+}
+
+function displayPageRole(page) {
+  return {
+    problem: "Enunciado",
+    solution: "Solucion",
+    both: "Enunciado y solucion",
+    none: "Sin clasificar",
+  }[pageRoleState(page)];
+}
+
+function activePageRoleLabel() {
+  return {
+    problem: "enunciados",
+    solution: "soluciones",
+    both: "ambos roles",
+  }[state.pageRoleMode] || "enunciados";
+}
+
+function activeRoleRangeText() {
+  if (state.pageRoleMode === "solution") return compactPageRange([...state.solutionPages]);
+  if (state.pageRoleMode === "both") {
+    return compactPageRange([...new Set([...state.selectedPages, ...state.solutionPages])]);
+  }
+  return selectedRangeText();
+}
+
+function togglePageForActiveRole(page) {
+  const target = Number(page);
+  if (state.pageRoleMode === "solution") {
+    if (state.solutionPages.has(target)) state.solutionPages.delete(target);
+    else state.solutionPages.add(target);
+    return;
+  }
+  if (state.pageRoleMode === "both") {
+    const alreadyBoth = state.selectedPages.has(target) && state.solutionPages.has(target);
+    if (alreadyBoth) {
+      state.selectedPages.delete(target);
+      state.solutionPages.delete(target);
+    } else {
+      state.selectedPages.add(target);
+      state.solutionPages.add(target);
+    }
+    return;
+  }
+  if (state.selectedPages.has(target)) state.selectedPages.delete(target);
+  else state.selectedPages.add(target);
+}
+
+function replaceActivePageRoleSet(pages) {
+  const next = new Set(pages || []);
+  if (state.pageRoleMode === "solution") state.solutionPages = next;
+  else if (state.pageRoleMode === "both") {
+    state.selectedPages = new Set(next);
+    state.solutionPages = new Set(next);
+  } else state.selectedPages = next;
+}
+
+function pageToggleText(page) {
+  const role = state.pageRoleMode;
+  const selected = role === "solution"
+    ? state.solutionPages.has(page)
+    : (role === "both"
+      ? state.selectedPages.has(page) && state.solutionPages.has(page)
+      : state.selectedPages.has(page));
+  return selected ? `Quitar de ${activePageRoleLabel()}` : `Marcar como ${activePageRoleLabel()}`;
+}
+
 function renderPagesStage() {
   const pdf = state.snapshot.pdf || {};
   const pageCount = Number(pdf.page_count || 0);
   $("stageHost").innerHTML = `
     <div class="stage-header">
       <div>
-        <h2>Elegir paginas del PDF</h2>
-        <p class="muted">Define el tramo de trabajo. El detector solo analizara estas paginas y dejara todo en staging.</p>
+        <h2>Mapear enunciados y soluciones</h2>
+        <p class="muted">Clasifica las paginas por rol. El detector de problemas solo procesa los enunciados; las soluciones se enlazan despues de revision humana.</p>
       </div>
       <span class="status-pill status-${pdf.exists ? "listo" : "error"}">${pdf.exists ? pageCount + " paginas" : "PDF no encontrado"}</span>
+    </div>
+    <div class="panel page-role-config">
+      <div class="page-role-switch" aria-label="Rol que se editara">
+        <button type="button" data-page-role-mode="problem" class="${state.pageRoleMode === "problem" ? "active" : ""}">Enunciados</button>
+        <button type="button" data-page-role-mode="solution" class="${state.pageRoleMode === "solution" ? "active" : ""}">Soluciones</button>
+        <button type="button" data-page-role-mode="both" class="${state.pageRoleMode === "both" ? "active" : ""}">Ambos</button>
+      </div>
+      <label>Patron del libro
+        <select id="solutionStructureMode">
+          ${[
+            ["unknown", "Por definir"],
+            ["separate_sections", "Secciones separadas"],
+            ["interleaved", "Problema seguido de solucion"],
+            ["hybrid", "Estructura mixta"],
+            ["no_solutions", "Sin soluciones"],
+          ].map(([value, label]) => `<option value="${value}" ${state.problemSolutionStructure.structure_mode === value ? "selected" : ""}>${label}</option>`).join("")}
+        </select>
+      </label>
+      <label>Estado de soluciones
+        <select id="solutionStatus">
+          ${[
+            ["pending_review", "Pendiente de revisar"],
+            ["identified", "Identificadas"],
+            ["confirmed_absent", "Ausencia confirmada"],
+            ["external_source", "Documento externo"],
+            ["uncertain", "Incierto"],
+          ].map(([value, label]) => `<option value="${value}" ${state.problemSolutionStructure.solution_status === value ? "selected" : ""}>${label}</option>`).join("")}
+        </select>
+      </label>
+      <label>Conjunto o practica
+        <input id="exerciseSetId" value="${escapeAttr(state.problemSolutionStructure.exercise_set_id || "")}" placeholder="p. ej. practica_04" />
+      </label>
     </div>
     <div class="toolbar">
       <button id="prevPdf">Anterior</button>
       <button id="nextPdf">Siguiente</button>
       <div class="field"><input id="pageInput" value="${state.pdfPage}" /></div>
       <button id="goPdf">Ir</button>
-      <button id="togglePdf" class="secondary">${state.selectedPages.has(state.pdfPage) ? "Quitar pagina" : "Seleccionar pagina"}</button>
-      <div class="field"><input id="rangeInput" value="${selectedRangeText()}" placeholder="22-50 o 1,3,7-10" /></div>
+      <button id="togglePdf" class="secondary">${pageToggleText(state.pdfPage)}</button>
+      <div class="field"><input id="rangeInput" value="${activeRoleRangeText()}" placeholder="22-50 o 1,3,7-10" /></div>
       <button id="applyRange">Usar rango</button>
       <button id="selectAllPages">Todas</button>
       <button id="clearPages">Limpiar</button>
@@ -5864,22 +6050,41 @@ function renderPagesStage() {
         <input id="syncDetectedPages" type="checkbox" ${state.syncDetectedPages ? "checked" : ""} />
         <span>Sincronizar Boxes</span>
       </label>
-      <span class="selection-count">${state.selectedPages.size} seleccionada(s)</span>
+      <span class="selection-count">${state.selectedPages.size} enunciado(s) | ${state.solutionPages.size} solucion(es)</span>
     </div>
     ${renderModelStrip(["pdf_detector", "number_alt_detector"])}
     ${renderTaskProgress("pages")}
     <div id="pagePicker" class="page-picker"></div>
     <div class="grid-two">
-      <div class="canvas-wrap page-canvas ${state.selectedPages.has(state.pdfPage) ? "is-selected" : ""}">
-        <div class="canvas-badge">${state.selectedPages.has(state.pdfPage) ? "Pagina seleccionada" : "Pagina no seleccionada"}</div>
+      <div class="canvas-wrap page-canvas ${pageRoleClasses(state.pdfPage)} ${pageRoleState(state.pdfPage) !== "none" ? "is-selected" : ""}">
+        <div class="canvas-badge">${displayPageRole(state.pdfPage)}</div>
         <canvas id="pdfCanvas"></canvas>
       </div>
       <div class="panel">
-        <h3>Seleccionadas</h3>
+        <h3>Mapa de paginas</h3>
         <div id="selectedPagesList" class="list"></div>
       </div>
     </div>
   `;
+  document.querySelectorAll("[data-page-role-mode]").forEach((button) => {
+    button.onclick = () => {
+      state.pageRoleMode = String(button.dataset.pageRoleMode || "problem");
+      persistFactoryUiState();
+      renderPagesStage();
+    };
+  });
+  $("solutionStructureMode").onchange = () => {
+    state.problemSolutionStructure.structure_mode = String($("solutionStructureMode").value || "unknown");
+    persistSelectedPagesChange();
+  };
+  $("solutionStatus").onchange = () => {
+    state.problemSolutionStructure.solution_status = String($("solutionStatus").value || "pending_review");
+    persistSelectedPagesChange();
+  };
+  $("exerciseSetId").onchange = () => {
+    state.problemSolutionStructure.exercise_set_id = String($("exerciseSetId").value || "").trim();
+    persistSelectedPagesChange();
+  };
   $("prevPdf").onclick = () => setPdfPage(Math.max(1, state.pdfPage - 1));
   $("nextPdf").onclick = () => setPdfPage(Math.min(pageCount || 1, state.pdfPage + 1));
   $("goPdf").onclick = () => setPdfPage(Number($("pageInput").value || 1));
@@ -5887,13 +6092,12 @@ function renderPagesStage() {
     if (event.key === "Enter") setPdfPage(Number($("pageInput").value || 1));
   };
   $("togglePdf").onclick = () => {
-    if (state.selectedPages.has(state.pdfPage)) state.selectedPages.delete(state.pdfPage);
-    else state.selectedPages.add(state.pdfPage);
+    togglePageForActiveRole(state.pdfPage);
     persistSelectedPagesChange();
     updatePagesStageSelectionUi();
   };
   $("applyRange").onclick = () => {
-    state.selectedPages = parseRange($("rangeInput").value, pageCount);
+    replaceActivePageRoleSet(parseRange($("rangeInput").value, pageCount));
     persistSelectedPagesChange();
     updatePagesStageSelectionUi();
   };
@@ -5901,12 +6105,12 @@ function renderPagesStage() {
     if (event.key === "Enter") $("applyRange").click();
   };
   $("selectAllPages").onclick = () => {
-    state.selectedPages = new Set(Array.from({ length: pageCount }, (_, index) => index + 1));
+    replaceActivePageRoleSet(new Set(Array.from({ length: pageCount }, (_, index) => index + 1)));
     persistSelectedPagesChange();
     updatePagesStageSelectionUi();
   };
   $("clearPages").onclick = () => {
-    state.selectedPages = new Set();
+    replaceActivePageRoleSet(new Set());
     persistSelectedPagesChange();
     updatePagesStageSelectionUi();
   };
@@ -5921,7 +6125,9 @@ function renderPagesStage() {
   setInspector({
     "PDF": pdf.path || "-",
     "Pagina actual": state.pdfPage,
-    "Paginas elegidas": selectedRangeText() || "-",
+    "Enunciados": selectedRangeText() || "-",
+    "Soluciones": compactPageRange([...state.solutionPages]) || "-",
+    "Rol actual": activePageRoleLabel(),
   });
 }
 
@@ -5937,7 +6143,7 @@ function renderPagePicker(pageCount) {
   picker.innerHTML = `
     ${partial ? `<div class="muted page-picker-note">Mostrando ${pages.length} de ${pageCount} paginas. Usa Ir o rango para saltar rapido.</div>` : ""}
     ${pages.map((page) => `
-    <button class="page-chip ${page === state.pdfPage ? "current" : ""} ${state.selectedPages.has(page) ? "selected" : ""}" data-page="${page}" title="Pagina ${page}: clic para ver, doble clic para seleccionar">
+    <button class="page-chip ${page === state.pdfPage ? "current" : ""} ${pageRoleClasses(page)}" data-page="${page}" title="Pagina ${page}: ${displayPageRole(page)}. Clic para ver; doble clic edita ${activePageRoleLabel()}">
       ${page}
     </button>
   `).join("")}
@@ -5960,8 +6166,7 @@ function renderPagePicker(pageCount) {
     window.clearTimeout(pagePickerClickTimer);
     pagePickerClickTimer = null;
     const page = Number(item.dataset.page);
-    if (state.selectedPages.has(page)) state.selectedPages.delete(page);
-    else state.selectedPages.add(page);
+    togglePageForActiveRole(page);
     state.pdfPage = page;
     persistSelectedPagesChange();
     drawImageOnCanvas($("pdfCanvas"), pdfPageImageUrl(state.pdfPage, 150));
@@ -5989,6 +6194,9 @@ function pagePickerRenderState(pageCount) {
   for (const page of state.selectedPages) {
     if (Math.abs(Number(page) - current) <= 4) visible.add(Number(page));
   }
+  for (const page of state.solutionPages) {
+    if (Math.abs(Number(page) - current) <= 4) visible.add(Number(page));
+  }
   const pages = [...visible].filter((page) => page >= 1 && page <= pageCount).sort((a, b) => a - b);
   return { pages, signature: `window:${pageCount}:${pages.join(",")}`, partial: pages.length < pageCount };
 }
@@ -6003,25 +6211,33 @@ function refreshPagePickerWindow(pageCount) {
 }
 
 function updatePagesStageSelectionUi() {
-  const selected = state.selectedPages.has(state.pdfPage);
+  const selected = pageRoleState(state.pdfPage) !== "none";
   const pageCount = Number(state.snapshot?.pdf?.page_count || 0);
   const toggle = $("togglePdf");
-  if (toggle) toggle.textContent = selected ? "Quitar pagina" : "Seleccionar pagina";
+  if (toggle) toggle.textContent = pageToggleText(state.pdfPage);
   const count = document.querySelector(".selection-count");
-  if (count) count.textContent = `${state.selectedPages.size} seleccionada(s)`;
+  if (count) count.textContent = `${state.selectedPages.size} enunciado(s) | ${state.solutionPages.size} solucion(es)`;
   const pageInput = $("pageInput");
   if (pageInput && document.activeElement !== pageInput) pageInput.value = String(state.pdfPage);
   const rangeInput = $("rangeInput");
-  if (rangeInput && document.activeElement !== rangeInput) rangeInput.value = selectedRangeText();
+  if (rangeInput && document.activeElement !== rangeInput) rangeInput.value = activeRoleRangeText();
   const canvasWrap = document.querySelector(".page-canvas");
-  if (canvasWrap) canvasWrap.classList.toggle("is-selected", selected);
+  if (canvasWrap) {
+    canvasWrap.classList.toggle("is-selected", selected);
+    ["selected-problem", "selected-solution", "selected-both"].forEach((name) => canvasWrap.classList.remove(name));
+    if (selected) canvasWrap.classList.add(`selected-${pageRoleState(state.pdfPage)}`);
+  }
   const badge = document.querySelector(".canvas-badge");
-  if (badge) badge.textContent = selected ? "Pagina seleccionada" : "Pagina no seleccionada";
+  if (badge) badge.textContent = displayPageRole(state.pdfPage);
   if (!refreshPagePickerWindow(pageCount)) {
     document.querySelectorAll("#pagePicker [data-page]").forEach((item) => {
       const page = Number(item.dataset.page || 0);
       item.classList.toggle("current", page === state.pdfPage);
-      item.classList.toggle("selected", state.selectedPages.has(page));
+      item.classList.toggle("selected", pageRoleState(page) !== "none");
+      item.classList.toggle("selected-problem", pageRoleState(page) === "problem");
+      item.classList.toggle("selected-solution", pageRoleState(page) === "solution");
+      item.classList.toggle("selected-both", pageRoleState(page) === "both");
+      item.title = `Pagina ${page}: ${displayPageRole(page)}. Clic para ver; doble clic edita ${activePageRoleLabel()}`;
     });
   }
   renderSelectedPagesList();
@@ -6029,14 +6245,16 @@ function updatePagesStageSelectionUi() {
   setInspector({
     "PDF": pdf.path || "-",
     "Pagina actual": state.pdfPage,
-    "Paginas elegidas": selectedRangeText() || "-",
+    "Enunciados": selectedRangeText() || "-",
+    "Soluciones": compactPageRange([...state.solutionPages]) || "-",
+    "Rol actual": activePageRoleLabel(),
   });
 }
 
 function renderSelectedPagesList() {
   const list = $("selectedPagesList");
   if (!list) return;
-  const pages = [...state.selectedPages].sort((a, b) => a - b);
+  const pages = [...new Set([...state.selectedPages, ...state.solutionPages])].sort((a, b) => a - b);
   const { visiblePages, hiddenCount } = selectedPagesListWindow(pages);
   list.innerHTML = pages.length ? `
     ${hiddenCount ? `<div class="muted selected-pages-note">Mostrando ${visiblePages.length} de ${pages.length} paginas seleccionadas.</div>` : ""}
@@ -6044,22 +6262,33 @@ function renderSelectedPagesList() {
     <div class="row-card page-row ${page === state.pdfPage ? "active" : ""}" data-page="${page}">
       <div>
         <strong>Pagina ${page}</strong>
-        <div class="muted">Seleccionada para esta instancia.</div>
+        <div class="muted">${displayPageRole(page)}.</div>
       </div>
-      <button data-remove-page="${page}" title="Quitar pagina">X</button>
+      <div class="page-role-row-actions">
+        ${state.selectedPages.has(page) ? `<button data-remove-problem="${page}" title="Quitar rol de enunciado">P x</button>` : ""}
+        ${state.solutionPages.has(page) ? `<button data-remove-solution="${page}" title="Quitar rol de solucion">S x</button>` : ""}
+      </div>
     </div>
   `).join("")}
   ` : `<p class="muted">Sin paginas seleccionadas.</p>`;
   list.querySelectorAll("[data-page]").forEach((item) => {
     item.onclick = (event) => {
-      if (event.target.closest("[data-remove-page]")) return;
+      if (event.target.closest("[data-remove-problem], [data-remove-solution]")) return;
       setPdfPage(Number(item.dataset.page));
     };
   });
-  list.querySelectorAll("[data-remove-page]").forEach((btn) => {
+  list.querySelectorAll("[data-remove-problem]").forEach((btn) => {
     btn.onclick = (event) => {
       event.stopPropagation();
-      state.selectedPages.delete(Number(btn.dataset.removePage));
+      state.selectedPages.delete(Number(btn.dataset.removeProblem));
+      persistSelectedPagesChange();
+      updatePagesStageSelectionUi();
+    };
+  });
+  list.querySelectorAll("[data-remove-solution]").forEach((btn) => {
+    btn.onclick = (event) => {
+      event.stopPropagation();
+      state.solutionPages.delete(Number(btn.dataset.removeSolution));
       persistSelectedPagesChange();
       updatePagesStageSelectionUi();
     };
@@ -11210,6 +11439,9 @@ function renderCandidateStage() {
       <strong>${readyRecords.length} registro(s) listo(s) para subir.</strong>
       <span class="muted">Destino local: ${escapeHtml(candidateDbName() || "BD no definida")} | Biblioteca</span>
     </div>
+    <div id="problemSolutionHost" class="panel problem-solution-review">
+      <p class="muted">Cargando enlaces entre problemas y soluciones...</p>
+    </div>
     <div id="promotionUploadReport" class="panel muted">${state.promotionUploadReport ? renderPromotionUploadReport(state.promotionUploadReport) : "Usa la previsualizacion antes de escribir en la base de datos."}</div>
     <div id="candidateHost" class="panel">${record ? "Cargando candidato..." : "Selecciona un registro."}</div>
   `;
@@ -11217,6 +11449,7 @@ function renderCandidateStage() {
   if (previewBtn) previewBtn.onclick = () => uploadPromotionReady({ dryRun: true });
   const uploadBtn = $("uploadPromotionReady");
   if (uploadBtn) uploadBtn.onclick = () => uploadPromotionReady({ dryRun: false });
+  renderProblemSolutionReview({ refresh: true });
   if (record) {
     api(`/api/promotion?record_id=${encodeURIComponent(record.record_id)}`).then((candidate) => {
       $("candidateHost").innerHTML = `
@@ -11225,6 +11458,8 @@ function renderCandidateStage() {
           <div class="candidate-cell"><span>Subida manual</span><strong>${candidate.explicit_upload_enabled ? "Si" : "No"}</strong></div>
           <div class="candidate-cell"><span>Automatica</span><strong>${candidate.promotion_enabled ? "Si" : "No"}</strong></div>
           <div class="candidate-cell"><span>Escrituras</span><strong>${(candidate.write_operations || []).length}</strong></div>
+          <div class="candidate-cell"><span>Bundle</span><strong>${escapeHtml(candidate.bundle_id || "Sin bundle")}</strong></div>
+          <div class="candidate-cell"><span>Soluciones</span><strong>${Number(candidate.solution_count || 0)}</strong></div>
         </div>
         <h3>Bloqueos pendientes</h3>
         ${blockingIssuesHtml(candidate.blocking_issues || [])}
@@ -11237,6 +11472,282 @@ function renderCandidateStage() {
     "Destino actual": "staging",
     "Subida manual": readyRecords.some((row) => row.record_id === record.record_id) ? "lista" : "bloqueada",
   } : "");
+}
+
+async function renderProblemSolutionReview({ refresh = false } = {}) {
+  const host = $("problemSolutionHost");
+  if (!host) return;
+  if (refresh && !state.problemSolutionLoading) {
+    state.problemSolutionLoading = true;
+    state.problemSolutionError = "";
+    try {
+      state.problemSolutionWorkspace = await api("/api/problem-solutions");
+    } catch (err) {
+      state.problemSolutionError = err.message;
+    } finally {
+      state.problemSolutionLoading = false;
+    }
+  }
+  if (!$("problemSolutionHost")) return;
+  const workspace = state.problemSolutionWorkspace || {};
+  const structure = workspace.structure || state.problemSolutionStructure || {};
+  const solutionUnits = Array.isArray(workspace.solution_units) ? workspace.solution_units : [];
+  const candidates = Array.isArray(workspace.candidate_links) ? workspace.candidate_links : [];
+  const bundles = Array.isArray(workspace.bundles) ? workspace.bundles : [];
+  const problemStatuses = Array.isArray(workspace.problem_statuses)
+    ? workspace.problem_statuses
+    : Object.values(workspace.problem_statuses || {});
+  const activeRecord = selectedRecord();
+  const activeProblemStatus = problemStatuses.find((row) => String(row.record_id || "") === String(activeRecord?.record_id || "")) || {};
+  const pendingCandidates = candidates.filter((row) => !["human_confirmed", "rejected", "orphan"].includes(String(row.decision || "")));
+  host.innerHTML = `
+    <div class="problem-solution-heading">
+      <div>
+        <h3>Enlace de problemas con soluciones</h3>
+        <p class="muted">Gottfried define la estructura; Ingrid entrega boxes; el enlace solo queda listo despues de confirmacion humana.</p>
+      </div>
+      <button id="generateProblemSolutionLinks" type="button" ${solutionUnits.length ? "" : "disabled"}>Generar propuestas</button>
+    </div>
+    ${state.problemSolutionError ? `<p class="status-pill status-error">${escapeHtml(state.problemSolutionError)}</p>` : ""}
+    <div class="candidate-grid problem-solution-metrics">
+      <div class="candidate-cell"><span>Unidades solucion</span><strong>${solutionUnits.length}</strong></div>
+      <div class="candidate-cell"><span>Propuestas pendientes</span><strong>${pendingCandidates.length}</strong></div>
+      <div class="candidate-cell"><span>Bundles listos</span><strong>${bundles.filter((row) => Boolean(row.ready_for_db) || String(row.promotion_status || "") === "ready_for_db").length}</strong></div>
+      <div class="candidate-cell"><span>Propuestas invalidadas</span><strong>${Number(workspace.counts?.invalidated_candidates || 0)}</strong></div>
+    </div>
+    <label class="problem-solution-reviewer">Revisor
+      <input id="problemSolutionReviewer" value="human" />
+    </label>
+    ${String(structure.solution_status || "") === "external_source" ? `
+      <fieldset class="problem-solution-document-relation">
+        <legend>Solucionario externo</legend>
+        <label>PDF o identificador relacionado
+          <input id="externalSolutionDocumentReference" placeholder="Ruta, codigo o ID del solucionario" />
+        </label>
+        <label class="checkbox-line">
+          <input id="externalSolutionRelationConfirmed" type="checkbox" />
+          Confirmo humanamente que este solucionario corresponde al libro o practica actual.
+        </label>
+      </fieldset>
+    ` : ""}
+    ${activeRecord ? `
+      <div class="problem-solution-record-status">
+        <div>
+          <span class="muted">Problema seleccionado</span>
+          <strong>${escapeHtml(activeRecord.record_id || "-")}</strong>
+          <small>Estado de solucion: ${escapeHtml(activeProblemStatus.status || "pending_review")}</small>
+        </div>
+        <div class="problem-solution-record-status-actions">
+          <button type="button" data-problem-solution-record-status="solutions_absent_confirmed" data-record-id="${escapeAttr(activeRecord.record_id || "")}">Confirmar sin solucion</button>
+          <button type="button" data-problem-solution-record-status="pending_review" data-record-id="${escapeAttr(activeRecord.record_id || "")}">Volver a pendiente</button>
+        </div>
+      </div>
+    ` : ""}
+    <div class="problem-solution-candidates">
+      ${candidates.map((candidate) => problemSolutionCandidateHtml(candidate)).join("") || `<p class="muted">${solutionUnits.length ? "Genera propuestas para comenzar la revision." : "Aun no hay boxes de solucion revisados."}</p>`}
+    </div>
+    ${bundles.length ? `
+      <details class="technical-details">
+        <summary>Bundles confirmados (${bundles.length})</summary>
+        <div class="problem-solution-bundles">
+          ${bundles.map((bundle) => `
+            <div class="row-card">
+              <strong>${escapeHtml(bundle.bundle_id || "-")}</strong>
+              <span>${escapeHtml(bundle.promotion_status || bundle.status || "-")} | ${Number(bundle.solution_count ?? bundle.solutions?.length ?? 0)} solucion(es)</span>
+              ${bundle.stale_reason ? `<small>${escapeHtml(bundle.stale_reason)}</small>` : ""}
+            </div>
+          `).join("")}
+        </div>
+      </details>
+    ` : ""}
+  `;
+  const generate = $("generateProblemSolutionLinks");
+  if (generate) generate.onclick = generateProblemSolutionLinks;
+  host.querySelectorAll("[data-solution-review-action]").forEach((button) => {
+    button.onclick = () => reviewProblemSolutionCandidate(button);
+  });
+  host.querySelectorAll("[data-problem-solution-record-status]").forEach((button) => {
+    button.onclick = () => setProblemSolutionRecordStatus(button);
+  });
+}
+
+function problemSolutionCandidateHtml(candidate) {
+  const candidateId = String(candidate.candidate_link_id || candidate.link_id || "");
+  const problem = candidate.problem_ref || candidate.problem || {};
+  const solution = candidate.solution_ref || candidate.solution || {};
+  const proposedProblemUnitId = String(problem.unit_id || problem.record_id || candidate.problem_unit_id || "");
+  const problemId = proposedProblemUnitId || "-";
+  const solutionId = String(solution.unit_id || candidate.solution_unit_id || "-");
+  const ambiguity = Array.isArray(candidate.ambiguity_reasons) ? candidate.ambiguity_reasons : [];
+  const signals = Array.isArray(candidate.signals) ? candidate.signals : [];
+  const evidence = candidate.evidence || {};
+  const finalDecision = Boolean(candidate.human_review?.reviewer)
+    && ["human_confirmed", "rejected", "orphan"].includes(String(candidate.decision || ""));
+  return `
+    <article class="problem-solution-candidate decision-${escapeAttr(candidate.decision || "pending")}">
+      <div class="problem-solution-evidence">
+        <div>
+          <span class="muted">Problema</span>
+          <strong>${escapeHtml(problemId)}</strong>
+          <small>Numero ${escapeHtml(problem.number_normalized || candidate.problem_number || "-")}</small>
+          ${problemSolutionEvidenceMediaHtml(evidence.problem || {}, "problem")}
+        </div>
+        <div>
+          <span class="muted">Solucion visual</span>
+          <strong>${escapeHtml(solutionId)}</strong>
+          <small>Pagina(s) ${escapeHtml(compactPageRange(solution.page_span || solution.pages || []) || "-")}</small>
+          ${problemSolutionEvidenceMediaHtml(evidence.solution || {}, "solution")}
+        </div>
+      </div>
+      <div class="problem-solution-score">
+        <span class="status-pill status-${String(candidate.decision || "").includes("conflict") ? "error" : "requiere_revision"}">${escapeHtml(candidate.decision || "review_required")}</span>
+        <strong>${Number(candidate.score || 0)} pts</strong>
+        <small>Margen ${Number(candidate.score_margin || 0)}</small>
+      </div>
+      ${ambiguity.length ? `<ul class="issue-list">${ambiguity.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""}
+      ${signals.length ? `
+        <details class="problem-solution-signals">
+          <summary>Señales usadas (${signals.length})</summary>
+          <ul>${signals.map((signal) => `<li><strong>${escapeHtml(signal.name || "señal")}</strong> ${Number(signal.weight || 0) >= 0 ? "+" : ""}${Number(signal.weight || 0)} · ${escapeHtml(String(signal.evidence ?? ""))}</li>`).join("")}</ul>
+        </details>
+      ` : ""}
+      ${finalDecision ? `<p class="muted">Decision humana vigente: ${escapeHtml(candidate.decision)}. Puedes corregirla con las acciones siguientes.</p>` : ""}
+      <div class="problem-solution-actions">
+        <input data-solution-comment="${escapeAttr(candidateId)}" placeholder="Comentario o evidencia" />
+        <button type="button" data-solution-review-action="confirm" data-candidate-id="${escapeAttr(candidateId)}" data-problem-unit-id="${escapeAttr(proposedProblemUnitId)}" ${proposedProblemUnitId ? "" : "disabled"}>Confirmar</button>
+        <button type="button" data-solution-review-action="reassign" data-candidate-id="${escapeAttr(candidateId)}">Reasignar</button>
+        <button type="button" data-solution-review-action="reject" data-candidate-id="${escapeAttr(candidateId)}">Rechazar</button>
+        <button type="button" data-solution-review-action="mark_orphan" data-candidate-id="${escapeAttr(candidateId)}">Sin pareja</button>
+      </div>
+    </article>
+  `;
+}
+
+function problemSolutionEvidenceMediaHtml(evidence, role) {
+  const rawFragments = role === "solution"
+    ? (Array.isArray(evidence?.fragments) ? evidence.fragments : [])
+    : [{
+        fragment_id: evidence?.crop_id || evidence?.unit_id || "problem",
+        page_number: evidence?.page_number || evidence?.page_span?.[0] || "",
+        image_url: evidence?.image_url || "",
+      }];
+  const fragments = rawFragments.filter((fragment) => String(fragment?.image_url || "").trim());
+  if (!fragments.length) {
+    return `<p class="problem-solution-media-empty">Recorte visual no disponible; no confirmes sin revisar la fuente.</p>`;
+  }
+  return `
+    <div class="problem-solution-media ${role === "solution" ? "solution-media" : "problem-media"}">
+      ${fragments.map((fragment, index) => `
+        <figure>
+          <img src="${escapeAttr(fragment.image_url)}" alt="${role === "solution" ? "Solucion" : "Problema"} ${index + 1}" loading="lazy" />
+          <figcaption>p. ${escapeHtml(fragment.page_number || fragment.page_span?.[0] || "-")} · ${escapeHtml(fragment.fragment_id || `fragmento ${index + 1}`)}</figcaption>
+        </figure>
+      `).join("")}
+    </div>
+  `;
+}
+
+async function generateProblemSolutionLinks() {
+  const structure = state.problemSolutionStructure || {};
+  setBusy("Generando propuestas problema-solucion...");
+  try {
+    state.problemSolutionWorkspace = await api("/api/problem-solutions/generate", {
+      method: "POST",
+      body: {
+        pattern: String(structure.structure_mode || "unknown"),
+        exercise_set_id: String(structure.exercise_set_id || ""),
+        source_mapping_confirmed: String(structure.solution_status || "") === "identified",
+        expected_revision: Number(state.problemSolutionWorkspace?.revision || 0),
+      },
+    });
+    setStatus("Propuestas generadas. Todas requieren revision humana.");
+    await renderProblemSolutionReview({ refresh: true });
+  } catch (err) {
+    setStatus(`No se pudieron generar enlaces: ${err.message}`);
+  } finally {
+    $("busyText").textContent = "";
+  }
+}
+
+async function reviewProblemSolutionCandidate(button) {
+  const candidateId = String(button.dataset.candidateId || "");
+  const action = String(button.dataset.solutionReviewAction || "");
+  const commentInput = [...document.querySelectorAll("[data-solution-comment]")]
+    .find((item) => String(item.dataset.solutionComment || "") === candidateId);
+  const comment = commentInput?.value || "";
+  const reviewer = String($("problemSolutionReviewer")?.value || "human").trim() || "human";
+  const structure = state.problemSolutionWorkspace?.structure || state.problemSolutionStructure || {};
+  const externalDocument = String(structure.solution_status || "") === "external_source";
+  const externalDocumentReference = String($("externalSolutionDocumentReference")?.value || "").trim();
+  const externalRelationConfirmed = Boolean($("externalSolutionRelationConfirmed")?.checked);
+  let problemUnitId = String(button.dataset.problemUnitId || "");
+  if (action === "reassign") {
+    problemUnitId = String(window.prompt("ID del problema correcto:", problemUnitId) || "").trim();
+    if (!problemUnitId) return;
+  }
+  if (["confirm", "reassign"].includes(action) && externalDocument) {
+    if (!externalDocumentReference || !externalRelationConfirmed) {
+      setStatus("Indica el solucionario externo y confirma humanamente su relacion antes de enlazar.");
+      return;
+    }
+  }
+  button.disabled = true;
+  try {
+    state.problemSolutionWorkspace = await api("/api/problem-solutions/review", {
+      method: "POST",
+      body: {
+        candidate_link_id: candidateId,
+        action,
+        problem_unit_id: problemUnitId,
+        reviewer,
+        comment,
+        document_relation: externalDocument ? {
+          external: true,
+          status: externalRelationConfirmed ? "confirmed" : "pending",
+          document_reference: externalDocumentReference,
+          confirmed_by: reviewer,
+        } : {
+          external: false,
+          status: "same_document",
+        },
+        expected_revision: Number(state.problemSolutionWorkspace?.revision || 0),
+      },
+    });
+    setStatus(action === "confirm" ? "Enlace confirmado y bundle actualizado en staging." : "Decision guardada en el historial.");
+    await renderProblemSolutionReview({ refresh: true });
+  } catch (err) {
+    setStatus(`No se pudo guardar la decision: ${err.message}`);
+    button.disabled = false;
+  }
+}
+
+async function setProblemSolutionRecordStatus(button) {
+  const recordId = String(button.dataset.recordId || "").trim();
+  const status = String(button.dataset.problemSolutionRecordStatus || "").trim();
+  const reviewer = String($("problemSolutionReviewer")?.value || "human").trim() || "human";
+  if (!recordId || !status) return;
+  let comment = "";
+  if (status === "solutions_absent_confirmed") {
+    comment = String(window.prompt("Comentario de verificacion (opcional):", "No se encontro solucion para este problema en el material revisado.") || "").trim();
+  }
+  button.disabled = true;
+  try {
+    state.problemSolutionWorkspace = await api("/api/problem-solutions/problem-status", {
+      method: "POST",
+      body: {
+        record_id: recordId,
+        status,
+        reviewer,
+        comment,
+        expected_revision: Number(state.problemSolutionWorkspace?.revision || 0),
+      },
+    });
+    setStatus(status === "solutions_absent_confirmed" ? "Ausencia de solucion confirmada para el problema." : "Problema devuelto a revision de soluciones.");
+    await renderProblemSolutionReview();
+  } catch (err) {
+    setStatus(`No se pudo guardar el estado de solucion: ${err.message}`);
+    button.disabled = false;
+  }
 }
 
 function candidateDbName() {
@@ -11323,7 +11834,8 @@ function renderPromotionUploadReport(report) {
       ${rows.slice(0, 80).map((row) => `
         <div class="upload-result-row status-${escapeAttr(normalizeStatus(row.status || "pendiente"))}">
           <strong>${escapeHtml(row.record_id || "-")}</strong>
-          <span>${escapeHtml(row.status || "-")}${row.numero_original ? ` | n. ${escapeHtml(row.numero_original)}` : ""}${row.problem_id ? ` | BD #${escapeHtml(row.problem_id)}` : ""}</span>
+          <span>${escapeHtml(row.status || "-")}${row.numero_original ? ` | n. ${escapeHtml(row.numero_original)}` : ""}${row.problem_id ? ` | BD #${escapeHtml(row.problem_id)}` : ""}${row.solution_count ? ` | ${Number(row.solution_count)} solucion(es)` : ""}</span>
+          ${row.bundle_id ? `<small>Bundle ${escapeHtml(row.bundle_id)}</small>` : ""}
           ${row.blocking_issues ? `<small>${escapeHtml((row.blocking_issues || []).join(", "))}</small>` : ""}
           ${row.message ? `<small>${escapeHtml(row.message)}</small>` : ""}
         </div>

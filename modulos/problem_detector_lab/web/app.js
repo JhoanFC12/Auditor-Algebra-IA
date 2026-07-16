@@ -5,10 +5,12 @@ const state = {
   currentIndex: -1,
   sample: null,
   image: null,
+  baselineBoxes: [],
   boxes: [],
   selectedId: null,
   activeClass: 0,
   drawMode: false,
+  dirty: false,
   dragging: null,
   scale: 1,
   loadSeq: 0,
@@ -42,11 +44,16 @@ const ZOOM_STEP = 1.15;
 
 const canvas = document.getElementById("labelCanvas");
 const ctx = canvas.getContext("2d");
-const shell = document.querySelector(".canvas-shell");
+const baselineCanvas = document.getElementById("baselineCanvas");
+const baselineCtx = baselineCanvas.getContext("2d");
+const editorShell = document.getElementById("editorShell");
+const baselineShell = document.getElementById("baselineShell");
 
 function log(message) {
   const statusLog = document.getElementById("statusLog");
+  const statusPreview = document.getElementById("statusPreview");
   statusLog.textContent = `${new Date().toLocaleTimeString()}  ${message}\n${statusLog.textContent}`.slice(0, 5000);
+  if (statusPreview) statusPreview.textContent = message;
 }
 
 async function apiGet(path) {
@@ -71,12 +78,16 @@ function resetCurrentSample() {
   state.currentIndex = -1;
   state.sample = null;
   state.image = null;
+  state.baselineBoxes = [];
   state.boxes = [];
   state.selectedId = null;
   state.dragging = null;
+  state.dirty = false;
   state.loadingSampleId = null;
   canvas.width = 1;
   canvas.height = 1;
+  baselineCanvas.width = 1;
+  baselineCanvas.height = 1;
   renderBoxList();
   renderCurrentInfo();
   updateDimensionPanel();
@@ -161,6 +172,7 @@ function applyDimensions() {
   box.y2 = Number(numberInput("dimY2").value || 0);
   const normalized = normalizeBox(box);
   Object.assign(box, normalized);
+  state.dirty = true;
   draw();
   renderBoxList();
   updateDimensionPanel();
@@ -170,13 +182,19 @@ function applyDimensions() {
 function updateStats() {
   const dataset = state.dataset || {};
   document.getElementById("totalCount").textContent = dataset.samples_total || 0;
-  document.getElementById("reviewedCount").textContent = dataset.reviewed_total || 0;
-  document.getElementById("pendingCount").textContent = dataset.pending_total || 0;
+  document.getElementById("reviewedCount").textContent = dataset.approved_total ?? dataset.reviewed_total ?? 0;
+  document.getElementById("pendingCount").textContent = dataset.pending_human_total ?? dataset.pending_total ?? 0;
+  const exportBtn = document.getElementById("exportYamlBtn");
+  exportBtn.disabled = dataset.supports_export === false;
+  exportBtn.title = dataset.supports_export === false ? "Deshabilitado durante la auditoria comparativa" : "";
+  const approveBtn = document.getElementById("approveBtn");
+  approveBtn.hidden = !dataset.comparison_mode;
 }
 
 function shortDatasetName(name) {
   return String(name || "")
     .replace(/^problem_detector_multiclass_100_lab_/, "")
+    .replace(/^problem_detector_multiclass_ingrid_review_/, "Ingrid ")
     .replace(/_/g, " ");
 }
 
@@ -217,9 +235,15 @@ function applyFilters() {
     if (group && sample.group !== group) return false;
     if (review === "pending" && sample.reviewed) return false;
     if (review === "reviewed" && !sample.reviewed) return false;
+    if (review === "changed" && !sample.has_changes) return false;
+    if (review === "unchanged" && sample.has_changes) return false;
     return true;
-  });
+  }).sort((a, b) => Number(a.order || 0) - Number(b.order || 0));
+  state.currentIndex = state.sample
+    ? state.filtered.findIndex((sample) => sample.sample_key === state.sample.sample_key)
+    : -1;
   renderSampleList();
+  updateNavigationButtons();
 }
 
 function renderSampleList() {
@@ -227,11 +251,18 @@ function renderSampleList() {
   list.innerHTML = "";
   for (const [index, sample] of state.filtered.entries()) {
     const button = document.createElement("button");
-    button.className = `sample-card ${state.sample?.sample_id === sample.sample_id ? "active" : ""}`;
+    const active = state.sample?.sample_key === sample.sample_key;
+    const badgeClass = sample.reviewed ? "reviewed" : sample.has_changes ? "changed" : "pending";
+    const badgeText = sample.reviewed
+      ? "Aprobada"
+      : sample.has_changes
+        ? `Cambio de Ingrid (${sample.delta_box_count >= 0 ? "+" : ""}${sample.delta_box_count})`
+        : "Sin cambios · pendiente";
+    button.className = `sample-card ${active ? "active" : ""}`;
     button.innerHTML = `
       <span class="title">${index + 1}. ${sample.group} | pag. ${sample.page_number}</span>
-      <span class="line">${sample.instance || sample.sample_id}</span>
-      <span class="badge ${sample.reviewed ? "reviewed" : "pending"}">${sample.reviewed ? "Revisada" : "Pendiente"}</span>
+      <span class="line">${sample.split ? `${sample.split} · ` : ""}${sample.instance || sample.sample_id}</span>
+      <span class="badge ${badgeClass}">${badgeText}</span>
     `;
     button.addEventListener("click", () => loadSampleByFilteredIndex(index));
     list.appendChild(button);
@@ -240,7 +271,13 @@ function renderSampleList() {
 
 function renderBoxList() {
   const list = document.getElementById("boxList");
+  const countLabel = document.getElementById("boxCountLabel");
   list.innerHTML = "";
+  if (countLabel) countLabel.textContent = String(state.boxes.length);
+  if (!state.boxes.length) {
+    list.innerHTML = '<p class="empty-boxes">No hay boxes en esta pagina.</p>';
+    return;
+  }
   for (const [index, box] of state.boxes.entries()) {
     const button = document.createElement("button");
     button.className = `box-card ${state.selectedId === box.id ? "active" : ""}`;
@@ -260,111 +297,204 @@ function renderBoxList() {
   }
 }
 
+function boxSignature(box) {
+  const normalized = normalizeBox(box);
+  return [
+    Number(normalized.cls),
+    Number(normalized.x1).toFixed(2),
+    Number(normalized.y1).toFixed(2),
+    Number(normalized.x2).toFixed(2),
+    Number(normalized.y2).toFixed(2),
+  ].join("|");
+}
+
+function liveComparison() {
+  const before = new Map();
+  const after = new Map();
+  for (const box of state.baselineBoxes) {
+    const key = boxSignature(box);
+    before.set(key, (before.get(key) || 0) + 1);
+  }
+  for (const box of state.boxes) {
+    const key = boxSignature(box);
+    after.set(key, (after.get(key) || 0) + 1);
+  }
+  let added = 0;
+  let removed = 0;
+  const addedByClass = { 0: 0, 1: 0, 2: 0 };
+  const removedByClass = { 0: 0, 1: 0, 2: 0 };
+  for (const [key, count] of after) {
+    const delta = Math.max(0, count - (before.get(key) || 0));
+    if (delta) {
+      added += delta;
+      addedByClass[Number(key.split("|")[0])] += delta;
+    }
+  }
+  for (const [key, count] of before) {
+    const delta = Math.max(0, count - (after.get(key) || 0));
+    if (delta) {
+      removed += delta;
+      removedByClass[Number(key.split("|")[0])] += delta;
+    }
+  }
+  return {
+    hasChanges: Boolean(added || removed),
+    added,
+    removed,
+    addedByClass,
+    removedByClass,
+    delta: state.boxes.length - state.baselineBoxes.length,
+  };
+}
+
+function renderComparisonInfo() {
+  const summary = document.getElementById("comparisonSummary");
+  const badge = document.getElementById("comparisonBadge");
+  const baselineCount = document.getElementById("baselineBoxCount");
+  const approveBtn = document.getElementById("approveBtn");
+  if (!state.sample) {
+    summary.textContent = "Carga una muestra para comparar.";
+    baselineCount.textContent = "0 boxes";
+    badge.textContent = "Sin muestra";
+    badge.className = "comparison-badge unchanged";
+    approveBtn.disabled = true;
+    return;
+  }
+  const comparison = liveComparison();
+  const approved = !state.dirty && (state.sample.review?.human_review === "approved" || state.sample.review?.status === "human_approved");
+  baselineCount.textContent = `${state.baselineBoxes.length} boxes`;
+  badge.textContent = approved ? "Aprobada" : comparison.hasChanges ? "Modificada" : "Sin cambios";
+  badge.className = `comparison-badge ${approved ? "approved" : comparison.hasChanges ? "changed" : "unchanged"}`;
+  approveBtn.disabled = approved || !state.sample.comparison?.has_baseline;
+  approveBtn.textContent = approved ? "Comparacion aprobada" : "Aprobar comparacion";
+  summary.innerHTML = `
+    <div class="comparison-metrics">
+      <div class="comparison-metric"><span>Anterior</span><strong>${state.baselineBoxes.length}</strong></div>
+      <div class="comparison-metric"><span>Ingrid</span><strong>${state.boxes.length}</strong></div>
+      <div class="comparison-metric"><span>Delta</span><strong>${comparison.delta >= 0 ? "+" : ""}${comparison.delta}</strong><small>+${comparison.added} / -${comparison.removed}</small></div>
+    </div>
+    ${state.dirty ? '<div class="unsaved-banner">Cambios humanos sin guardar. Se guardaran antes de aprobar.</div>' : ""}
+    <div class="class-deltas">
+      <div class="class-delta"><b>Problema</b><span>+${comparison.addedByClass[0]} / -${comparison.removedByClass[0]}</span></div>
+      <div class="class-delta"><b>Numero</b><span>+${comparison.addedByClass[1]} / -${comparison.removedByClass[1]}</span></div>
+      <div class="class-delta"><b>Alternativas</b><span>+${comparison.addedByClass[2]} / -${comparison.removedByClass[2]}</span></div>
+    </div>
+  `;
+}
+
+function updateNavigationButtons() {
+  const prevBtn = document.getElementById("prevBtn");
+  const nextBtn = document.getElementById("nextBtn");
+  const hasCurrent = state.currentIndex >= 0 && state.currentIndex < state.filtered.length;
+  prevBtn.disabled = !hasCurrent || state.currentIndex === 0;
+  nextBtn.disabled = !hasCurrent || state.currentIndex === state.filtered.length - 1;
+  prevBtn.textContent = "← Anterior";
+  nextBtn.textContent = "Siguiente →";
+}
+
 function renderCurrentInfo() {
   const sample = state.sample;
-  document.getElementById("sampleTitle").textContent = sample ? sample.sample_id : "Sin muestra";
+  document.getElementById("sampleTitle").textContent = sample ? `${sample.split ? `${sample.split}/` : ""}${sample.sample_id}` : "Sin muestra";
   document.getElementById("sampleMeta").textContent = sample
-    ? `${sample.width} x ${sample.height} | problemas ${classCount(0)} | numeros ${classCount(1)} | alternativas ${classCount(2)}`
+    ? `${state.currentIndex + 1} de ${state.filtered.length} | ${sample.width} x ${sample.height} | problemas ${classCount(0)} | numeros ${classCount(1)} | alternativas ${classCount(2)}`
     : "";
   document.getElementById("zoomLabel").textContent = `${Math.round(state.scale * 100)}%`;
+  renderComparisonInfo();
+  updateNavigationButtons();
 }
 
 function fitToView() {
   if (!state.sample) return;
-  const availableW = Math.max(320, shell.clientWidth - 40);
-  const availableH = Math.max(280, shell.clientHeight - 40);
+  const availableW = Math.max(260, Math.min(editorShell.clientWidth, baselineShell.clientWidth) - 40);
+  const availableH = Math.max(280, Math.min(editorShell.clientHeight, baselineShell.clientHeight) - 40);
   state.scale = Math.min(1.15, Math.max(0.15, Math.min(availableW / state.sample.width, availableH / state.sample.height)));
   draw();
+  editorShell.scrollTo(0, 0);
+  baselineShell.scrollTo(0, 0);
 }
 
 function setInitialZoom() {
   state.scale = INITIAL_ZOOM;
-  draw();
+  fitToView();
 }
 
 function clampZoom(value) {
   return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value));
 }
 
-function setZoom(nextScale, anchorEvent = null) {
+function setZoom(nextScale) {
   if (!state.sample || !state.image) return;
   const previousScale = state.scale;
   const targetScale = clampZoom(nextScale);
   if (Math.abs(targetScale - previousScale) < 0.0001) return;
-
-  let anchor = null;
-  if (anchorEvent) {
-    const shellRect = shell.getBoundingClientRect();
-    anchor = {
-      imagePoint: canvasPoint(anchorEvent),
-      viewportX: anchorEvent.clientX - shellRect.left,
-      viewportY: anchorEvent.clientY - shellRect.top,
-    };
-  }
-
+  const editorCenter = {
+    x: (editorShell.scrollLeft + editorShell.clientWidth / 2) / previousScale,
+    y: (editorShell.scrollTop + editorShell.clientHeight / 2) / previousScale,
+  };
   state.scale = targetScale;
   draw();
-
-  if (anchor) {
-    const shellRect = shell.getBoundingClientRect();
-    const canvasRect = canvas.getBoundingClientRect();
-    const canvasLeft = canvasRect.left - shellRect.left + shell.scrollLeft;
-    const canvasTop = canvasRect.top - shellRect.top + shell.scrollTop;
-    shell.scrollLeft = canvasLeft + anchor.imagePoint.x * state.scale - anchor.viewportX;
-    shell.scrollTop = canvasTop + anchor.imagePoint.y * state.scale - anchor.viewportY;
-  }
+  editorShell.scrollLeft = Math.max(0, editorCenter.x * state.scale - editorShell.clientWidth / 2);
+  editorShell.scrollTop = Math.max(0, editorCenter.y * state.scale - editorShell.clientHeight / 2);
+  baselineShell.scrollLeft = editorShell.scrollLeft;
+  baselineShell.scrollTop = editorShell.scrollTop;
 }
 
 function onCanvasWheel(event) {
   if (!event.ctrlKey || !state.sample || !state.image) return;
   event.preventDefault();
   const factor = event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
-  setZoom(state.scale * factor, event);
+  setZoom(state.scale * factor);
 }
 
-function draw() {
+function drawCanvas(targetCanvas, targetCtx, boxes, editable) {
   if (!state.sample || !state.image) return;
-  canvas.width = Math.max(1, Math.round(state.sample.width * state.scale));
-  canvas.height = Math.max(1, Math.round(state.sample.height * state.scale));
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(state.image, 0, 0, canvas.width, canvas.height);
-  ctx.lineWidth = Math.max(2, 3 * state.scale);
-  ctx.font = `${Math.max(11, 13 * state.scale)}px Segoe UI`;
-  for (const [index, rawBox] of state.boxes.entries()) {
+  targetCanvas.width = Math.max(1, Math.round(state.sample.width * state.scale));
+  targetCanvas.height = Math.max(1, Math.round(state.sample.height * state.scale));
+  targetCtx.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
+  targetCtx.drawImage(state.image, 0, 0, targetCanvas.width, targetCanvas.height);
+  targetCtx.lineWidth = Math.max(2, 3 * state.scale);
+  targetCtx.font = `${Math.max(11, 13 * state.scale)}px Segoe UI`;
+  for (const [index, rawBox] of boxes.entries()) {
     const box = normalizeBox(rawBox);
     const color = colors[box.cls] || "#999";
     const x = box.x1 * state.scale;
     const y = box.y1 * state.scale;
     const w = (box.x2 - box.x1) * state.scale;
     const h = (box.y2 - box.y1) * state.scale;
-    ctx.strokeStyle = color;
-    ctx.fillStyle = `${color}22`;
-    ctx.fillRect(x, y, w, h);
-    ctx.strokeRect(x, y, w, h);
-    ctx.fillStyle = color;
-    ctx.fillRect(x, Math.max(0, y - 18), Math.min(180, 74 + String(index + 1).length * 8), 18);
-    ctx.fillStyle = "#fff";
-    ctx.fillText(`${index + 1} ${classLabels[box.cls] || box.cls}`, x + 5, Math.max(13, y - 5));
-    if (box.id === state.selectedId) drawHandles(box);
+    targetCtx.strokeStyle = color;
+    targetCtx.fillStyle = `${color}22`;
+    targetCtx.fillRect(x, y, w, h);
+    targetCtx.strokeRect(x, y, w, h);
+    targetCtx.fillStyle = color;
+    targetCtx.fillRect(x, Math.max(0, y - 18), Math.min(180, 74 + String(index + 1).length * 8), 18);
+    targetCtx.fillStyle = "#fff";
+    targetCtx.fillText(`${index + 1} ${classLabels[box.cls] || box.cls}`, x + 5, Math.max(13, y - 5));
+    if (editable && box.id === state.selectedId) drawHandles(targetCtx, box);
   }
+}
+
+function draw() {
+  if (!state.sample || !state.image) return;
+  drawCanvas(baselineCanvas, baselineCtx, state.baselineBoxes, false);
+  drawCanvas(canvas, ctx, state.boxes, true);
   renderCurrentInfo();
   updateDimensionPanel();
 }
 
-function drawHandles(box) {
+function drawHandles(targetCtx, box) {
   const points = [
     [box.x1, box.y1],
     [box.x2, box.y1],
     [box.x2, box.y2],
     [box.x1, box.y2],
   ];
-  ctx.fillStyle = "#fff";
-  ctx.strokeStyle = "#00111f";
+  targetCtx.fillStyle = "#fff";
+  targetCtx.strokeStyle = "#00111f";
   for (const [x, y] of points) {
     const sx = x * state.scale;
     const sy = y * state.scale;
-    ctx.fillRect(sx - 5, sy - 5, 10, 10);
-    ctx.strokeRect(sx - 5, sy - 5, 10, 10);
+    targetCtx.fillRect(sx - 5, sy - 5, 10, 10);
+    targetCtx.strokeRect(sx - 5, sy - 5, 10, 10);
   }
 }
 
@@ -477,6 +607,7 @@ function onMouseMove(event) {
 
 function onMouseUp() {
   if (!state.dragging) return;
+  state.dirty = true;
   state.boxes = state.boxes
     .map(normalizeBox)
     .filter((box) => box.x2 - box.x1 >= 4 && box.y2 - box.y1 >= 4);
@@ -494,7 +625,10 @@ async function loadDataset() {
   renderDatasetSelector();
   buildGroupFilter();
   applyFilters();
-  if (state.filtered.length && !state.sample) await loadSampleByFilteredIndex(0);
+  if (state.filtered.length && !state.sample) {
+    const changedIndex = state.filtered.findIndex((sample) => sample.has_changes);
+    await loadSampleByFilteredIndex(changedIndex >= 0 ? changedIndex : 0);
+  }
 }
 
 async function loadDatasets() {
@@ -521,8 +655,12 @@ async function switchDataset() {
     await loadDatasets();
     updateStats();
     buildGroupFilter();
+    document.getElementById("reviewFilter").value = "";
     applyFilters();
-    if (state.filtered.length) await loadSampleByFilteredIndex(0);
+    if (state.filtered.length) {
+      const changedIndex = state.filtered.findIndex((sample) => sample.has_changes);
+      await loadSampleByFilteredIndex(changedIndex >= 0 ? changedIndex : 0);
+    }
     log(`Dataset activo: ${datasetRoot}`);
   } finally {
     switchBtn.disabled = false;
@@ -535,11 +673,12 @@ async function loadSampleByFilteredIndex(index) {
   const loadSeq = state.loadSeq + 1;
   state.loadSeq = loadSeq;
   state.dragging = null;
-  state.loadingSampleId = sample.sample_id;
-  log(`Cargando muestra: ${sample.sample_id}`);
+  state.loadingSampleId = sample.sample_key || sample.sample_id;
+  log(`Cargando muestra: ${sample.split ? `${sample.split}/` : ""}${sample.sample_id}`);
   let data;
   try {
-    data = await apiGet(`/api/sample?id=${encodeURIComponent(sample.sample_id)}`);
+    const splitQuery = sample.split ? `&split=${encodeURIComponent(sample.split)}` : "";
+    data = await apiGet(`/api/sample?id=${encodeURIComponent(sample.sample_id)}${splitQuery}`);
   } catch (err) {
     if (loadSeq === state.loadSeq) {
       state.loadingSampleId = null;
@@ -554,7 +693,9 @@ async function loadSampleByFilteredIndex(index) {
     state.currentIndex = index;
     state.sample = data;
     state.image = img;
+    state.baselineBoxes = (data.baseline_boxes || data.boxes || []).map((box) => ({ ...box, id: `baseline-${box.id || boxId()}` }));
     state.boxes = (data.boxes || []).map((box) => ({ ...box, id: box.id || boxId() }));
+    state.dirty = false;
     state.selectedId = null;
     state.dragging = null;
     state.loadingSampleId = null;
@@ -562,7 +703,8 @@ async function loadSampleByFilteredIndex(index) {
     renderSampleList();
     renderBoxList();
     updateDimensionPanel();
-    log(`Muestra cargada: ${sample.sample_id}`);
+    const comparison = data.comparison || {};
+    log(`Muestra cargada: ${sample.sample_id} | anterior ${comparison.baseline_box_count ?? state.baselineBoxes.length} | Ingrid ${comparison.current_box_count ?? state.boxes.length}`);
   };
   img.onerror = () => {
     if (loadSeq === state.loadSeq) {
@@ -582,8 +724,11 @@ async function saveCurrent() {
   const saveSeq = state.saveSeq + 1;
   state.saveSeq = saveSeq;
   const activeSampleId = state.sample.sample_id;
+  const activeSplit = state.sample.split || "";
+  const activeSampleKey = state.sample.sample_key || activeSampleId;
   const payload = {
     sample_id: activeSampleId,
+    split: activeSplit,
     boxes: state.boxes.map(normalizeBox).map((box) => ({
       cls: Number(box.cls),
       x1: box.x1,
@@ -598,11 +743,13 @@ async function saveCurrent() {
     log(`Guardando labels de: ${activeSampleId}`);
     const data = await apiPost("/api/save", payload);
     await loadDataset();
-    const newIndex = state.filtered.findIndex((sample) => sample.sample_id === data.sample_id);
-    const stillViewingSameSample = state.sample?.sample_id === activeSampleId;
+    const newIndex = state.filtered.findIndex((sample) => sample.sample_key === data.sample_key);
+    const stillViewingSameSample = state.sample?.sample_key === activeSampleKey;
     if (stillViewingSameSample && saveSeq === state.saveSeq) {
       state.sample = data;
+      state.baselineBoxes = (data.baseline_boxes || []).map((box) => ({ ...box, id: `baseline-${box.id || boxId()}` }));
       state.boxes = (data.boxes || []).map((box) => ({ ...box, id: box.id || boxId() }));
+      state.dirty = false;
       if (newIndex >= 0) state.currentIndex = newIndex;
       draw();
       renderBoxList();
@@ -616,9 +763,41 @@ async function saveCurrent() {
   }
 }
 
+async function approveCurrent() {
+  if (!state.sample || !state.sample.comparison?.has_baseline) return;
+  const approveBtn = document.getElementById("approveBtn");
+  approveBtn.disabled = true;
+  try {
+    if (state.dirty) {
+      log("Guardando ajustes humanos antes de aprobar...");
+      await saveCurrent();
+    }
+    const data = await apiPost("/api/review/approve", {
+      sample_id: state.sample.sample_id,
+      split: state.sample.split || "",
+    });
+    state.sample = data;
+    state.baselineBoxes = (data.baseline_boxes || []).map((box) => ({ ...box, id: `baseline-${box.id || boxId()}` }));
+    state.boxes = (data.boxes || []).map((box) => ({ ...box, id: box.id || boxId() }));
+    state.dirty = false;
+    await loadDataset();
+    draw();
+    renderBoxList();
+    log(`Comparacion aprobada: ${data.split ? `${data.split}/` : ""}${data.sample_id}`);
+    if (data.approval_gate?.status === "ready_for_database") {
+      log(`Revision completa: ${data.approval_gate.approved_total}/${data.approval_gate.samples_total}. Dataset listo para la siguiente etapa de base de datos.`);
+    } else if (data.approval_gate) {
+      log(`Progreso humano: ${data.approval_gate.approved_total}/${data.approval_gate.samples_total} aprobadas.`);
+    }
+  } finally {
+    renderComparisonInfo();
+  }
+}
+
 function deleteSelected() {
   if (!state.selectedId) return;
   state.boxes = state.boxes.filter((box) => box.id !== state.selectedId);
+  state.dirty = true;
   state.selectedId = null;
   draw();
   renderBoxList();
@@ -633,6 +812,7 @@ function setActiveClass(cls) {
   const selected = state.boxes.find((box) => box.id === state.selectedId);
   if (selected) {
     selected.cls = state.activeClass;
+    state.dirty = true;
     draw();
     renderBoxList();
     updateDimensionPanel();
@@ -656,21 +836,46 @@ function isEditableTarget(target) {
   return tag === "input" || tag === "textarea" || tag === "select" || Boolean(target.isContentEditable);
 }
 
-function nextSample(delta) {
+async function nextSample(delta) {
   if (!state.filtered.length) return;
+  if (state.dirty) {
+    log("Guardando ajustes antes de cambiar de pagina...");
+    await saveCurrent();
+  }
+  if (state.currentIndex < 0) {
+    await loadSampleByFilteredIndex(0);
+    return;
+  }
   const next = Math.max(0, Math.min(state.filtered.length - 1, state.currentIndex + delta));
-  loadSampleByFilteredIndex(next);
+  if (next === state.currentIndex) return;
+  await loadSampleByFilteredIndex(next);
+}
+
+let syncingScroll = false;
+
+function mirrorScroll(source, target) {
+  if (syncingScroll) return;
+  syncingScroll = true;
+  target.scrollLeft = source.scrollLeft;
+  target.scrollTop = source.scrollTop;
+  requestAnimationFrame(() => {
+    syncingScroll = false;
+  });
 }
 
 function bindEvents() {
   canvas.addEventListener("mousedown", onMouseDown);
-  shell.addEventListener("wheel", onCanvasWheel, { passive: false });
+  editorShell.addEventListener("wheel", onCanvasWheel, { passive: false });
+  baselineShell.addEventListener("wheel", onCanvasWheel, { passive: false });
+  editorShell.addEventListener("scroll", () => mirrorScroll(editorShell, baselineShell));
+  baselineShell.addEventListener("scroll", () => mirrorScroll(baselineShell, editorShell));
   window.addEventListener("mousemove", onMouseMove);
   window.addEventListener("mouseup", onMouseUp);
   document.getElementById("saveBtn").addEventListener("click", () => saveCurrent().catch((err) => log(`Error guardando: ${err.message}`)));
+  document.getElementById("approveBtn").addEventListener("click", () => approveCurrent().catch((err) => log(`Error aprobando: ${err.message}`)));
   document.getElementById("switchDatasetBtn").addEventListener("click", () => switchDataset().catch((err) => log(`Error cambiando dataset: ${err.message}`)));
-  document.getElementById("prevBtn").addEventListener("click", () => nextSample(-1));
-  document.getElementById("nextBtn").addEventListener("click", () => nextSample(1));
+  document.getElementById("prevBtn").addEventListener("click", () => nextSample(-1).catch((err) => log(`Error navegando: ${err.message}`)));
+  document.getElementById("nextBtn").addEventListener("click", () => nextSample(1).catch((err) => log(`Error navegando: ${err.message}`)));
   document.getElementById("deleteBtn").addEventListener("click", deleteSelected);
   document.getElementById("fitBtn").addEventListener("click", fitToView);
   document.getElementById("selectBtn").addEventListener("click", () => setDrawMode(false));
@@ -714,6 +919,16 @@ function bindEvents() {
       event.preventDefault();
       setDrawMode(!state.drawMode);
       log(state.drawMode ? "Modo dibujar activado con tecla D." : "Modo seleccionar activado con tecla D.");
+      return;
+    }
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      nextSample(-1).catch((err) => log(`Error navegando: ${err.message}`));
+      return;
+    }
+    if (event.key === "ArrowRight") {
+      event.preventDefault();
+      nextSample(1).catch((err) => log(`Error navegando: ${err.message}`));
       return;
     }
     if (event.key === "Delete") deleteSelected();

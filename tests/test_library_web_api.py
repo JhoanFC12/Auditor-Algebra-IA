@@ -367,6 +367,140 @@ class LibraryWebApiTests(unittest.TestCase):
                 else:
                     os.environ["PDF_LIBRARY_COVER_ROOT"] = previous_cover_root
 
+    def test_page_selection_persists_problem_solution_structure_and_overlap(self) -> None:
+        controller = _FakeController()
+        runtimes: list[_FakeRuntime] = []
+
+        def runtime_factory(context: InstancePipelineContext) -> _FakeRuntime:
+            runtime = _FakeRuntime(context)
+            runtimes.append(runtime)
+            return runtime
+
+        api = LibraryWebApi(controller=controller, runtime_factory=runtime_factory, open_url=lambda *_args: None)
+
+        selection = api.dispatch(
+            "POST",
+            "/api/library/instances/11/page-selection",
+            {},
+            {
+                "db_name": "demo_db",
+                "book_id": 1,
+                "selected_pages": [4, 2, 3, 4],
+                "solution_selected_pages": [9, 4, 8, 9],
+                "page_count": 10,
+                "source": "web_ui",
+                "problem_solution_structure": {
+                    "structure_mode": "interleaved",
+                    "solution_status": "identified",
+                    "exercise_set_id": "set-01",
+                },
+            },
+        )
+
+        self.assertTrue(selection["changed"])
+        self.assertEqual(selection["selected_pages"], [2, 3, 4])
+        self.assertEqual(selection["solution_selected_pages"], [4, 8, 9])
+        self.assertEqual(
+            selection["solution_page_ranges"],
+            [
+                {"start_page": 4, "end_page": 4},
+                {"start_page": 8, "end_page": 9},
+            ],
+        )
+        self.assertIn(4, selection["selected_pages"])
+        self.assertIn(4, selection["solution_selected_pages"])
+        self.assertEqual(selection["problem_solution_structure"]["structure_mode"], "interleaved")
+        self.assertEqual(selection["problem_solution_structure"]["solution_status"], "identified")
+        self.assertEqual(selection["problem_solution_structure"]["exercise_set_id"], "set-01")
+
+        saved_snapshot = controller.instances[1][0]["config_snapshot"]
+        self.assertEqual(saved_snapshot["selected_pages"], [2, 3, 4])
+        self.assertEqual(saved_snapshot["solution_selected_pages"], [4, 8, 9])
+        self.assertEqual(
+            saved_snapshot["solution_page_selection"]["schema_version"],
+            "library_instance_solution_page_selection_v1",
+        )
+        self.assertEqual(
+            saved_snapshot["problem_solution_structure"]["schema_version"],
+            "library_instance_problem_solution_structure_v1",
+        )
+
+        factory = api.dispatch(
+            "POST",
+            "/api/library/instances/11/factory",
+            {},
+            {"db_name": "demo_db", "book_id": 1, "open": False},
+        )
+        self.assertEqual(factory["context"]["selected_pages"], [2, 3, 4])
+        self.assertEqual(factory["context"]["solution_selected_pages"], [4, 8, 9])
+        self.assertEqual(factory["context"]["problem_solution_structure"]["exercise_set_id"], "set-01")
+        self.assertEqual(len(runtimes), 1)
+
+        selection_again = api.dispatch(
+            "POST",
+            "/api/library/instances/11/page-selection",
+            {},
+            {
+                "db_name": "demo_db",
+                "book_id": 1,
+                "selected_pages": [2, 3, 4],
+                "solution_selected_pages": [4, 8, 9],
+                "page_count": 10,
+                "source": "web_ui",
+                "problem_solution_structure": {
+                    "structure_mode": "interleaved",
+                    "solution_status": "identified",
+                    "exercise_set_id": "set-01",
+                },
+            },
+        )
+        self.assertFalse(selection_again["changed"])
+
+    def test_legacy_page_selection_preserves_problem_solution_fields(self) -> None:
+        controller = _FakeController()
+        api = LibraryWebApi(controller=controller, runtime_factory=_FakeRuntime, open_url=lambda *_args: None)
+
+        api.dispatch(
+            "POST",
+            "/api/library/instances/11/page-selection",
+            {},
+            {
+                "db_name": "demo_db",
+                "book_id": 1,
+                "selected_pages": [2, 3],
+                "solution_selected_pages": [7, 8],
+                "page_count": 10,
+                "source": "web_ui",
+                "problem_solution_structure": {
+                    "structure_mode": "separate_sections",
+                    "solution_status": "identified",
+                    "exercise_set_id": "practice-a",
+                },
+            },
+        )
+        before = dict(controller.instances[1][0]["config_snapshot"])
+
+        legacy = api.dispatch(
+            "POST",
+            "/api/library/instances/11/page-selection",
+            {},
+            {
+                "db_name": "demo_db",
+                "book_id": 1,
+                "selected_pages": [1, 2, 3],
+                "page_count": 10,
+                "source": "web_ui",
+            },
+        )
+
+        after = controller.instances[1][0]["config_snapshot"]
+        self.assertEqual(after["selected_pages"], [1, 2, 3])
+        self.assertEqual(after["solution_selected_pages"], before["solution_selected_pages"])
+        self.assertEqual(after["solution_page_selection"], before["solution_page_selection"])
+        self.assertEqual(after["problem_solution_structure"], before["problem_solution_structure"])
+        self.assertEqual(legacy["solution_selected_pages"], [7, 8])
+        self.assertEqual(legacy["problem_solution_structure"]["exercise_set_id"], "practice-a")
+
     def test_library_api_caches_gets_and_invalidates_after_mutation(self) -> None:
         controller = _FakeController()
         api = LibraryWebApi(controller=controller)

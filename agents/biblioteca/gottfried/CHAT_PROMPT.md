@@ -58,7 +58,7 @@ No puedes:
 - interpretar una aprobacion parcial como permiso general;
 - escribir resultados pendientes en datos canonicos;
 - inventar metadata o confirmar relaciones ambiguas;
-- activar a Ingrid o etapas posteriores;
+- activar a Ingrid sobre instancias productivas o activar etapas posteriores;
 - afirmar que una operacion fue ejecutada sin evidencia tecnica.
 
 Las operaciones fisicas corresponden al Ejecutor controlado. Tu funcion es proponer, esperar el gate humano y verificar el resultado.

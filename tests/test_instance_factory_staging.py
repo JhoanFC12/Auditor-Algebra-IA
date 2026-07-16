@@ -1915,6 +1915,22 @@ class InstanceFactoryStagingTests(unittest.TestCase):
                     {"start_page": 9, "end_page": 9},
                 ],
                 "page_selection": {"review_status": "pending"},
+                "solution_selected_pages": [5, 12, 13],
+                "solution_page_selection": {
+                    "schema_version": "library_instance_solution_page_selection_v1",
+                    "selected_pages": [5, 12, 13],
+                    "page_ranges": [
+                        {"start_page": 5, "end_page": 5},
+                        {"start_page": 12, "end_page": 13},
+                    ],
+                    "review_status": "pending",
+                },
+                "problem_solution_structure": {
+                    "schema_version": "library_instance_problem_solution_structure_v1",
+                    "structure_mode": "hybrid",
+                    "solution_status": "identified",
+                    "exercise_set_id": "set-05",
+                },
             },
         }
 
@@ -1936,7 +1952,49 @@ class InstanceFactoryStagingTests(unittest.TestCase):
         )
         self.assertTrue(context.page_selection_configured)
         self.assertEqual(context.page_selection_review_status, "pending")
+        self.assertEqual(context.solution_selected_pages, [5, 12, 13])
+        self.assertEqual(
+            context.solution_selected_page_ranges,
+            [
+                {"start_page": 5, "end_page": 5},
+                {"start_page": 12, "end_page": 13},
+            ],
+        )
+        self.assertTrue(context.solution_page_selection_configured)
+        self.assertEqual(context.solution_page_selection_review_status, "pending")
+        self.assertEqual(context.problem_solution_structure["structure_mode"], "hybrid")
+        self.assertEqual(context.problem_solution_structure["solution_status"], "identified")
+        self.assertEqual(context.problem_solution_structure["exercise_set_id"], "set-05")
+        self.assertEqual(context.to_dict()["solution_selected_pages"], [5, 12, 13])
+        self.assertEqual(
+            context.to_dict()["solution_page_selection"]["schema_version"],
+            "library_instance_solution_page_selection_v1",
+        )
+        self.assertEqual(context.to_dict()["problem_solution_structure"]["exercise_set_id"], "set-05")
         self.assertTrue(context.pdf_path.endswith("libro.pdf"))
+
+    def test_context_legacy_page_selection_defaults_problem_solution_fields(self) -> None:
+        context = InstancePipelineContext.from_library_instance(
+            {"id": 1, "codigo": "ALG01", "pdf_path": "E:/Banco/libro.pdf"},
+            {
+                "id": 2,
+                "tipo": "S01",
+                "config_snapshot": {
+                    "selected_pages": [2, 3],
+                    "page_selection": {"selected_pages": [2, 3], "review_status": "pending"},
+                },
+            },
+            db_name="demo",
+        )
+
+        self.assertEqual(context.selected_pages, [2, 3])
+        self.assertEqual(context.solution_selected_pages, [])
+        self.assertEqual(context.solution_selected_page_ranges, [])
+        self.assertFalse(context.solution_page_selection_configured)
+        self.assertEqual(context.to_dict()["solution_page_selection"], {})
+        self.assertEqual(context.problem_solution_structure["structure_mode"], "unknown")
+        self.assertEqual(context.problem_solution_structure["solution_status"], "pending_review")
+        self.assertEqual(context.problem_solution_structure["exercise_set_id"], "")
 
     def test_page_box_change_invalidates_downstream_staging_records(self) -> None:
         try:

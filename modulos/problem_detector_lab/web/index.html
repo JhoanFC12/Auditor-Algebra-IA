@@ -21,6 +21,7 @@
         <button id="switchDatasetBtn" class="secondary">Cargar dataset</button>
         <button id="exportYamlBtn" class="secondary">Crear dataset.yaml</button>
         <button id="saveBtn" class="primary">Guardar labels</button>
+        <button id="approveBtn" class="approve">Aprobar comparacion</button>
       </div>
     </header>
 
@@ -30,8 +31,8 @@
           <h2>Muestras</h2>
           <div class="stats">
             <span><strong id="totalCount">0</strong><small>Total</small></span>
-            <span><strong id="reviewedCount">0</strong><small>Revisadas</small></span>
-            <span><strong id="pendingCount">0</strong><small>Pendientes</small></span>
+            <span><strong id="reviewedCount">0</strong><small>Aprobadas</small></span>
+            <span><strong id="pendingCount">0</strong><small>Por aprobar</small></span>
           </div>
           <input id="searchInput" class="input" placeholder="Buscar instancia o pagina" />
           <select id="groupFilter" class="input">
@@ -39,8 +40,10 @@
           </select>
           <select id="reviewFilter" class="input">
             <option value="">Todos los estados</option>
-            <option value="pending">Pendientes</option>
-            <option value="reviewed">Revisadas</option>
+            <option value="changed">Solo con cambios</option>
+            <option value="unchanged">Sin cambios</option>
+            <option value="pending">Pendientes de aprobacion</option>
+            <option value="reviewed">Aprobadas</option>
           </select>
           <div id="sampleList" class="sample-list"></div>
         </section>
@@ -72,34 +75,83 @@
           </div>
         </div>
 
-        <div class="canvas-shell panel">
-          <canvas id="labelCanvas"></canvas>
+        <div class="comparison-grid">
+          <section class="compare-pane panel baseline-pane">
+            <header class="compare-heading">
+              <div>
+                <span class="compare-kicker">Referencia bloqueada</span>
+                <strong>Version anterior</strong>
+              </div>
+              <span id="baselineBoxCount" class="count-chip">0 boxes</span>
+            </header>
+            <div id="baselineShell" class="canvas-shell comparison-shell readonly-shell">
+              <canvas id="baselineCanvas"></canvas>
+            </div>
+          </section>
+          <section class="compare-pane panel current-pane">
+            <header class="compare-heading">
+              <div>
+                <span class="compare-kicker">Editable</span>
+                <strong>Modificacion de Ingrid</strong>
+              </div>
+              <span id="comparisonBadge" class="comparison-badge unchanged">Sin cambios</span>
+            </header>
+            <div id="editorShell" class="canvas-shell comparison-shell">
+              <canvas id="labelCanvas"></canvas>
+            </div>
+          </section>
         </div>
       </section>
 
       <aside class="inspector">
-        <section class="panel">
-          <h2>Boxes</h2>
-          <p class="muted">Rojo: problema. Amarillo: numero. Azul: alternativas.</p>
-          <div id="boxList" class="box-list"></div>
+        <section class="panel inspector-main">
+          <section class="inspector-section comparison-section">
+            <div class="inspector-heading">
+              <div>
+                <span class="section-kicker">Auditoria de boxes</span>
+                <h2>Comparacion</h2>
+              </div>
+            </div>
+            <div id="comparisonSummary" class="comparison-summary">Carga una muestra para comparar.</div>
+          </section>
+
+          <section class="inspector-section boxes-section">
+            <div class="inspector-heading boxes-heading">
+              <h2>Boxes</h2>
+              <span id="boxCountLabel" class="section-count">0</span>
+            </div>
+            <div class="box-legend" aria-label="Colores de clases">
+              <span><i class="legend-swatch problem-swatch"></i>Problema</span>
+              <span><i class="legend-swatch number-swatch"></i>Numero</span>
+              <span><i class="legend-swatch answer-swatch"></i>Alternativas</span>
+            </div>
+            <div id="boxList" class="box-list"></div>
+          </section>
+
+          <section class="inspector-section dimensions-panel">
+            <div class="inspector-heading">
+              <h2>Dimensiones</h2>
+            </div>
+            <p id="dimensionHint" class="dimension-hint muted">Selecciona un box para editar sus medidas.</p>
+            <div class="dimension-grid">
+              <label>X1<input id="dimX1" type="number" step="1" /></label>
+              <label>Y1<input id="dimY1" type="number" step="1" /></label>
+              <label>X2<input id="dimX2" type="number" step="1" /></label>
+              <label>Y2<input id="dimY2" type="number" step="1" /></label>
+              <label>Ancho<input id="dimW" type="number" step="1" /></label>
+              <label>Alto<input id="dimH" type="number" step="1" /></label>
+            </div>
+            <button id="applyDimensionsBtn" class="primary full">Aplicar dimensiones</button>
+          </section>
         </section>
-        <section class="panel dimensions-panel">
-          <h2>Dimensiones</h2>
-          <p id="dimensionHint" class="muted">Selecciona un box para editar sus medidas.</p>
-          <div class="dimension-grid">
-            <label>X1<input id="dimX1" type="number" step="1" /></label>
-            <label>Y1<input id="dimY1" type="number" step="1" /></label>
-            <label>X2<input id="dimX2" type="number" step="1" /></label>
-            <label>Y2<input id="dimY2" type="number" step="1" /></label>
-            <label>Ancho<input id="dimW" type="number" step="1" /></label>
-            <label>Alto<input id="dimH" type="number" step="1" /></label>
-          </div>
-          <button id="applyDimensionsBtn" class="primary full">Aplicar dimensiones</button>
-        </section>
-        <section class="panel">
-          <h2>Salida</h2>
+
+        <details class="panel output-panel">
+          <summary>
+            <strong>Salida</strong>
+            <span id="statusPreview" class="status-preview">Listo.</span>
+          </summary>
           <pre id="statusLog">Listo.</pre>
-        </section>
+        </details>
       </aside>
     </main>
 

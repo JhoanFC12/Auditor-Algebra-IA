@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import os
 import re
@@ -17,7 +18,7 @@ from modulos.instance_factory.models import InstancePipelineContext, PipelineSte
 from modulos.instance_factory.pipeline import InstancePdfPipelineService
 from modulos.instance_factory.staging import InstanceStagingStore
 import modulos.instance_factory.web_server as web_server_module
-from modulos.instance_factory.web_server import FactoryWebRuntime
+from modulos.instance_factory.web_server import FactoryWebRuntime, WebApiError
 
 
 class _FakeModels:
@@ -188,6 +189,16 @@ class _FakeEndpointManager:
         return {"schema_version": "hf_ocr_endpoint_status_v1", "status": "scaledToZero", "configured": True}
 
 
+class _StaticLibraryApi:
+    def __init__(self, response: dict) -> None:
+        self.response = response
+        self.calls: list[tuple[str, str]] = []
+
+    def dispatch(self, method: str, path: str, _query: dict, _payload: dict) -> dict:
+        self.calls.append((method, path))
+        return json.loads(json.dumps(self.response))
+
+
 class _CountingGolden:
     def __init__(self, rows: list[ProblemPageRecord]) -> None:
         self.rows = list(rows)
@@ -275,6 +286,469 @@ def _read_http_error(exc: urllib.error.HTTPError) -> dict:
 
 
 class InstanceFactoryWebServerTests(unittest.TestCase):
+    def test_problem_solution_api_upserts_generates_confirms_and_reloads_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            problem_crop = root / "problem.png"
+            second_problem_crop = root / "problem-2.png"
+            solution_crop = root / "solution.png"
+            problem_crop.write_bytes(b"problem")
+            second_problem_crop.write_bytes(b"problem-2")
+            solution_bytes = b"solution"
+            solution_crop.write_bytes(solution_bytes)
+            context = InstancePipelineContext(
+                book_code="ALG01",
+                instance_type="PRACTICA_04",
+                pdf_path=str(root / "book.pdf"),
+                problem_solution_structure={
+                    "schema_version": "problem_solution_structure_v1",
+                    "structure_mode": "separate_sections",
+                    "solution_status": "identified",
+                    "exercise_set_id": "practice_04",
+                },
+            )
+            store = InstanceStagingStore(context, root=root / "staging")
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_001",
+                    crop_id="crop_001",
+                    crop_path=str(problem_crop),
+                    status=StageStatus.READY,
+                    models={"ocr": "test-model"},
+                    confidence={"pdf_box": 1.0},
+                    normalized={
+                        "latex_rendered_item": r"\item[\textbf{1.}] [[curso=Algebra]] [[tema=Ecuaciones]] Halle $x$."
+                    },
+                    source={"page_number": 1, "bbox_px": [10, 20, 300, 400]},
+                )
+            )
+            store.upsert_record(
+                StagingProblemRecord(
+                    record_id="crop_002",
+                    crop_id="crop_002",
+                    crop_path=str(second_problem_crop),
+                    status=StageStatus.READY,
+                    models={"ocr": "test-model"},
+                    confidence={"pdf_box": 1.0},
+                    normalized={
+                        "latex_rendered_item": r"\item[\textbf{2.}] [[curso=Algebra]] [[tema=Ecuaciones]] Halle $y$."
+                    },
+                    source={"page_number": 2, "bbox_px": [10, 20, 300, 400]},
+                )
+            )
+            runtime = FactoryWebRuntime(context, service=_FakeService(context, store))
+
+            units = runtime._dispatch_api(
+                "POST",
+                "/api/problem-solutions/solution-units",
+                {},
+                {
+                    "expected_revision": 0,
+                    "solution_units": [
+                        {
+                            "solution_unit_id": "solution_001",
+                            "exercise_set_id": "practice_04",
+                            "number_normalized": "1",
+                            "page_span": [20, 20],
+                            "continuation_complete": True,
+                            "provenance": {
+                                "source_version": "ingrid_boxes_v1",
+                                "review_version": "human_review_v1",
+                            },
+                            "fragments": [
+                                {
+                                    "fragment_id": "solution_001_f1",
+                                    "order": 1,
+                                    "page_number": 20,
+                                    "page_span": [20, 20],
+                                    "bbox_px": [12, 40, 500, 700],
+                                    "crop_path": str(solution_crop),
+                                    "sha256": hashlib.sha256(solution_bytes).hexdigest(),
+                                    "fragment_role": "single",
+                                }
+                            ],
+                        }
+                    ]
+                },
+            )
+            self.assertEqual(units["solution_units"][0]["solution_unit_id"], "solution_001")
+            with self.assertRaises(WebApiError):
+                runtime._dispatch_api(
+                    "POST",
+                    "/api/problem-solutions/solution-units",
+                    {},
+                    {
+                        "solution_units": [
+                            {
+                                "solution_unit_id": "solution_001",
+                                "number_normalized": "99",
+                                "fragments": [],
+                            }
+                        ],
+                        "expected_revision": units["revision"],
+                    },
+                )
+            self.assertEqual(
+                store.problem_solution_snapshot()["solution_units"][0]["number_normalized"],
+                "1",
+            )
+
+            generated = runtime._dispatch_api(
+                "POST",
+                "/api/problem-solutions/generate",
+                {},
+                {
+                    "pattern": "separate_sections",
+                    "exercise_set_id": "practice_04",
+                    "source_mapping_confirmed": True,
+                    "expected_revision": units["revision"],
+                },
+            )
+            self.assertEqual(len(generated["candidate_links"]), 1)
+            candidate = generated["candidate_links"][0]
+            self.assertEqual(candidate["problem_ref"]["record_id"], "crop_001")
+            self.assertIn(candidate["decision"], {"link_proposed_high", "review_required"})
+            self.assertTrue(candidate["evidence"]["problem"]["image_url"].startswith("/api/file/"))
+            self.assertTrue(
+                candidate["evidence"]["solution"]["fragments"][0]["image_url"].startswith("/api/file/")
+            )
+
+            with self.assertRaises(WebApiError) as missing_revision:
+                runtime._dispatch_api(
+                    "POST",
+                    "/api/problem-solutions/review",
+                    {},
+                    {
+                        "candidate_link_id": candidate["candidate_link_id"],
+                        "action": "confirm",
+                        "problem_unit_id": "crop_001",
+                        "reviewer": "human-test",
+                    },
+                )
+            self.assertEqual(missing_revision.exception.status, 428)
+            self.assertEqual(missing_revision.exception.code, "problem_solution_revision_required")
+
+            solution_crop.unlink()
+            with self.assertRaises(WebApiError):
+                runtime._dispatch_api(
+                    "POST",
+                    "/api/problem-solutions/review",
+                    {},
+                    {
+                        "candidate_link_id": candidate["candidate_link_id"],
+                        "action": "confirm",
+                        "problem_unit_id": "crop_001",
+                        "reviewer": "human-test",
+                        "expected_revision": generated["revision"],
+                    },
+                )
+            unchanged = runtime._dispatch_api("GET", "/api/problem-solutions", {}, {})
+            self.assertEqual(unchanged["revision"], generated["revision"])
+            self.assertEqual(unchanged["review_events"], [])
+            self.assertEqual(unchanged["bundles"], [])
+            solution_crop.write_bytes(solution_bytes)
+
+            reviewed = runtime._dispatch_api(
+                "POST",
+                "/api/problem-solutions/review",
+                {},
+                {
+                    "candidate_link_id": candidate["candidate_link_id"],
+                    "action": "confirm",
+                    "problem_unit_id": "crop_001",
+                    "reviewer": "human-test",
+                    "comment": "Numeracion y seccion verificadas.",
+                    "expected_revision": generated["revision"],
+                },
+            )
+            self.assertEqual(reviewed["candidate_links"][0]["decision"], "human_confirmed")
+            self.assertEqual(reviewed["counts"]["ready_bundles"], 1)
+            self.assertEqual(reviewed["bundles"][0]["solution_count"], 1)
+            self.assertTrue(reviewed["bundles"][0]["ready_for_db"])
+            self.assertEqual(len(reviewed["review_events"]), 1)
+
+            reloaded = runtime._dispatch_api("GET", "/api/problem-solutions", {}, {})
+            self.assertEqual(reloaded["bundles"][0]["bundle_id"], reviewed["bundles"][0]["bundle_id"])
+            self.assertEqual(store.bundle_for_record("crop_001")["bundle_id"], reviewed["bundles"][0]["bundle_id"])
+
+            regenerated = runtime._dispatch_api(
+                "POST",
+                "/api/problem-solutions/generate",
+                {},
+                {
+                    "pattern": "separate_sections",
+                    "exercise_set_id": "practice_04",
+                    "source_mapping_confirmed": True,
+                    "expected_revision": reloaded["revision"],
+                },
+            )
+            self.assertEqual(regenerated["candidate_links"][0]["decision"], "human_confirmed")
+            self.assertEqual(regenerated["review_events"], reloaded["review_events"])
+            self.assertEqual(regenerated["bundles"][0]["bundle_id"], reloaded["bundles"][0]["bundle_id"])
+
+            rejected = runtime._dispatch_api(
+                "POST",
+                "/api/problem-solutions/review",
+                {},
+                {
+                    "candidate_link_id": candidate["candidate_link_id"],
+                    "action": "reject",
+                    "reviewer": "human-test",
+                    "comment": "Correccion posterior.",
+                    "expected_revision": regenerated["revision"],
+                },
+            )
+            self.assertEqual(rejected["candidate_links"][0]["decision"], "rejected")
+            self.assertEqual(rejected["bundles"], [])
+            self.assertIsNone(store.bundle_for_record("crop_001"))
+
+            reassigned = runtime._dispatch_api(
+                "POST",
+                "/api/problem-solutions/review",
+                {},
+                {
+                    "candidate_link_id": candidate["candidate_link_id"],
+                    "action": "reassign",
+                    "problem_unit_id": "crop_002",
+                    "reviewer": "human-test",
+                    "expected_revision": rejected["revision"],
+                },
+            )
+            self.assertEqual(reassigned["candidate_links"][0]["decision"], "human_confirmed")
+            self.assertEqual(
+                reassigned["candidate_links"][0]["problem_ref"]["record_id"],
+                "crop_002",
+            )
+            self.assertEqual(reassigned["counts"]["ready_bundles"], 1)
+            self.assertIsNone(store.bundle_for_record("crop_001"))
+            self.assertIsNotNone(store.bundle_for_record("crop_002"))
+
+            reassignment_regenerated = runtime._dispatch_api(
+                "POST",
+                "/api/problem-solutions/generate",
+                {},
+                {
+                    "pattern": "separate_sections",
+                    "exercise_set_id": "practice_04",
+                    "source_mapping_confirmed": True,
+                    "expected_revision": reassigned["revision"],
+                },
+            )
+            self.assertEqual(
+                reassignment_regenerated["candidate_links"][0]["problem_ref"]["record_id"],
+                "crop_002",
+            )
+            self.assertEqual(
+                reassignment_regenerated["candidate_links"][0]["decision"],
+                "human_confirmed",
+            )
+
+            orphaned = runtime._dispatch_api(
+                "POST",
+                "/api/problem-solutions/review",
+                {},
+                {
+                    "candidate_link_id": candidate["candidate_link_id"],
+                    "action": "mark_orphan",
+                    "reviewer": "human-test",
+                    "expected_revision": reassignment_regenerated["revision"],
+                },
+            )
+            self.assertEqual(orphaned["candidate_links"][0]["decision"], "orphan")
+            self.assertEqual(orphaned["bundles"], [])
+            self.assertIsNone(store.bundle_for_record("crop_002"))
+            self.assertEqual(len(orphaned["review_events"]), 4)
+
+            absent = runtime._dispatch_api(
+                "POST",
+                "/api/problem-solutions/problem-status",
+                {},
+                {
+                    "record_id": "crop_001",
+                    "status": "solutions_absent_confirmed",
+                    "reviewer": "human-test",
+                    "comment": "La propuesta fue descartada y no quedan soluciones.",
+                    "expected_revision": orphaned["revision"],
+                },
+            )
+            self.assertEqual(
+                absent["problem_statuses"]["crop_001"]["status"],
+                "solutions_absent_confirmed",
+            )
+            promotable_without_solution = runtime._dispatch_api(
+                "GET",
+                "/api/promotion",
+                {"record_id": ["crop_001"]},
+                {},
+            )
+            self.assertTrue(
+                promotable_without_solution["explicit_upload_enabled"],
+                promotable_without_solution["blocking_issues"],
+            )
+
+            pending_again = runtime._dispatch_api(
+                "POST",
+                "/api/problem-solutions/problem-status",
+                {},
+                {
+                    "record_id": "crop_001",
+                    "status": "pending_review",
+                    "reviewer": "human-test",
+                    "expected_revision": absent["revision"],
+                },
+            )
+            blocked_without_bundle = runtime._dispatch_api(
+                "GET",
+                "/api/promotion",
+                {"record_id": ["crop_001"]},
+                {},
+            )
+            self.assertFalse(blocked_without_bundle["explicit_upload_enabled"])
+            self.assertIn(
+                "problem_solution:bundle_or_absence_review_required",
+                blocked_without_bundle["blocking_issues"],
+            )
+            self.assertEqual(
+                pending_again["problem_statuses"]["crop_001"]["status"],
+                "pending_review",
+            )
+
+    def test_web_app_persists_problem_and_solution_page_roles(self) -> None:
+        app_js = Path("modulos/instance_factory/web/app.js").read_text(encoding="utf-8")
+        styles_css = Path("modulos/instance_factory/web/styles.css").read_text(encoding="utf-8")
+
+        self.assertIn("solutionPages: new Set()", app_js)
+        self.assertIn("solution_selected_pages: solutionPages", app_js)
+        self.assertIn("problemSolutionStructure", app_js)
+        self.assertIn("selected-problem", app_js)
+        self.assertIn("selected-solution", app_js)
+        self.assertIn("selected-both", app_js)
+        self.assertIn(".page-chip.selected-problem", styles_css)
+        self.assertIn(".page-chip.selected-solution", styles_css)
+        self.assertIn(".page-chip.selected-both", styles_css)
+
+    def test_page_selection_save_refreshes_running_problem_solution_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = InstancePipelineContext(
+                book_code="ALG01",
+                instance_type="PRACTICA_04",
+                selected_pages=[1],
+                solution_selected_pages=[20],
+                problem_solution_structure={
+                    "structure_mode": "separate_sections",
+                    "solution_status": "identified",
+                    "exercise_set_id": "practice_04",
+                },
+            )
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            store.write_candidate_links(
+                [{"candidate_link_id": "link-before-map-change", "status": "review_required"}],
+                expected_revision=0,
+            )
+            library_api = _StaticLibraryApi(
+                {
+                    "selected_pages": [1, 2],
+                    "page_ranges": [{"start": 1, "end": 2}],
+                    "solution_selected_pages": [21, 22],
+                    "solution_page_ranges": [{"start": 21, "end": 22}],
+                    "solution_page_selection": {
+                        "schema_version": "library_instance_solution_page_selection_v1",
+                        "selected_pages": [21, 22],
+                        "review_status": "pending",
+                    },
+                    "problem_solution_structure": {
+                        "schema_version": "library_instance_problem_solution_structure_v1",
+                        "structure_mode": "interleaved",
+                        "solution_status": "identified",
+                        "exercise_set_id": "practice_04",
+                    },
+                }
+            )
+            service = _FakeService(context, store)
+            runtime = FactoryWebRuntime(context, service=service, library_api=library_api)
+
+            runtime._dispatch_api(
+                "POST",
+                "/api/library/instances/11/page-selection",
+                {},
+                {"book_id": 2, "db_name": "test"},
+            )
+
+            self.assertEqual(context.selected_pages, [1, 2])
+            self.assertEqual(context.solution_selected_pages, [21, 22])
+            self.assertEqual(store.context.solution_selected_page_ranges, [{"start": 21, "end": 22}])
+            self.assertEqual(context.problem_solution_structure["structure_mode"], "interleaved")
+            self.assertTrue(context.page_selection_configured)
+            self.assertTrue(context.solution_page_selection_configured)
+            synced = store.problem_solution_snapshot()
+            self.assertEqual(synced["revision"], 2)
+            self.assertEqual(synced["candidate_links"], [])
+            self.assertEqual(
+                synced["invalidated_candidate_links"][0]["candidate_link_id"],
+                "link-before-map-change",
+            )
+
+    def test_external_solution_relation_requires_human_confirmation_and_document(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = InstancePipelineContext(
+                book_code="ALG01",
+                instance_type="PRACTICA_04",
+                problem_solution_structure={
+                    "structure_mode": "separate_sections",
+                    "solution_status": "external_source",
+                    "exercise_set_id": "practice_04",
+                },
+            )
+            store = InstanceStagingStore(context, root=Path(tmp) / "staging")
+            runtime = FactoryWebRuntime(context, service=_FakeService(context, store))
+
+            with self.assertRaises(WebApiError) as missing_external:
+                runtime._validated_problem_solution_document_relation(
+                    {},
+                    fallback={},
+                    reviewer="human-test",
+                )
+            self.assertEqual(missing_external.exception.code, "external_solution_document_required")
+
+            with self.assertRaises(WebApiError) as missing_reference:
+                runtime._validated_problem_solution_document_relation(
+                    {"external": True, "status": "confirmed"},
+                    fallback={},
+                    reviewer="human-test",
+                )
+            self.assertEqual(
+                missing_reference.exception.code,
+                "external_solution_document_reference_required",
+            )
+
+            relation = runtime._validated_problem_solution_document_relation(
+                {
+                    "external": True,
+                    "status": "confirmed",
+                    "document_reference": "solucionario-alg01.pdf",
+                },
+                fallback={},
+                reviewer="human-test",
+            )
+            self.assertTrue(relation["external"])
+            self.assertEqual(relation["confirmed_by"], "human-test")
+
+    def test_web_app_exposes_problem_solution_review_workflow(self) -> None:
+        app_js = Path("modulos/instance_factory/web/app.js").read_text(encoding="utf-8")
+
+        self.assertIn('api("/api/problem-solutions")', app_js)
+        self.assertIn('api("/api/problem-solutions/generate"', app_js)
+        self.assertIn('api("/api/problem-solutions/review"', app_js)
+        self.assertIn('api("/api/problem-solutions/problem-status"', app_js)
+        self.assertIn("renderProblemSolutionReview", app_js)
+        self.assertIn("solution_count", app_js)
+        self.assertIn("bundle_id", app_js)
+        self.assertIn("problemSolutionEvidenceMediaHtml", app_js)
+        self.assertIn("expected_revision", app_js)
+        self.assertIn("externalSolutionDocumentReference", app_js)
+        self.assertIn("externalSolutionRelationConfirmed", app_js)
+        self.assertIn("solutions_absent_confirmed", app_js)
+
     def test_web_app_api_routes_are_declared_by_backend_contract(self) -> None:
         app_js = Path("modulos/instance_factory/web/app.js").read_text(encoding="utf-8")
         raw_routes = set(re.findall(r"['\"`](/api/[^'\"` ]+)", app_js))

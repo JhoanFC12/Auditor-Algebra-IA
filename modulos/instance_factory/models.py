@@ -9,6 +9,14 @@ from utils.project_layout import normalize_instance_name, project_dirs, remap_le
 
 
 PIPELINE_CONTRACT_VERSION = "pdf_factory_instance_pipeline_v2"
+SOLUTION_PAGE_SELECTION_SCHEMA_VERSION = "library_instance_solution_page_selection_v1"
+PROBLEM_SOLUTION_STRUCTURE_SCHEMA_VERSION = "library_instance_problem_solution_structure_v1"
+PROBLEM_SOLUTION_STRUCTURE_MODES = frozenset(
+    {"separate_sections", "interleaved", "hybrid", "no_solutions", "unknown"}
+)
+PROBLEM_SOLUTION_STATUSES = frozenset(
+    {"identified", "confirmed_absent", "external_source", "uncertain", "pending_review"}
+)
 
 
 class StageStatus:
@@ -118,6 +126,12 @@ class InstancePipelineContext:
     selected_page_ranges: list[dict[str, int]] = field(default_factory=list)
     page_selection_review_status: str = ""
     page_selection_configured: bool = False
+    solution_selected_pages: list[int] = field(default_factory=list)
+    solution_selected_page_ranges: list[dict[str, int]] = field(default_factory=list)
+    solution_page_selection_review_status: str = ""
+    solution_page_selection_configured: bool = False
+    solution_page_selection: dict[str, Any] = field(default_factory=dict)
+    problem_solution_structure: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_library_instance(
@@ -148,6 +162,32 @@ class InstancePipelineContext:
             page_selection = {}
         selected_pages = _configured_selected_pages(config_snapshot, page_selection)
         selected_page_ranges = _configured_page_ranges(config_snapshot, page_selection, selected_pages)
+        solution_page_selection = config_snapshot.get("solution_page_selection")
+        if not isinstance(solution_page_selection, dict):
+            solution_page_selection = {}
+        solution_selected_pages = _configured_selected_pages(
+            config_snapshot,
+            solution_page_selection,
+            selected_pages_key="solution_selected_pages",
+            page_ranges_key="solution_page_ranges",
+        )
+        solution_selected_page_ranges = _configured_page_ranges(
+            config_snapshot,
+            solution_page_selection,
+            solution_selected_pages,
+            page_ranges_key="solution_page_ranges",
+        )
+        solution_selection_configured = bool(
+            solution_page_selection
+            or "solution_selected_pages" in config_snapshot
+            or "solution_page_ranges" in config_snapshot
+        )
+        normalized_solution_page_selection = _normalized_solution_page_selection(
+            solution_page_selection,
+            selected_pages=solution_selected_pages,
+            page_ranges=solution_selected_page_ranges,
+            configured=solution_selection_configured,
+        )
         return cls(
             book_code=book_code,
             instance_type=instance_type,
@@ -170,6 +210,16 @@ class InstancePipelineContext:
                 or "selected_pages" in config_snapshot
                 or "page_ranges" in config_snapshot
             ),
+            solution_selected_pages=solution_selected_pages,
+            solution_selected_page_ranges=solution_selected_page_ranges,
+            solution_page_selection_review_status=str(
+                solution_page_selection.get("review_status")
+                or config_snapshot.get("solution_review_status")
+                or ""
+            ).strip(),
+            solution_page_selection_configured=solution_selection_configured,
+            solution_page_selection=normalized_solution_page_selection,
+            problem_solution_structure=_configured_problem_solution_structure(config_snapshot),
         )
 
     @property
@@ -223,16 +273,25 @@ class InstancePipelineContext:
             "selected_page_ranges": [dict(item) for item in self.selected_page_ranges],
             "page_selection_review_status": self.page_selection_review_status,
             "page_selection_configured": bool(self.page_selection_configured),
+            "solution_selected_pages": list(self.solution_selected_pages),
+            "solution_selected_page_ranges": [dict(item) for item in self.solution_selected_page_ranges],
+            "solution_page_selection_review_status": self.solution_page_selection_review_status,
+            "solution_page_selection_configured": bool(self.solution_page_selection_configured),
+            "solution_page_selection": dict(self.solution_page_selection),
+            "problem_solution_structure": _normalized_problem_solution_structure(self.problem_solution_structure),
         }
 
 
 def _configured_selected_pages(
     config_snapshot: dict[str, Any],
     page_selection: dict[str, Any],
+    *,
+    selected_pages_key: str = "selected_pages",
+    page_ranges_key: str = "page_ranges",
 ) -> list[int]:
     raw_pages = page_selection.get("selected_pages")
     if not isinstance(raw_pages, list):
-        raw_pages = config_snapshot.get("selected_pages")
+        raw_pages = config_snapshot.get(selected_pages_key)
     pages: set[int] = set()
     if isinstance(raw_pages, list):
         for raw_page in raw_pages:
@@ -247,7 +306,7 @@ def _configured_selected_pages(
 
     raw_ranges = page_selection.get("page_ranges")
     if not isinstance(raw_ranges, list):
-        raw_ranges = config_snapshot.get("page_ranges")
+        raw_ranges = config_snapshot.get(page_ranges_key)
     if not isinstance(raw_ranges, list):
         return []
     for item in raw_ranges:
@@ -268,10 +327,12 @@ def _configured_page_ranges(
     config_snapshot: dict[str, Any],
     page_selection: dict[str, Any],
     selected_pages: list[int],
+    *,
+    page_ranges_key: str = "page_ranges",
 ) -> list[dict[str, int]]:
     raw_ranges = page_selection.get("page_ranges")
     if not isinstance(raw_ranges, list):
-        raw_ranges = config_snapshot.get("page_ranges")
+        raw_ranges = config_snapshot.get(page_ranges_key)
     ranges: list[dict[str, int]] = []
     if isinstance(raw_ranges, list):
         for item in raw_ranges:
@@ -295,6 +356,45 @@ def _configured_page_ranges(
         start = previous = page
     ranges.append({"start_page": start, "end_page": previous})
     return ranges
+
+
+def _configured_problem_solution_structure(config_snapshot: dict[str, Any]) -> dict[str, Any]:
+    raw = config_snapshot.get("problem_solution_structure")
+    return _normalized_problem_solution_structure(raw if isinstance(raw, dict) else {})
+
+
+def _normalized_solution_page_selection(
+    raw: dict[str, Any],
+    *,
+    selected_pages: list[int],
+    page_ranges: list[dict[str, int]],
+    configured: bool,
+) -> dict[str, Any]:
+    if not configured:
+        return {}
+    return {
+        **dict(raw or {}),
+        "schema_version": str(raw.get("schema_version") or SOLUTION_PAGE_SELECTION_SCHEMA_VERSION),
+        "selected_pages": list(selected_pages),
+        "page_ranges": [dict(item) for item in page_ranges],
+    }
+
+
+def _normalized_problem_solution_structure(raw: dict[str, Any] | None) -> dict[str, Any]:
+    source = dict(raw or {})
+    structure_mode = str(source.get("structure_mode") or "unknown").strip().lower().replace("-", "_")
+    if structure_mode not in PROBLEM_SOLUTION_STRUCTURE_MODES:
+        structure_mode = "unknown"
+    solution_status = str(source.get("solution_status") or "pending_review").strip().lower().replace("-", "_")
+    if solution_status not in PROBLEM_SOLUTION_STATUSES:
+        solution_status = "pending_review"
+    return {
+        **source,
+        "schema_version": str(source.get("schema_version") or PROBLEM_SOLUTION_STRUCTURE_SCHEMA_VERSION),
+        "structure_mode": structure_mode,
+        "solution_status": solution_status,
+        "exercise_set_id": str(source.get("exercise_set_id") or "").strip(),
+    }
 
 
 @dataclass

@@ -9,9 +9,9 @@ Este directorio contiene los perfiles reutilizables de los chats dedicados a la 
 | Euler | `euler_library_factory_coordinator_v1` | Coordinar, priorizar, asignar, auditar y cerrar el lote | [euler/CHAT_PROMPT.md](euler/CHAT_PROMPT.md) |
 | Gottfried Leibniz | `gottfried_leibniz_v1` | Organizar unidades documentales y analizar estructuralmente los libros | [gottfried/CHAT_PROMPT.md](gottfried/CHAT_PROMPT.md) |
 
-Ingrid Daubechies esta en definicion contractual; aun no tiene `CHAT_PROMPT.md` ni ejecucion autorizada. Los demas agentes o modelos permanecen diferidos.
+Ingrid Daubechies tiene un piloto autorizado sobre una copia versionada de la base de entrenamiento del detector. La ejecucion sobre instancias productivas sigue bloqueada. Los demas agentes o modelos permanecen diferidos.
 
-Perfil en definicion: [ingrid/README.md](ingrid/README.md).
+Perfil y piloto: [ingrid/README.md](ingrid/README.md).
 
 ## Chats Codex creados
 
@@ -19,6 +19,7 @@ Perfil en definicion: [ingrid/README.md](ingrid/README.md).
 |---|---|---|
 | `Agente Biblioteca - Euler` | `euler/CHAT_PROMPT.md` | Espera una orden humana |
 | `Agente Biblioteca - Gottfried Leibniz` | `gottfried/CHAT_PROMPT.md` | Espera una asignacion de Euler o del humano |
+| `Agente Segmentacion - Ingrid Daubechies` | `ingrid/CHAT_PROMPT.md` | Revisa una copia versionada del dataset `v7_401` |
 
 Los identificadores internos de los chats son locales a Codex y no se guardan como configuracion portable del repositorio. Para comunicarlos, debe localizarse el titulo exacto y confirmarse el envio mediante la herramienta de Codex.
 

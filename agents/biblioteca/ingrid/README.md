@@ -1,9 +1,11 @@
 ---
-agent_id_proposed: ingrid_daubechies_v1
-capability_id_proposed: problem_segmentation_reviewer_v1
-status: definition
-runtime_authorized: false
-chat_created: false
+agent_id: ingrid_daubechies_v1
+capability_ids:
+  - problem_detector_training_dataset_reviewer_v1
+  - problem_segmentation_reviewer_v1
+status: pilot
+runtime_authorized: dataset-review-staging-only
+chat_created: true
 updated: 2026-07-14
 ---
 
@@ -14,8 +16,9 @@ Ingrid sera el agente revisor de segmentacion de problemas. No sustituira al det
 ## Estado actual
 
 - Definicion y diseno: autorizados.
-- Ejecucion sobre instancias: no autorizada todavia.
-- Chat dedicado: se creara despues de aprobar el contrato V1.
+- Revision y correccion de una copia versionada del dataset `v7_401`: autorizada.
+- Ejecucion sobre instancias productivas: no autorizada todavia.
+- Chat dedicado: `Agente Segmentacion - Ingrid Daubechies`, creado el 2026-07-14.
 - Escritura canonica: prohibida.
 - Activacion de OCR o entrenamiento: fuera de su autoridad.
 
@@ -39,7 +42,7 @@ Euler asigna
 | `problem_number` | Subbox auxiliar de numeracion |
 | `answer_block` | Subbox auxiliar de alternativas o respuestas propuestas |
 
-La separacion `problem` frente a `solution`, los subboxes de graficos y la clasificacion matematica permanecen fuera de V1 hasta decision humana.
+La separacion `problem` frente a `solution`, los subboxes de graficos y la clasificacion matematica permanecen fuera del piloto actual.
 
 ## Fuente de definicion
 
@@ -49,4 +52,6 @@ Formulario en Obsidian:
 $env:USERPROFILE\Documents\Obsidian Vault\02 Proyectos\Auditor-IA\Formulario - Ingrid Daubechies Segmentacion de Problemas v1.md
 ```
 
-No se debe crear `CHAT_PROMPT.md` hasta resolver las decisiones marcadas como bloqueantes en ese formulario.
+Perfil operativo: [CHAT_PROMPT.md](CHAT_PROMPT.md).
+
+La primera asignacion trabaja unicamente sobre una copia versionada del dataset entrenado; no habilita automaticamente la revision de instancias productivas.

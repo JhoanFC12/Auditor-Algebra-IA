@@ -13,7 +13,13 @@ import time
 import urllib.parse
 
 from .library_covers import copy_cover_to_library_store, save_cover_bytes
-from .models import InstancePipelineContext
+from .models import (
+    PROBLEM_SOLUTION_STATUSES,
+    PROBLEM_SOLUTION_STRUCTURE_MODES,
+    PROBLEM_SOLUTION_STRUCTURE_SCHEMA_VERSION,
+    SOLUTION_PAGE_SELECTION_SCHEMA_VERSION,
+    InstancePipelineContext,
+)
 
 if TYPE_CHECKING:
     from modulos.modulo9_organizador_libros.controlador_organizador_libros import BookProgressController
@@ -570,37 +576,30 @@ class LibraryWebApi:
         current = self._instance_by_id(db_name, book_id, instance_id)
         if current is None:
             raise FileNotFoundError("Instancia no encontrada.")
-        raw_pages = payload.get("selected_pages")
-        if not isinstance(raw_pages, list):
-            raise ValueError("selected_pages debe ser una lista.")
         try:
             page_count = max(0, int(payload.get("page_count") or 0))
         except (TypeError, ValueError) as exc:
             raise ValueError("page_count debe ser entero.") from exc
-        selected_pages: set[int] = set()
-        for raw_page in raw_pages:
-            try:
-                page = int(raw_page)
-            except (TypeError, ValueError) as exc:
-                raise ValueError("selected_pages solo admite enteros.") from exc
-            if page <= 0 or (page_count and page > page_count):
-                limit = f" entre 1 y {page_count}" if page_count else " mayor que cero"
-                raise ValueError(f"Pagina fuera de rango: {page}; debe ser{limit}.")
-            selected_pages.add(page)
-        ordered_pages = sorted(selected_pages)
+        ordered_pages = _normalize_selected_pages(
+            payload.get("selected_pages"),
+            page_count=page_count,
+            field_name="selected_pages",
+        )
         page_ranges = _page_ranges_from_pages(ordered_pages)
         range_display = _page_range_display(page_ranges)
         config_snapshot = _dict_payload(current.get("config_snapshot")) or {}
         previous_pages = _configured_page_selection(config_snapshot)
+        source = str(payload.get("source") or "web_ui").strip() or "web_ui"
+        updated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         selection_payload = {
             "schema_version": "library_instance_page_selection_v1",
             "selected_pages": ordered_pages,
             "page_ranges": page_ranges,
             "page_range_display": range_display,
-            "source": str(payload.get("source") or "web_ui").strip() or "web_ui",
+            "source": source,
             "status": "proposed",
             "review_status": "pending",
-            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "updated_at": updated_at,
         }
         next_snapshot = {
             **config_snapshot,
@@ -610,13 +609,94 @@ class LibraryWebApi:
             "page_selection": selection_payload,
         }
         previous_selection = _dict_payload(config_snapshot.get("page_selection")) or {}
-        changed = (
+        problem_selection_changed = (
             previous_pages != ordered_pages
             or previous_selection.get("page_ranges") != page_ranges
             or str(previous_selection.get("source") or "") != selection_payload["source"]
             or str(previous_selection.get("status") or "") != "proposed"
             or str(previous_selection.get("review_status") or "") != "pending"
         )
+
+        previous_solution_selection = _dict_payload(config_snapshot.get("solution_page_selection")) or {}
+        current_solution_pages = _configured_page_selection(
+            config_snapshot,
+            selection_key="solution_page_selection",
+            selected_pages_key="solution_selected_pages",
+            page_ranges_key="solution_page_ranges",
+        )
+        solution_selection_provided = "solution_selected_pages" in payload
+        if solution_selection_provided:
+            solution_selected_pages = _normalize_selected_pages(
+                payload.get("solution_selected_pages"),
+                page_count=page_count,
+                field_name="solution_selected_pages",
+            )
+            solution_page_ranges = _page_ranges_from_pages(solution_selected_pages)
+            solution_page_range_display = _page_range_display(solution_page_ranges)
+            solution_selection_payload = {
+                "schema_version": SOLUTION_PAGE_SELECTION_SCHEMA_VERSION,
+                "selected_pages": solution_selected_pages,
+                "page_ranges": solution_page_ranges,
+                "page_range_display": solution_page_range_display,
+                "source": source,
+                "status": "proposed",
+                "review_status": "pending",
+                "updated_at": updated_at,
+            }
+            next_snapshot.update(
+                {
+                    "solution_selected_pages": solution_selected_pages,
+                    "solution_page_ranges": solution_page_ranges,
+                    "solution_page_range_display": solution_page_range_display,
+                    "solution_page_selection": solution_selection_payload,
+                }
+            )
+            solution_selection_changed = (
+                current_solution_pages != solution_selected_pages
+                or previous_solution_selection.get("page_ranges") != solution_page_ranges
+                or str(previous_solution_selection.get("source") or "") != source
+                or str(previous_solution_selection.get("status") or "") != "proposed"
+                or str(previous_solution_selection.get("review_status") or "") != "pending"
+            )
+        else:
+            solution_selected_pages = current_solution_pages
+            solution_page_ranges = _page_ranges_from_pages(solution_selected_pages)
+            solution_selection_payload = previous_solution_selection
+            solution_selection_changed = False
+
+        previous_structure = _dict_payload(config_snapshot.get("problem_solution_structure")) or {}
+        raw_structure = _dict_payload(payload.get("problem_solution_structure"))
+        structure_provided = raw_structure is not None or any(
+            key in payload for key in ("structure_mode", "solution_status", "exercise_set_id")
+        )
+        if structure_provided:
+            structure_input = {**previous_structure, **dict(raw_structure or {})}
+            for key in ("structure_mode", "solution_status", "exercise_set_id"):
+                if key in payload:
+                    structure_input[key] = payload.get(key)
+            problem_solution_structure = _normalize_problem_solution_structure(
+                structure_input,
+                source=source,
+                updated_at=updated_at,
+                strict=True,
+            )
+            next_snapshot["problem_solution_structure"] = problem_solution_structure
+            structure_changed = any(
+                previous_structure.get(key) != problem_solution_structure.get(key)
+                for key in (
+                    "schema_version",
+                    "structure_mode",
+                    "solution_status",
+                    "exercise_set_id",
+                    "source",
+                    "review_status",
+                )
+            )
+        else:
+            problem_solution_structure = _normalize_problem_solution_structure(previous_structure, strict=False)
+            structure_changed = False
+
+        changed = problem_selection_changed or solution_selection_changed or structure_changed
         if changed:
             merged = {**current, "libro_id": book_id, "config_snapshot": next_snapshot}
             self.controller.actualizar_instancia(
@@ -640,6 +720,11 @@ class LibraryWebApi:
             "selected_pages": ordered_pages,
             "selected_pages_count": len(ordered_pages),
             "page_ranges": page_ranges,
+            "solution_selected_pages": solution_selected_pages,
+            "solution_selected_pages_count": len(solution_selected_pages),
+            "solution_page_ranges": solution_page_ranges,
+            "solution_page_selection": solution_selection_payload,
+            "problem_solution_structure": problem_solution_structure,
             "instance": updated,
             "book": self._book_summary(db_name, dict(book)),
             "policy": _policy(),
@@ -1272,11 +1357,17 @@ def _dict_payload(value: Any) -> dict[str, Any] | None:
     return None
 
 
-def _configured_page_selection(config_snapshot: dict[str, Any]) -> list[int]:
-    page_selection = _dict_payload(config_snapshot.get("page_selection")) or {}
+def _configured_page_selection(
+    config_snapshot: dict[str, Any],
+    *,
+    selection_key: str = "page_selection",
+    selected_pages_key: str = "selected_pages",
+    page_ranges_key: str = "page_ranges",
+) -> list[int]:
+    page_selection = _dict_payload(config_snapshot.get(selection_key)) or {}
     raw_pages = page_selection.get("selected_pages")
     if not isinstance(raw_pages, list):
-        raw_pages = config_snapshot.get("selected_pages")
+        raw_pages = config_snapshot.get(selected_pages_key)
     pages: set[int] = set()
     if isinstance(raw_pages, list):
         for raw_page in raw_pages:
@@ -1290,7 +1381,7 @@ def _configured_page_selection(config_snapshot: dict[str, Any]) -> list[int]:
         return sorted(pages)
     raw_ranges = page_selection.get("page_ranges")
     if not isinstance(raw_ranges, list):
-        raw_ranges = config_snapshot.get("page_ranges")
+        raw_ranges = config_snapshot.get(page_ranges_key)
     if not isinstance(raw_ranges, list):
         return []
     for item in raw_ranges:
@@ -1304,6 +1395,59 @@ def _configured_page_selection(config_snapshot: dict[str, Any]) -> list[int]:
         if start > 0 and end >= start:
             pages.update(range(start, end + 1))
     return sorted(pages)
+
+
+def _normalize_selected_pages(raw_pages: Any, *, page_count: int, field_name: str) -> list[int]:
+    if not isinstance(raw_pages, list):
+        raise ValueError(f"{field_name} debe ser una lista.")
+    selected_pages: set[int] = set()
+    for raw_page in raw_pages:
+        try:
+            page = int(raw_page)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name} solo admite enteros.") from exc
+        if page <= 0 or (page_count and page > page_count):
+            limit = f" entre 1 y {page_count}" if page_count else " mayor que cero"
+            raise ValueError(f"Pagina fuera de rango en {field_name}: {page}; debe ser{limit}.")
+        selected_pages.add(page)
+    return sorted(selected_pages)
+
+
+def _normalize_problem_solution_structure(
+    raw: dict[str, Any],
+    *,
+    source: str = "",
+    updated_at: str = "",
+    strict: bool,
+) -> dict[str, Any]:
+    structure_mode = str(raw.get("structure_mode") or "unknown").strip().lower().replace("-", "_")
+    solution_status = str(raw.get("solution_status") or "pending_review").strip().lower().replace("-", "_")
+    if strict and structure_mode not in PROBLEM_SOLUTION_STRUCTURE_MODES:
+        allowed = ", ".join(sorted(PROBLEM_SOLUTION_STRUCTURE_MODES))
+        raise ValueError(f"structure_mode invalido. Usa uno de: {allowed}.")
+    if strict and solution_status not in PROBLEM_SOLUTION_STATUSES:
+        allowed = ", ".join(sorted(PROBLEM_SOLUTION_STATUSES))
+        raise ValueError(f"solution_status invalido. Usa uno de: {allowed}.")
+    if structure_mode not in PROBLEM_SOLUTION_STRUCTURE_MODES:
+        structure_mode = "unknown"
+    if solution_status not in PROBLEM_SOLUTION_STATUSES:
+        solution_status = "pending_review"
+    normalized = {
+        **dict(raw or {}),
+        "schema_version": PROBLEM_SOLUTION_STRUCTURE_SCHEMA_VERSION,
+        "structure_mode": structure_mode,
+        "solution_status": solution_status,
+        "exercise_set_id": str(raw.get("exercise_set_id") or "").strip(),
+    }
+    if source:
+        normalized["source"] = source
+        normalized["review_status"] = "pending"
+    else:
+        normalized.setdefault("source", "")
+        normalized.setdefault("review_status", "")
+    if updated_at:
+        normalized["updated_at"] = updated_at
+    return normalized
 
 
 def _page_ranges_from_pages(pages: list[int]) -> list[dict[str, int]]:

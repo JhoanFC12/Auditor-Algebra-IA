@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
 import os
 import re
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .models import (
     PIPELINE_CONTRACT_VERSION,
@@ -21,6 +23,18 @@ from .models import (
 from .continuations import continuation_flags_enabled, has_continuation_marker, strip_continuation_marker
 from .normalizer_training_bank import remove_sample as remove_normalizer_training_sample
 from .normalizer_training_bank import upsert_sample as upsert_normalizer_training_sample
+from .problem_solution_linking import (
+    PROMOTABLE_BUNDLE_STATUS,
+    PROMOTION_BUNDLE_SCHEMA_VERSION,
+    bundle_fingerprint,
+    candidate_evidence_fingerprint,
+    candidate_review_fingerprint,
+    canonical_payload_fingerprint,
+    problem_source_fingerprint,
+    unit_source_fingerprint,
+    validate_confirmed_bundle,
+    validate_solution_unit,
+)
 
 
 STATIC_MANIFEST_PAYLOAD_CACHE_TTL_S = 30.0
@@ -261,6 +275,15 @@ class InstanceStagingStore:
     schema_version = "pdf_factory_staging_v1"
     candidate_schema_version = "pdf_factory_promotion_candidate_v1"
     safe_record_id_re = re.compile(r"^[A-Za-z0-9._-]+$")
+    problem_solution_record_statuses = frozenset({"pending_review", "solutions_absent_confirmed"})
+    terminal_problem_solution_candidate_statuses = frozenset({"confirmed", "rejected", "orphan"})
+    managed_problem_solution_artifact_keys = (
+        "problem_solution_bundle_id",
+        "problem_solution_bundle_path",
+        "problem_solution_bundle_fingerprint",
+        "problem_solution_bundle_revision",
+        "problem_solution_bundle_status",
+    )
     required_metadata = {
         "libro": "source.book_code",
         "instancia": "source.instance_type",
@@ -294,6 +317,1519 @@ class InstanceStagingStore:
     @property
     def server_artifacts_path(self) -> Path:
         return self.root / "server_artifacts.json"
+
+    @property
+    def problem_solution_state_path(self) -> Path:
+        return self.root / "problem_solution_state.json"
+
+    @property
+    def problem_solution_bundles_dir(self) -> Path:
+        return self.root / "problem_solution_bundles"
+
+    @property
+    def problem_solution_transaction_journal_path(self) -> Path:
+        return self.root / ".problem_solution_transaction.json"
+
+    @property
+    def _problem_solution_lock_path(self) -> Path:
+        return self.root / ".problem_solution_state.lock"
+
+    @property
+    def _record_write_lock_path(self) -> Path:
+        return self.root / ".staging_records.lock"
+
+    @staticmethod
+    def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+                json.dump(payload, stream, ensure_ascii=False, indent=2)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+    @staticmethod
+    def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+        try:
+            with temporary.open("wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+    def _problem_solution_transaction_snapshots(self, paths: list[Path]) -> list[dict[str, Any]]:
+        root = self.root.resolve()
+        snapshots: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw_path in paths:
+            path = Path(raw_path).expanduser().resolve()
+            try:
+                relative = path.relative_to(root).as_posix()
+            except ValueError as exc:
+                raise ValueError(f"problem_solution_transaction_path_outside_root:{path}") from exc
+            if relative in seen:
+                continue
+            seen.add(relative)
+            exists = path.is_file()
+            snapshots.append(
+                {
+                    "path": relative,
+                    "existed": exists,
+                    "content_b64": base64.b64encode(path.read_bytes()).decode("ascii") if exists else "",
+                }
+            )
+        return snapshots
+
+    def _restore_problem_solution_transaction_snapshots(self, snapshots: list[dict[str, Any]]) -> None:
+        root = self.root.resolve()
+        for raw in snapshots:
+            row = dict(raw or {})
+            relative = str(row.get("path") or "").strip()
+            if not relative:
+                raise RuntimeError("problem_solution_transaction_invalid_journal_path")
+            path = (root / relative).resolve()
+            try:
+                path.relative_to(root)
+            except ValueError as exc:
+                raise RuntimeError("problem_solution_transaction_journal_outside_root") from exc
+            if bool(row.get("existed")):
+                try:
+                    payload = base64.b64decode(str(row.get("content_b64") or ""), validate=True)
+                except Exception as exc:
+                    raise RuntimeError("problem_solution_transaction_invalid_journal_content") from exc
+                self._atomic_write_bytes(path, payload)
+            else:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+        self._invalidate_records_cache()
+
+    def _write_problem_solution_transaction_journal(
+        self,
+        snapshots: list[dict[str, Any]],
+        *,
+        phase: str,
+    ) -> None:
+        self._atomic_write_json(
+            self.problem_solution_transaction_journal_path,
+            {
+                "schema_version": "problem_solution_transaction_journal_v1",
+                "phase": str(phase or "prepared"),
+                "updated_at": utc_now_text(),
+                "snapshots": copy.deepcopy(snapshots),
+            },
+        )
+
+    def _recover_problem_solution_transaction(self) -> None:
+        path = self.problem_solution_transaction_journal_path
+        if not path.is_file():
+            return
+        try:
+            journal = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            raise RuntimeError("problem_solution_transaction_invalid_journal") from exc
+        if not isinstance(journal, dict) or str(journal.get("schema_version") or "") != (
+            "problem_solution_transaction_journal_v1"
+        ):
+            raise RuntimeError("problem_solution_transaction_invalid_journal")
+        if str(journal.get("phase") or "") != "committed":
+            snapshots = [dict(item) for item in list(journal.get("snapshots") or []) if isinstance(item, dict)]
+            self._restore_problem_solution_transaction_snapshots(snapshots)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+    @contextmanager
+    def _problem_solution_lock(self):
+        self.root.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + 5.0
+        handle: int | None = None
+        while handle is None:
+            try:
+                handle = os.open(
+                    self._problem_solution_lock_path,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                )
+                os.write(handle, f"{os.getpid()}\n".encode("ascii", errors="ignore"))
+            except FileExistsError:
+                try:
+                    age = time.time() - self._problem_solution_lock_path.stat().st_mtime
+                    if age > 30.0:
+                        self._problem_solution_lock_path.unlink()
+                        continue
+                except FileNotFoundError:
+                    continue
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("problem_solution_state_lock_timeout")
+                time.sleep(0.01)
+        try:
+            # A recovery journal may include record files.  Protect restoration
+            # with the same lock used by ordinary OCR/human record writers.
+            with self._record_write_lock():
+                self._recover_problem_solution_transaction()
+            yield
+        finally:
+            try:
+                os.close(handle)
+            except OSError:
+                pass
+            try:
+                self._problem_solution_lock_path.unlink()
+            except FileNotFoundError:
+                pass
+
+    @contextmanager
+    def _record_write_lock(self):
+        """Serialize record replacements with problem-solution transactions."""
+
+        self.root.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + 5.0
+        handle: int | None = None
+        while handle is None:
+            try:
+                handle = os.open(
+                    self._record_write_lock_path,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                )
+                os.write(handle, f"{os.getpid()}\n".encode("ascii", errors="ignore"))
+            except FileExistsError:
+                try:
+                    age = time.time() - self._record_write_lock_path.stat().st_mtime
+                    if age > 30.0:
+                        self._record_write_lock_path.unlink()
+                        continue
+                except FileNotFoundError:
+                    continue
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("staging_record_write_lock_timeout")
+                time.sleep(0.01)
+        try:
+            yield
+        finally:
+            try:
+                os.close(handle)
+            except OSError:
+                pass
+            try:
+                self._record_write_lock_path.unlink()
+            except FileNotFoundError:
+                pass
+
+    @contextmanager
+    def _problem_solution_record_transaction_lock(self):
+        """Use one lock order everywhere: problem-solution state, then records."""
+
+        with self._problem_solution_lock():
+            with self._record_write_lock():
+                yield
+
+    @staticmethod
+    def _default_problem_solution_state() -> dict[str, Any]:
+        return {
+            "schema_version": "problem_solution_staging_state_v1",
+            "revision": 0,
+            "updated_at": "",
+            "solution_units": [],
+            "candidate_links": [],
+            "invalidated_candidate_links": [],
+            "review_events": [],
+            "problem_statuses": {},
+            "bundle_ids": [],
+            "context_fingerprint": "",
+        }
+
+    def _load_problem_solution_state(self) -> dict[str, Any]:
+        state = self._default_problem_solution_state()
+        try:
+            raw = json.loads(self.problem_solution_state_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
+        state.update(raw)
+        for key in (
+            "solution_units",
+            "candidate_links",
+            "invalidated_candidate_links",
+            "review_events",
+            "bundle_ids",
+        ):
+            if not isinstance(state.get(key), list):
+                state[key] = []
+        if not isinstance(state.get("problem_statuses"), dict):
+            state["problem_statuses"] = {}
+        try:
+            state["revision"] = max(0, int(state.get("revision") or 0))
+        except Exception:
+            state["revision"] = 0
+        return state
+
+    @staticmethod
+    def _assert_problem_solution_revision(state: dict[str, Any], expected_revision: int | None) -> None:
+        if expected_revision is None:
+            return
+        actual = int(state.get("revision") or 0)
+        if int(expected_revision) != actual:
+            raise RuntimeError(
+                f"problem_solution_revision_conflict:expected={int(expected_revision)}:actual={actual}"
+            )
+
+    def _write_problem_solution_state(self, state: dict[str, Any]) -> None:
+        state = dict(state)
+        state["schema_version"] = "problem_solution_staging_state_v1"
+        state["context_fingerprint"] = str(
+            state.get("context_fingerprint") or self._problem_solution_page_map_fingerprint()
+        )
+        state["updated_at"] = utc_now_text()
+        self._atomic_write_json(self.problem_solution_state_path, state)
+
+    @staticmethod
+    def _rows_equal(left: Any, right: Any) -> bool:
+        return canonical_payload_fingerprint(left) == canonical_payload_fingerprint(right)
+
+    def problem_solution_snapshot(self) -> dict[str, Any]:
+        state = self._load_problem_solution_state()
+        bundles: list[dict[str, Any]] = []
+        if self.problem_solution_bundles_dir.is_dir():
+            for path in sorted(self.problem_solution_bundles_dir.glob("*.json"), key=lambda item: item.name.lower()):
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    continue
+                if isinstance(payload, dict):
+                    bundles.append(payload)
+        return {
+            "schema_version": "problem_solution_staging_snapshot_v1",
+            "revision": int(state.get("revision") or 0),
+            "solution_units": copy.deepcopy(list(state.get("solution_units") or [])),
+            "candidate_links": copy.deepcopy(list(state.get("candidate_links") or [])),
+            "invalidated_candidate_links": copy.deepcopy(
+                list(state.get("invalidated_candidate_links") or [])
+            ),
+            "bundles": copy.deepcopy(bundles),
+            "review_events": copy.deepcopy(list(state.get("review_events") or [])),
+            "problem_statuses": copy.deepcopy(dict(state.get("problem_statuses") or {})),
+            "context_fingerprint": str(
+                state.get("context_fingerprint") or self._problem_solution_page_map_fingerprint()
+            ),
+        }
+
+    def _problem_solution_scope(self) -> dict[str, str]:
+        structure = dict(getattr(self.context, "problem_solution_structure", {}) or {})
+        return {
+            "book_code": str(getattr(self.context, "book_code", "") or "").strip(),
+            "instance_type": str(getattr(self.context, "instance_type", "") or "").strip(),
+            "exercise_set_id": str(structure.get("exercise_set_id") or "").strip(),
+        }
+
+    def _problem_solution_page_map_fingerprint(self) -> str:
+        """Fingerprint only context that determines problem/solution page roles."""
+
+        def semantic_pages(values: Any) -> list[int]:
+            pages: set[int] = set()
+            for raw in list(values or []):
+                try:
+                    page = int(raw)
+                except (TypeError, ValueError):
+                    continue
+                if page > 0:
+                    pages.add(page)
+            return sorted(pages)
+
+        def semantic_ranges(values: Any) -> list[dict[str, int]]:
+            ranges: set[tuple[int, int]] = set()
+            for raw in list(values or []):
+                if not isinstance(raw, dict):
+                    continue
+                try:
+                    start = int(raw.get("start") or raw.get("from") or 0)
+                    end = int(raw.get("end") or raw.get("to") or start)
+                except (TypeError, ValueError):
+                    continue
+                if start > 0 and end > 0:
+                    ranges.add((min(start, end), max(start, end)))
+            return [{"start": start, "end": end} for start, end in sorted(ranges)]
+
+        structure = dict(getattr(self.context, "problem_solution_structure", {}) or {})
+        payload = {
+            "scope": self._problem_solution_scope(),
+            "problem_page_selection": {
+                "selected_pages": semantic_pages(getattr(self.context, "selected_pages", [])),
+                "page_ranges": semantic_ranges(getattr(self.context, "selected_page_ranges", [])),
+                "review_status": str(getattr(self.context, "page_selection_review_status", "") or ""),
+                "configured": bool(getattr(self.context, "page_selection_configured", False)),
+            },
+            "solution_page_selection": {
+                "selected_pages": semantic_pages(getattr(self.context, "solution_selected_pages", [])),
+                "page_ranges": semantic_ranges(getattr(self.context, "solution_selected_page_ranges", [])),
+                "review_status": str(
+                    getattr(self.context, "solution_page_selection_review_status", "") or ""
+                ),
+                "configured": bool(getattr(self.context, "solution_page_selection_configured", False)),
+            },
+            "structure": {
+                "schema_version": str(structure.get("schema_version") or ""),
+                "structure_mode": str(structure.get("structure_mode") or ""),
+                "solution_status": str(structure.get("solution_status") or ""),
+                "exercise_set_id": str(structure.get("exercise_set_id") or ""),
+                "review_status": str(structure.get("review_status") or ""),
+            },
+        }
+        return canonical_payload_fingerprint(payload)
+
+    def sync_problem_solution_context(
+        self,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        """Invalidate derived candidates after a semantic page/structure context change."""
+
+        current_fingerprint = self._problem_solution_page_map_fingerprint()
+        with self._problem_solution_lock():
+            state = self._load_problem_solution_state()
+            self._assert_problem_solution_revision(state, expected_revision)
+            previous_fingerprint = str(state.get("context_fingerprint") or "").strip()
+            if not previous_fingerprint:
+                state["context_fingerprint"] = current_fingerprint
+                self._write_problem_solution_state(state)
+            elif previous_fingerprint != current_fingerprint:
+                invalidated = [
+                    dict(item)
+                    for item in list(state.get("invalidated_candidate_links") or [])
+                    if isinstance(item, dict)
+                ]
+                for raw in list(state.get("candidate_links") or []):
+                    if not isinstance(raw, dict):
+                        continue
+                    archived = copy.deepcopy(raw)
+                    archived["invalidated_reason"] = "context_changed"
+                    archived["invalidated_from_context_fingerprint"] = previous_fingerprint
+                    archived["invalidated_to_context_fingerprint"] = current_fingerprint
+                    archived["invalidated_at"] = utc_now_text()
+                    invalidated.append(archived)
+                state["invalidated_candidate_links"] = invalidated
+                state["candidate_links"] = []
+                statuses = {
+                    str(key): copy.deepcopy(dict(value))
+                    for key, value in dict(state.get("problem_statuses") or {}).items()
+                    if isinstance(value, dict)
+                }
+                review_events = [
+                    copy.deepcopy(dict(item))
+                    for item in list(state.get("review_events") or [])
+                    if isinstance(item, dict)
+                ]
+                invalidated_at = utc_now_text()
+                for record_id, previous_status in sorted(statuses.items()):
+                    if str(previous_status.get("status") or "") != "solutions_absent_confirmed":
+                        continue
+                    event_seed = {
+                        "record_id": record_id,
+                        "action": "invalidate_absence_context_changed",
+                        "from_context_fingerprint": previous_fingerprint,
+                        "to_context_fingerprint": current_fingerprint,
+                    }
+                    review_events.append(
+                        {
+                            "schema_version": "problem_solution_review_event_v1",
+                            "review_version": "problem_solution_review_event_v1",
+                            "review_event_id": (
+                                "psr_"
+                                + canonical_payload_fingerprint(event_seed).split(":", 1)[1][:20]
+                            ),
+                            "target_type": "problem_record",
+                            "target_id": record_id,
+                            "record_id": record_id,
+                            "action": "invalidate_absence_context_changed",
+                            "before": {"status": "solutions_absent_confirmed"},
+                            "after": {"status": "pending_review"},
+                            "status": "pending_review",
+                            "reviewer": "system_context_invalidation",
+                            "comment": "El mapa semantico de paginas o estructura cambio; revisar nuevamente la ausencia de solucion.",
+                            "reviewed_at": invalidated_at,
+                        }
+                    )
+                    statuses[record_id] = {
+                        "schema_version": "problem_solution_record_status_v1",
+                        "record_id": record_id,
+                        "status": "pending_review",
+                        "reviewer": "system_context_invalidation",
+                        "comment": "context_changed",
+                        "reviewed_at": invalidated_at,
+                    }
+                state["problem_statuses"] = statuses
+                state["review_events"] = review_events
+                state["context_fingerprint"] = current_fingerprint
+                state["revision"] = int(state.get("revision") or 0) + 1
+                self._write_problem_solution_state(state)
+        return self.problem_solution_snapshot()
+
+    def _normalize_solution_unit(self, raw: dict[str, Any]) -> dict[str, Any]:
+        unit = copy.deepcopy(dict(raw or {}))
+        unit_id = str(unit.get("solution_unit_id") or unit.get("unit_id") or "").strip()
+        if not unit_id:
+            raise ValueError("solution_unit_id requerido")
+        unit["solution_unit_id"] = unit_id
+
+        expected_scope = self._problem_solution_scope()
+        scope = dict(unit.get("scope") or {}) if isinstance(unit.get("scope"), dict) else {}
+        aliases = {
+            "book_code": ("book_code", "book_id"),
+            "instance_type": ("instance_type", "instance_id"),
+            "exercise_set_id": ("exercise_set_id",),
+        }
+        normalized_scope: dict[str, str] = {}
+        for canonical, keys in aliases.items():
+            value = ""
+            for key in keys:
+                value = str(unit.get(key) or scope.get(key) or "").strip()
+                if value:
+                    break
+            value = value or str(expected_scope.get(canonical) or "").strip()
+            normalized_scope[canonical] = value
+            unit[canonical] = value
+        unit["scope"] = normalized_scope
+
+        issues = validate_solution_unit(unit, expected_scope=expected_scope)
+        if bool(getattr(self.context, "solution_page_selection_configured", False)):
+            allowed_pages = {
+                int(page)
+                for page in list(getattr(self.context, "solution_selected_pages", []) or [])
+                if str(page).strip().isdigit() and int(page) > 0
+            }
+            outside_pages: set[int] = set()
+            for fragment in list(unit.get("fragments") or []):
+                if not isinstance(fragment, dict):
+                    continue
+                try:
+                    page = int(fragment.get("page_number") or 0)
+                except (TypeError, ValueError):
+                    page = 0
+                if page > 0 and page not in allowed_pages:
+                    outside_pages.add(page)
+            if outside_pages:
+                issues.append(
+                    "solution_unit:"
+                    f"{unit_id}:outside_solution_page_selection:"
+                    + ",".join(str(page) for page in sorted(outside_pages))
+                )
+        if issues:
+            raise ValueError(";".join(issues))
+        unit["source_fingerprint"] = unit_source_fingerprint(unit)
+        return unit
+
+    def upsert_solution_units(
+        self,
+        units: list[dict[str, Any]],
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        incoming: list[dict[str, Any]] = []
+        for raw in list(units or []):
+            incoming.append(self._normalize_solution_unit(dict(raw or {})))
+        with self._problem_solution_lock():
+            state = self._load_problem_solution_state()
+            self._assert_problem_solution_revision(state, expected_revision)
+            by_id = {
+                str(row.get("solution_unit_id") or row.get("unit_id") or "").strip(): dict(row)
+                for row in list(state.get("solution_units") or [])
+                if isinstance(row, dict)
+            }
+            for unit in incoming:
+                by_id[unit["solution_unit_id"]] = unit
+            updated = [by_id[key] for key in sorted(by_id)]
+            if not self._rows_equal(updated, state.get("solution_units") or []):
+                previous_units_fingerprint = canonical_payload_fingerprint(
+                    state.get("solution_units") or []
+                )
+                updated_units_fingerprint = canonical_payload_fingerprint(updated)
+                invalidated_at = utc_now_text()
+                invalidated = [
+                    copy.deepcopy(dict(item))
+                    for item in list(state.get("invalidated_candidate_links") or [])
+                    if isinstance(item, dict)
+                ]
+                for raw in list(state.get("candidate_links") or []):
+                    if not isinstance(raw, dict):
+                        continue
+                    archived = copy.deepcopy(raw)
+                    archived.update(
+                        {
+                            "invalidated_reason": "solution_units_changed",
+                            "invalidated_from_units_fingerprint": previous_units_fingerprint,
+                            "invalidated_to_units_fingerprint": updated_units_fingerprint,
+                            "invalidated_at": invalidated_at,
+                        }
+                    )
+                    invalidated.append(archived)
+
+                statuses = {
+                    str(key): copy.deepcopy(dict(value))
+                    for key, value in dict(state.get("problem_statuses") or {}).items()
+                    if isinstance(value, dict)
+                }
+                review_events = [
+                    copy.deepcopy(dict(item))
+                    for item in list(state.get("review_events") or [])
+                    if isinstance(item, dict)
+                ]
+                for record_id, previous_status in sorted(statuses.items()):
+                    if str(previous_status.get("status") or "") != "solutions_absent_confirmed":
+                        continue
+                    event_seed = {
+                        "record_id": record_id,
+                        "action": "invalidate_absence_solution_units_changed",
+                        "from_units_fingerprint": previous_units_fingerprint,
+                        "to_units_fingerprint": updated_units_fingerprint,
+                    }
+                    review_events.append(
+                        {
+                            "schema_version": "problem_solution_review_event_v1",
+                            "review_version": "problem_solution_review_event_v1",
+                            "review_event_id": (
+                                "psr_"
+                                + canonical_payload_fingerprint(event_seed).split(":", 1)[1][:20]
+                            ),
+                            "target_type": "problem_record",
+                            "target_id": record_id,
+                            "record_id": record_id,
+                            "action": "invalidate_absence_solution_units_changed",
+                            "before": {"status": "solutions_absent_confirmed"},
+                            "after": {"status": "pending_review"},
+                            "status": "pending_review",
+                            "reviewer": "system_evidence_invalidation",
+                            "comment": (
+                                "Las unidades o boxes de solucion cambiaron; "
+                                "revisar nuevamente la ausencia de solucion."
+                            ),
+                            "reviewed_at": invalidated_at,
+                        }
+                    )
+                    statuses[record_id] = {
+                        "schema_version": "problem_solution_record_status_v1",
+                        "record_id": record_id,
+                        "status": "pending_review",
+                        "reviewer": "system_evidence_invalidation",
+                        "comment": "solution_units_changed",
+                        "reviewed_at": invalidated_at,
+                    }
+
+                state["solution_units"] = updated
+                state["invalidated_candidate_links"] = invalidated
+                state["candidate_links"] = []
+                state["problem_statuses"] = statuses
+                state["review_events"] = review_events
+                state["revision"] = int(state.get("revision") or 0) + 1
+                self._write_problem_solution_state(state)
+        return self.problem_solution_snapshot()
+
+    @staticmethod
+    def _normalize_problem_solution_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw in list(candidates or []):
+            candidate = copy.deepcopy(dict(raw or {}))
+            candidate_id = str(candidate.get("candidate_link_id") or "").strip()
+            if not candidate_id:
+                raise ValueError("candidate_link_id requerido")
+            if candidate_id in seen:
+                raise ValueError(f"candidate_link_id duplicado: {candidate_id}")
+            seen.add(candidate_id)
+            rows.append(candidate)
+        rows.sort(key=lambda row: str(row.get("candidate_link_id") or ""))
+        return rows
+
+    @staticmethod
+    def _normalize_problem_solution_review_event(event: dict[str, Any]) -> dict[str, Any]:
+        row = copy.deepcopy(dict(event or {}))
+        event_id = str(row.get("review_event_id") or "").strip()
+        if not event_id:
+            event_id = f"psr_{canonical_payload_fingerprint(row).split(':', 1)[1][:20]}"
+            row["review_event_id"] = event_id
+        return row
+
+    @staticmethod
+    def _problem_solution_candidate_record_id(candidate: dict[str, Any]) -> str:
+        row = dict(candidate or {})
+        review = dict(row.get("human_review") or {})
+        problem_ref = dict(row.get("problem_ref") or {})
+        return str(
+            row.get("selected_problem_unit_id")
+            or review.get("problem_unit_id")
+            or problem_ref.get("record_id")
+            or problem_ref.get("unit_id")
+            or ""
+        ).strip()
+
+    def _pending_problem_solution_candidate_ids(
+        self,
+        state: dict[str, Any],
+        record_id: str,
+    ) -> list[str]:
+        pending: list[str] = []
+        wanted = str(record_id or "").strip()
+        for raw in list(state.get("candidate_links") or []):
+            if not isinstance(raw, dict) or self._problem_solution_candidate_record_id(raw) != wanted:
+                continue
+            review = dict(raw.get("human_review") or {})
+            review_status = str(raw.get("review_status") or review.get("status") or "").strip().lower()
+            if review_status in self.terminal_problem_solution_candidate_statuses:
+                continue
+            candidate_id = str(raw.get("candidate_link_id") or "unknown").strip() or "unknown"
+            pending.append(candidate_id)
+        return sorted(set(pending))
+
+    def set_problem_solution_record_status(
+        self,
+        record_id: str,
+        status: str,
+        reviewer: str,
+        comment: str,
+        expected_revision: int | None,
+    ) -> dict[str, Any]:
+        """Persist one per-problem solution review decision and its append-only audit event."""
+
+        clean_record_id = str(record_id or "").strip()
+        clean_status = str(status or "").strip().lower()
+        clean_reviewer = str(reviewer or "").strip()
+        clean_comment = str(comment or "").strip()
+        if self.get_record(clean_record_id) is None:
+            raise KeyError(clean_record_id)
+        if clean_status not in self.problem_solution_record_statuses:
+            raise ValueError(f"problem_solution_record_status invalido: {status!r}")
+        if not clean_reviewer:
+            raise ValueError("reviewer requerido para problem_solution_record_status")
+
+        with self._problem_solution_lock():
+            state = self._load_problem_solution_state()
+            self._assert_problem_solution_revision(state, expected_revision)
+            if clean_status == "solutions_absent_confirmed":
+                pending = self._pending_problem_solution_candidate_ids(state, clean_record_id)
+                if pending:
+                    raise ValueError(
+                        ";".join(
+                            f"problem_solution:pending_candidate_review:{candidate_id}"
+                            for candidate_id in pending
+                        )
+                    )
+
+            statuses = {
+                str(key): copy.deepcopy(dict(value))
+                for key, value in dict(state.get("problem_statuses") or {}).items()
+                if isinstance(value, dict)
+            }
+            previous = dict(statuses.get(clean_record_id) or {})
+            if (
+                str(previous.get("status") or "") == clean_status
+                and str(previous.get("reviewer") or "") == clean_reviewer
+                and str(previous.get("comment") or "") == clean_comment
+            ):
+                return self.problem_solution_snapshot()
+
+            reviewed_at = utc_now_text()
+            next_status = {
+                "schema_version": "problem_solution_record_status_v1",
+                "record_id": clean_record_id,
+                "status": clean_status,
+                "reviewer": clean_reviewer,
+                "comment": clean_comment,
+                "reviewed_at": reviewed_at,
+            }
+            event_seed = {
+                "record_id": clean_record_id,
+                "status": clean_status,
+                "reviewer": clean_reviewer,
+                "comment": clean_comment,
+                "revision": int(state.get("revision") or 0) + 1,
+            }
+            event_id = f"psr_{canonical_payload_fingerprint(event_seed).split(':', 1)[1][:20]}"
+            event = {
+                "schema_version": "problem_solution_review_event_v1",
+                "review_version": "problem_solution_review_event_v1",
+                "review_event_id": event_id,
+                "target_type": "problem_record",
+                "target_id": clean_record_id,
+                "record_id": clean_record_id,
+                "action": "confirm_absence" if clean_status == "solutions_absent_confirmed" else "mark_pending",
+                "before": {"status": str(previous.get("status") or "")},
+                "after": {"status": clean_status},
+                "status": clean_status,
+                "reviewer": clean_reviewer,
+                "comment": clean_comment,
+                "reviewed_at": reviewed_at,
+            }
+            statuses[clean_record_id] = next_status
+            reviews = [
+                copy.deepcopy(dict(item))
+                for item in list(state.get("review_events") or [])
+                if isinstance(item, dict)
+            ]
+            reviews.append(event)
+            state["problem_statuses"] = statuses
+            state["review_events"] = reviews
+            state["revision"] = int(state.get("revision") or 0) + 1
+            self._write_problem_solution_state(state)
+        return self.problem_solution_snapshot()
+
+    def write_candidate_links(
+        self,
+        candidates: list[dict[str, Any]],
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        rows = self._normalize_problem_solution_candidates(candidates)
+        with self._problem_solution_lock():
+            state = self._load_problem_solution_state()
+            self._assert_problem_solution_revision(state, expected_revision)
+            if not self._rows_equal(rows, state.get("candidate_links") or []):
+                state["candidate_links"] = rows
+                state["revision"] = int(state.get("revision") or 0) + 1
+                self._write_problem_solution_state(state)
+        return self.problem_solution_snapshot()
+
+    def append_problem_solution_review(
+        self,
+        event: dict[str, Any],
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        row = self._normalize_problem_solution_review_event(event)
+        event_id = str(row.get("review_event_id") or "")
+        with self._problem_solution_lock():
+            state = self._load_problem_solution_state()
+            self._assert_problem_solution_revision(state, expected_revision)
+            current = [dict(item) for item in list(state.get("review_events") or []) if isinstance(item, dict)]
+            existing = next((item for item in current if str(item.get("review_event_id") or "") == event_id), None)
+            if existing is not None and not self._rows_equal(existing, row):
+                raise RuntimeError(f"problem_solution_review_conflict:{event_id}")
+            if existing is None:
+                current.append(row)
+                state["review_events"] = current
+                state["revision"] = int(state.get("revision") or 0) + 1
+                self._write_problem_solution_state(state)
+        return self.problem_solution_snapshot()
+
+    def _problem_solution_bundle_path(self, bundle_id: str) -> Path:
+        clean = str(bundle_id or "").strip()
+        if not clean or not self.safe_record_id_re.match(clean):
+            raise ValueError(f"bundle_id invalido: {bundle_id!r}")
+        return self.problem_solution_bundles_dir / f"{clean}.json"
+
+    def read_problem_solution_bundle(self, bundle_id: str) -> dict[str, Any] | None:
+        try:
+            path = self._problem_solution_bundle_path(bundle_id)
+        except ValueError:
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return None
+        if not isinstance(payload, dict) or str(payload.get("bundle_id") or "") != str(bundle_id or ""):
+            return None
+        return payload
+
+    def _attach_problem_solution_bundle(
+        self,
+        record: StagingProblemRecord,
+        bundle: dict[str, Any],
+        *,
+        rewrite_manifest: bool,
+    ) -> None:
+        bundle_id = str(bundle.get("bundle_id") or "")
+        path = self._problem_solution_bundle_path(bundle_id)
+        with self._record_write_lock():
+            current = self.get_record(record.record_id) or record
+            current.artifacts = {
+                **dict(current.artifacts or {}),
+                "problem_solution_bundle_id": bundle_id,
+                "problem_solution_bundle_path": str(path),
+                "problem_solution_bundle_fingerprint": str(bundle.get("bundle_fingerprint") or ""),
+                "problem_solution_bundle_revision": int(bundle.get("revision") or 0),
+                "problem_solution_bundle_status": str(bundle.get("status") or ""),
+            }
+            self._upsert_record_unlocked(
+                current,
+                rewrite_manifest=rewrite_manifest,
+                preserve_current_problem_solution_artifacts=False,
+            )
+
+    def _problem_solution_record_storage_path(self, record_id: str) -> Path:
+        for path in self._record_path_candidates(record_id):
+            if path.is_file():
+                return path
+        wanted = str(record_id or "").strip()
+        for path, record in self._load_record_entries():
+            if str(record.record_id or "") == wanted or str(record.crop_id or "") == wanted:
+                return path
+        return self._record_path(record_id)
+
+    @staticmethod
+    def _problem_solution_rows_by_id(
+        rows: Any,
+        *keys: str,
+    ) -> dict[str, dict[str, Any]]:
+        indexed: dict[str, dict[str, Any]] = {}
+        for raw in list(rows or []):
+            if not isinstance(raw, dict):
+                continue
+            identifier = next((str(raw.get(key) or "").strip() for key in keys if str(raw.get(key) or "").strip()), "")
+            if identifier:
+                indexed[identifier] = dict(raw)
+        return indexed
+
+    def _freeze_problem_solution_dependencies(
+        self,
+        bundle: dict[str, Any],
+        state: dict[str, Any],
+    ) -> list[str]:
+        """Attach the exact reviewed inputs to a new bundle, never refreshing an old snapshot."""
+
+        if isinstance(bundle.get("dependency_snapshot"), dict) and bundle.get("dependency_snapshot"):
+            return self._problem_solution_dependency_issues(bundle, state)
+
+        issues: list[str] = []
+        units = self._problem_solution_rows_by_id(state.get("solution_units"), "solution_unit_id", "unit_id")
+        candidates = self._problem_solution_rows_by_id(state.get("candidate_links"), "candidate_link_id")
+        reviews = self._problem_solution_rows_by_id(state.get("review_events"), "review_event_id")
+        problem_ref = dict(bundle.get("problem_ref") or {})
+        problem_unit_id = str(problem_ref.get("unit_id") or problem_ref.get("record_id") or "").strip()
+        unit_fingerprints: dict[str, str] = {}
+        evidence_fingerprints: dict[str, str] = {}
+        review_fingerprints: dict[str, str] = {}
+        event_fingerprints: dict[str, str] = {}
+
+        for raw_solution in list(bundle.get("solutions") or []):
+            if not isinstance(raw_solution, dict):
+                continue
+            solution = raw_solution
+            solution_id = str(solution.get("solution_id") or "unknown")
+            unit_id = str(solution.get("solution_unit_id") or "").strip()
+            unit = units.get(unit_id)
+            if unit is None:
+                issues.append(f"solution_bundle:missing_solution_unit:{unit_id or solution_id}")
+            else:
+                fingerprint = unit_source_fingerprint(unit)
+                expected = str(solution.get("source_fingerprint") or "").strip()
+                if expected and expected != fingerprint:
+                    issues.append(f"solution_bundle:stale_solution_unit:{unit_id or solution_id}")
+                else:
+                    solution["source_fingerprint"] = fingerprint
+                    unit_fingerprints[unit_id] = fingerprint
+
+            candidate_id = str(solution.get("candidate_link_id") or "").strip()
+            candidate = candidates.get(candidate_id)
+            if candidate is None:
+                issues.append(f"solution_bundle:missing_candidate_link:{candidate_id or solution_id}")
+            else:
+                evidence_fingerprint = candidate_evidence_fingerprint(candidate)
+                current_review_fingerprint = candidate_review_fingerprint(candidate)
+                expected_evidence = str(solution.get("candidate_evidence_fingerprint") or "").strip()
+                expected_review = str(solution.get("review_fingerprint") or "").strip()
+                if expected_evidence and expected_evidence != evidence_fingerprint:
+                    issues.append(f"solution_bundle:stale_candidate_evidence:{candidate_id or solution_id}")
+                if expected_review and expected_review != current_review_fingerprint:
+                    issues.append(f"solution_bundle:stale_candidate_review:{candidate_id or solution_id}")
+                candidate_review = dict(candidate.get("human_review") or {})
+                selected_problem = str(
+                    candidate.get("selected_problem_unit_id")
+                    or candidate_review.get("problem_unit_id")
+                    or ""
+                ).strip()
+                if str(candidate_review.get("status") or "") != "confirmed" or selected_problem != problem_unit_id:
+                    issues.append(f"solution_bundle:candidate_not_human_confirmed:{candidate_id or solution_id}")
+                solution["candidate_evidence_fingerprint"] = evidence_fingerprint
+                solution["review_fingerprint"] = current_review_fingerprint
+                evidence_fingerprints[candidate_id] = evidence_fingerprint
+                review_fingerprints[candidate_id] = current_review_fingerprint
+
+            event_id = str(solution.get("human_review_event_id") or "").strip()
+            event = reviews.get(event_id)
+            if event is None:
+                issues.append(f"solution_bundle:missing_review_event:{event_id or solution_id}")
+            else:
+                event_fingerprints[event_id] = canonical_payload_fingerprint(event)
+
+        if issues:
+            return list(dict.fromkeys(issues))
+        bundle["dependency_snapshot"] = {
+            "schema_version": "problem_solution_dependency_snapshot_v1",
+            "page_map_fingerprint": self._problem_solution_page_map_fingerprint(),
+            "solution_units": unit_fingerprints,
+            "candidate_evidence": evidence_fingerprints,
+            "candidate_reviews": review_fingerprints,
+            "review_events": event_fingerprints,
+        }
+        return []
+
+    def _problem_solution_dependency_issues(
+        self,
+        bundle: dict[str, Any],
+        state: dict[str, Any] | None = None,
+    ) -> list[str]:
+        state = state or self._load_problem_solution_state()
+        snapshot = dict(bundle.get("dependency_snapshot") or {})
+        if not snapshot:
+            return ["solution_bundle:missing_dependency_snapshot"]
+        issues: list[str] = []
+        if str(snapshot.get("schema_version") or "") != "problem_solution_dependency_snapshot_v1":
+            issues.append("solution_bundle:invalid_dependency_snapshot")
+        if str(snapshot.get("page_map_fingerprint") or "") != self._problem_solution_page_map_fingerprint():
+            issues.append("solution_bundle:stale_page_map")
+
+        units = self._problem_solution_rows_by_id(state.get("solution_units"), "solution_unit_id", "unit_id")
+        candidates = self._problem_solution_rows_by_id(state.get("candidate_links"), "candidate_link_id")
+        reviews = self._problem_solution_rows_by_id(state.get("review_events"), "review_event_id")
+        frozen_units = dict(snapshot.get("solution_units") or {})
+        frozen_evidence = dict(snapshot.get("candidate_evidence") or {})
+        frozen_reviews = dict(snapshot.get("candidate_reviews") or {})
+        frozen_events = dict(snapshot.get("review_events") or {})
+
+        for raw_solution in list(bundle.get("solutions") or []):
+            if not isinstance(raw_solution, dict):
+                continue
+            solution_id = str(raw_solution.get("solution_id") or "unknown")
+            unit_id = str(raw_solution.get("solution_unit_id") or "").strip()
+            unit = units.get(unit_id)
+            current_unit_fingerprint = unit_source_fingerprint(unit) if unit is not None else ""
+            expected_unit_fingerprint = str(
+                frozen_units.get(unit_id) or raw_solution.get("source_fingerprint") or ""
+            ).strip()
+            if unit is None:
+                issues.append(f"solution_bundle:missing_solution_unit:{unit_id or solution_id}")
+            elif not expected_unit_fingerprint or expected_unit_fingerprint != current_unit_fingerprint:
+                issues.append(f"solution_bundle:stale_solution_unit:{unit_id or solution_id}")
+
+            candidate_id = str(raw_solution.get("candidate_link_id") or "").strip()
+            candidate = candidates.get(candidate_id)
+            if candidate is None:
+                issues.append(f"solution_bundle:missing_candidate_link:{candidate_id or solution_id}")
+            else:
+                expected_evidence = str(
+                    frozen_evidence.get(candidate_id)
+                    or raw_solution.get("candidate_evidence_fingerprint")
+                    or ""
+                ).strip()
+                expected_review = str(
+                    frozen_reviews.get(candidate_id) or raw_solution.get("review_fingerprint") or ""
+                ).strip()
+                if not expected_evidence or expected_evidence != candidate_evidence_fingerprint(candidate):
+                    issues.append(f"solution_bundle:stale_candidate_evidence:{candidate_id or solution_id}")
+                if not expected_review or expected_review != candidate_review_fingerprint(candidate):
+                    issues.append(f"solution_bundle:stale_candidate_review:{candidate_id or solution_id}")
+
+            event_id = str(raw_solution.get("human_review_event_id") or "").strip()
+            event = reviews.get(event_id)
+            expected_event = str(frozen_events.get(event_id) or "").strip()
+            if event is None:
+                issues.append(f"solution_bundle:missing_review_event:{event_id or solution_id}")
+            elif not expected_event or expected_event != canonical_payload_fingerprint(event):
+                issues.append(f"solution_bundle:stale_review_event:{event_id or solution_id}")
+        return list(dict.fromkeys(issues))
+
+    def write_problem_solution_bundle(
+        self,
+        bundle: dict[str, Any],
+        expected_revision: int | None = None,
+        *,
+        rewrite_manifest: bool = True,
+    ) -> dict[str, Any]:
+        payload = copy.deepcopy(dict(bundle or {}))
+        if str(payload.get("schema_version") or "") != PROMOTION_BUNDLE_SCHEMA_VERSION:
+            raise ValueError("solution_bundle:invalid_schema_version")
+        bundle_id = str(payload.get("bundle_id") or "").strip()
+        path = self._problem_solution_bundle_path(bundle_id)
+        problem_ref = dict(payload.get("problem_ref") or {})
+        record_id = str(problem_ref.get("record_id") or "").strip()
+        if not record_id:
+            raise ValueError("solution_bundle:missing_problem_record_id")
+        record = self.get_record(record_id)
+        if record is None:
+            raise KeyError(record_id)
+
+        unchanged = False
+        with self._problem_solution_lock():
+            state = self._load_problem_solution_state()
+            self._assert_problem_solution_revision(state, expected_revision)
+            current = self.read_problem_solution_bundle(bundle_id)
+            current_revision = int((current or {}).get("revision") or 0)
+            if current is not None:
+                comparison = copy.deepcopy(payload)
+                comparison["revision"] = current_revision
+                comparison["bundle_fingerprint"] = bundle_fingerprint(comparison)
+                unchanged = self._rows_equal(comparison, current)
+                if not unchanged and expected_revision is None:
+                    raise RuntimeError(
+                        f"problem_solution_revision_conflict:bundle={bundle_id}:expected_snapshot_revision_required"
+                    )
+            if unchanged:
+                saved = current or payload
+            else:
+                requested_revision = int(payload.get("revision") or 0)
+                payload["revision"] = (
+                    max(current_revision + 1, requested_revision) if current_revision else max(1, requested_revision)
+                )
+                dependency_issues = self._freeze_problem_solution_dependencies(payload, state)
+                if dependency_issues:
+                    raise ValueError(";".join(dependency_issues))
+                payload["bundle_fingerprint"] = bundle_fingerprint(payload)
+                if str(payload.get("status") or "") == PROMOTABLE_BUNDLE_STATUS:
+                    issues = self.problem_solution_bundle_issues(payload, record=record)
+                    if issues:
+                        raise ValueError(";".join(issues))
+                self._atomic_write_json(path, payload)
+                bundle_ids = {
+                    str(item).strip() for item in list(state.get("bundle_ids") or []) if str(item).strip()
+                }
+                bundle_ids.add(bundle_id)
+                state["bundle_ids"] = sorted(bundle_ids)
+                state["revision"] = int(state.get("revision") or 0) + 1
+                self._write_problem_solution_state(state)
+                saved = payload
+        self._attach_problem_solution_bundle(record, saved, rewrite_manifest=rewrite_manifest)
+        return copy.deepcopy(saved)
+
+    def apply_problem_solution_review(
+        self,
+        *,
+        candidates: list[dict[str, Any]],
+        review_event: dict[str, Any],
+        expected_revision: int | None,
+        bundle_writes: list[dict[str, Any]] | None = None,
+        bundle_removals: list[str] | None = None,
+        rewrite_manifest: bool = True,
+        failure_injector: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        """Apply one review decision and all affected bundles as one recoverable transaction."""
+
+        candidate_rows = self._normalize_problem_solution_candidates(candidates)
+        event = self._normalize_problem_solution_review_event(review_event)
+        event_id = str(event.get("review_event_id") or "")
+        removal_ids: list[str] = []
+        seen_removals: set[str] = set()
+        for raw_bundle_id in list(bundle_removals or []):
+            bundle_id = str(raw_bundle_id or "").strip()
+            self._problem_solution_bundle_path(bundle_id)
+            if bundle_id not in seen_removals:
+                seen_removals.add(bundle_id)
+                removal_ids.append(bundle_id)
+
+        write_inputs: list[dict[str, Any]] = []
+        write_ids: set[str] = set()
+        for raw_bundle in list(bundle_writes or []):
+            payload = copy.deepcopy(dict(raw_bundle or {}))
+            bundle_id = str(payload.get("bundle_id") or "").strip()
+            self._problem_solution_bundle_path(bundle_id)
+            if bundle_id in write_ids:
+                raise ValueError(f"bundle_id duplicado: {bundle_id}")
+            write_ids.add(bundle_id)
+            write_inputs.append(payload)
+        overlap = write_ids.intersection(seen_removals)
+        if overlap:
+            raise ValueError(f"bundle_id no puede eliminarse y escribirse: {sorted(overlap)[0]}")
+
+        def checkpoint(phase: str) -> None:
+            if failure_injector is not None:
+                failure_injector(phase)
+
+        with self._problem_solution_record_transaction_lock():
+            state = self._load_problem_solution_state()
+            self._assert_problem_solution_revision(state, expected_revision)
+            next_state = copy.deepcopy(state)
+            state_changed = False
+            if not self._rows_equal(candidate_rows, next_state.get("candidate_links") or []):
+                next_state["candidate_links"] = candidate_rows
+                state_changed = True
+
+            review_events = [
+                copy.deepcopy(dict(item))
+                for item in list(next_state.get("review_events") or [])
+                if isinstance(item, dict)
+            ]
+            existing_event = next(
+                (item for item in review_events if str(item.get("review_event_id") or "") == event_id),
+                None,
+            )
+            if existing_event is not None and not self._rows_equal(existing_event, event):
+                raise RuntimeError(f"problem_solution_review_conflict:{event_id}")
+            if existing_event is None:
+                review_events.append(event)
+                next_state["review_events"] = review_events
+                state_changed = True
+
+            bundle_ids = {
+                str(item).strip()
+                for item in list(next_state.get("bundle_ids") or [])
+                if str(item).strip()
+            }
+            removal_operations: list[tuple[str, Path]] = []
+            write_operations: list[tuple[str, Path, dict[str, Any]]] = []
+            record_updates: dict[str, StagingProblemRecord] = {}
+            record_originals: dict[str, dict[str, Any]] = {}
+            record_paths: dict[str, Path] = {}
+
+            def record_for_update(record_id: str) -> StagingProblemRecord | None:
+                clean_record_id = str(record_id or "").strip()
+                if not clean_record_id:
+                    return None
+                if clean_record_id in record_updates:
+                    return record_updates[clean_record_id]
+                current_record = self.get_record(clean_record_id)
+                if current_record is None:
+                    return None
+                cloned = StagingProblemRecord.from_dict(current_record.to_dict())
+                record_updates[clean_record_id] = cloned
+                record_originals[clean_record_id] = current_record.to_dict()
+                record_paths[clean_record_id] = self._problem_solution_record_storage_path(clean_record_id)
+                return cloned
+
+            bundle_artifact_keys = (
+                "problem_solution_bundle_id",
+                "problem_solution_bundle_path",
+                "problem_solution_bundle_fingerprint",
+                "problem_solution_bundle_revision",
+                "problem_solution_bundle_status",
+            )
+
+            for bundle_id in removal_ids:
+                path = self._problem_solution_bundle_path(bundle_id)
+                current = self.read_problem_solution_bundle(bundle_id)
+                if current is None and not path.exists() and bundle_id not in bundle_ids:
+                    continue
+                removal_operations.append((bundle_id, path))
+                bundle_ids.discard(bundle_id)
+                state_changed = True
+                problem_ref = dict((current or {}).get("problem_ref") or {})
+                record_id = str(problem_ref.get("record_id") or "").strip()
+                record = record_for_update(record_id)
+                if record is None:
+                    continue
+                artifacts = dict(record.artifacts or {})
+                if str(artifacts.get("problem_solution_bundle_id") or "") != bundle_id:
+                    continue
+                for key in bundle_artifact_keys:
+                    artifacts.pop(key, None)
+                record.artifacts = artifacts
+
+            write_record_ids: set[str] = set()
+            for payload in write_inputs:
+                if str(payload.get("schema_version") or "") != PROMOTION_BUNDLE_SCHEMA_VERSION:
+                    raise ValueError("solution_bundle:invalid_schema_version")
+                bundle_id = str(payload.get("bundle_id") or "").strip()
+                path = self._problem_solution_bundle_path(bundle_id)
+                problem_ref = dict(payload.get("problem_ref") or {})
+                record_id = str(problem_ref.get("record_id") or "").strip()
+                if not record_id:
+                    raise ValueError("solution_bundle:missing_problem_record_id")
+                if record_id in write_record_ids:
+                    raise ValueError(f"solution_bundle:multiple_bundles_for_record:{record_id}")
+                write_record_ids.add(record_id)
+                record = record_for_update(record_id)
+                if record is None:
+                    raise KeyError(record_id)
+
+                current = self.read_problem_solution_bundle(bundle_id)
+                current_revision = int((current or {}).get("revision") or 0)
+                unchanged = False
+                if current is not None:
+                    comparison = copy.deepcopy(payload)
+                    comparison["revision"] = current_revision
+                    comparison["bundle_fingerprint"] = bundle_fingerprint(comparison)
+                    unchanged = self._rows_equal(comparison, current)
+                if unchanged:
+                    saved = copy.deepcopy(current or payload)
+                else:
+                    requested_revision = int(payload.get("revision") or 0)
+                    payload["revision"] = (
+                        max(current_revision + 1, requested_revision)
+                        if current_revision
+                        else max(1, requested_revision)
+                    )
+                    dependency_issues = self._freeze_problem_solution_dependencies(payload, next_state)
+                    if dependency_issues:
+                        raise ValueError(";".join(dependency_issues))
+                    payload["bundle_fingerprint"] = bundle_fingerprint(payload)
+                    if str(payload.get("status") or "") == PROMOTABLE_BUNDLE_STATUS:
+                        issues = self.problem_solution_bundle_issues(
+                            payload,
+                            record=record,
+                            state=next_state,
+                        )
+                        if issues:
+                            raise ValueError(";".join(issues))
+                    saved = payload
+                    write_operations.append((bundle_id, path, saved))
+
+                if bundle_id not in bundle_ids:
+                    state_changed = True
+                bundle_ids.add(bundle_id)
+                record.artifacts = {
+                    **dict(record.artifacts or {}),
+                    "problem_solution_bundle_id": bundle_id,
+                    "problem_solution_bundle_path": str(path),
+                    "problem_solution_bundle_fingerprint": str(saved.get("bundle_fingerprint") or ""),
+                    "problem_solution_bundle_revision": int(saved.get("revision") or 0),
+                    "problem_solution_bundle_status": str(saved.get("status") or ""),
+                }
+
+            normalized_bundle_ids = sorted(bundle_ids)
+            if not self._rows_equal(normalized_bundle_ids, next_state.get("bundle_ids") or []):
+                next_state["bundle_ids"] = normalized_bundle_ids
+                state_changed = True
+            changed_record_ids = [
+                record_id
+                for record_id, record in record_updates.items()
+                if not self._rows_equal(record.to_dict(), record_originals[record_id])
+            ]
+            changed = bool(state_changed or removal_operations or write_operations or changed_record_ids)
+            if not changed:
+                return self.problem_solution_snapshot()
+
+            next_state["revision"] = int(state.get("revision") or 0) + 1
+            transaction_paths: list[Path] = [self.problem_solution_state_path]
+            transaction_paths.extend(path for _bundle_id, path in removal_operations)
+            transaction_paths.extend(path for _bundle_id, path, _payload in write_operations)
+            transaction_paths.extend(record_paths[record_id] for record_id in changed_record_ids)
+            if rewrite_manifest and changed_record_ids:
+                transaction_paths.append(self.manifest_path)
+            snapshots = self._problem_solution_transaction_snapshots(transaction_paths)
+            self._write_problem_solution_transaction_journal(snapshots, phase="prepared")
+
+            try:
+                checkpoint("journal_prepared")
+                for _bundle_id, path in removal_operations:
+                    try:
+                        path.unlink()
+                    except FileNotFoundError:
+                        pass
+                checkpoint("bundle_removals_applied")
+
+                for _bundle_id, path, payload in write_operations:
+                    self._atomic_write_json(path, payload)
+                checkpoint("bundle_writes_applied")
+
+                for record_id in changed_record_ids:
+                    self._atomic_write_json(record_paths[record_id], record_updates[record_id].to_dict())
+                if changed_record_ids:
+                    self._invalidate_records_cache()
+                checkpoint("record_attachments_applied")
+
+                self._write_problem_solution_state(next_state)
+                checkpoint("state_persisted")
+
+                if rewrite_manifest and changed_record_ids:
+                    self.rewrite_manifest()
+                checkpoint("manifest_persisted")
+
+                self._write_problem_solution_transaction_journal(snapshots, phase="committed")
+                try:
+                    self.problem_solution_transaction_journal_path.unlink()
+                except OSError:
+                    pass
+            except BaseException:
+                try:
+                    self._restore_problem_solution_transaction_snapshots(snapshots)
+                except Exception as rollback_exc:
+                    raise RuntimeError("problem_solution_transaction_rollback_failed") from rollback_exc
+                try:
+                    self.problem_solution_transaction_journal_path.unlink()
+                except FileNotFoundError:
+                    pass
+                raise
+        return self.problem_solution_snapshot()
+
+    def bundle_for_record(self, record_id: str) -> dict[str, Any] | None:
+        record = self.get_record(record_id)
+        if record is None:
+            return None
+        artifacts = dict(record.artifacts or {})
+        bundle_id = str(artifacts.get("problem_solution_bundle_id") or "").strip()
+        if bundle_id:
+            return self.read_problem_solution_bundle(bundle_id)
+        raw_path = str(artifacts.get("problem_solution_bundle_path") or "").strip()
+        if not raw_path:
+            return None
+        try:
+            path = Path(raw_path).expanduser().resolve()
+            root = self.problem_solution_bundles_dir.resolve()
+            path.relative_to(root)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, FileNotFoundError, json.JSONDecodeError, OSError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def remove_problem_solution_bundle(
+        self,
+        bundle_id: str,
+        expected_revision: int | None = None,
+        *,
+        rewrite_manifest: bool = True,
+    ) -> dict[str, Any]:
+        """Remove an obsolete reviewed bundle while preserving its review events."""
+
+        path = self._problem_solution_bundle_path(bundle_id)
+        record_id = ""
+        with self._problem_solution_lock():
+            state = self._load_problem_solution_state()
+            self._assert_problem_solution_revision(state, expected_revision)
+            current = self.read_problem_solution_bundle(bundle_id)
+            problem_ref = dict((current or {}).get("problem_ref") or {})
+            record_id = str(problem_ref.get("record_id") or "").strip()
+            if current is not None or path.exists():
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+                state["bundle_ids"] = [
+                    str(item)
+                    for item in list(state.get("bundle_ids") or [])
+                    if str(item) != str(bundle_id)
+                ]
+                state["revision"] = int(state.get("revision") or 0) + 1
+                self._write_problem_solution_state(state)
+        if record_id:
+            with self._record_write_lock():
+                record = self.get_record(record_id)
+                if record is not None:
+                    artifacts = dict(record.artifacts or {})
+                    if str(artifacts.get("problem_solution_bundle_id") or "") == str(bundle_id):
+                        for key in self.managed_problem_solution_artifact_keys:
+                            artifacts.pop(key, None)
+                        record.artifacts = artifacts
+                        self._upsert_record_unlocked(
+                            record,
+                            rewrite_manifest=rewrite_manifest,
+                            preserve_current_problem_solution_artifacts=False,
+                        )
+        return self.problem_solution_snapshot()
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def problem_solution_bundle_issues(
+        self,
+        bundle: dict[str, Any],
+        *,
+        record: StagingProblemRecord | None = None,
+        state: dict[str, Any] | None = None,
+    ) -> list[str]:
+        issues = list(validate_confirmed_bundle(bundle))
+        stored_fingerprint = str(bundle.get("bundle_fingerprint") or "").strip()
+        if not stored_fingerprint or stored_fingerprint != bundle_fingerprint(bundle):
+            issues.append("solution_bundle:stale_bundle_fingerprint")
+
+        bundle_scope = dict(bundle.get("scope") or {})
+        expected_scope = self._problem_solution_scope()
+        for key in ("book_code", "instance_type", "exercise_set_id"):
+            actual = str(bundle_scope.get(key) or "").strip()
+            expected = str(expected_scope.get(key) or "").strip()
+            if not actual:
+                issues.append(f"solution_bundle:missing_scope:{key}")
+            elif expected and actual != expected:
+                issues.append(f"solution_bundle:scope_mismatch:{key}")
+
+        provenance = dict(bundle.get("provenance") or {})
+        for key in ("structure_map_version", "box_review_version", "linker_version"):
+            if not str(provenance.get(key) or "").strip():
+                issues.append(f"solution_bundle:missing_provenance:{key}")
+
+        structure = dict(getattr(self.context, "problem_solution_structure", {}) or {})
+        external_required = str(structure.get("solution_status") or "").strip().lower() == "external_source"
+        document_relation = dict(bundle.get("document_relation") or {})
+        relation_is_external = bool(document_relation.get("external"))
+        if external_required and not relation_is_external:
+            issues.append("solution_bundle:external_document_required")
+        if external_required or relation_is_external:
+            if str(document_relation.get("status") or "").strip().lower() != "confirmed":
+                issues.append("solution_bundle:external_document_unconfirmed")
+            document_reference = str(
+                document_relation.get("document_id")
+                or document_relation.get("document_reference")
+                or document_relation.get("source_pdf_id")
+                or document_relation.get("source_pdf_path")
+                or ""
+            ).strip()
+            if not document_reference:
+                issues.append("solution_bundle:external_document_reference_missing")
+
+        problem_ref = dict(bundle.get("problem_ref") or {})
+        record_id = str(problem_ref.get("record_id") or "").strip()
+        record = record or (self.get_record(record_id) if record_id else None)
+        if record is None:
+            issues.append("solution_bundle:missing_problem_record")
+        else:
+            expected_source = str(problem_ref.get("source_fingerprint") or "").strip()
+            if expected_source and expected_source != problem_source_fingerprint(record):
+                issues.append("solution_bundle:stale_problem_source")
+
+        current_state = state if isinstance(state, dict) else self._load_problem_solution_state()
+        solution_units_by_id = {
+            str(unit.get("solution_unit_id") or unit.get("unit_id") or "").strip(): dict(unit)
+            for unit in list(current_state.get("solution_units") or [])
+            if isinstance(unit, dict)
+        }
+
+        bundle_id = str(bundle.get("bundle_id") or "").strip()
+        persisted = self.read_problem_solution_bundle(bundle_id) if bundle_id else None
+        is_persisted_payload = bool(
+            persisted
+            and str((persisted or {}).get("bundle_fingerprint") or "")
+            == str(bundle.get("bundle_fingerprint") or "")
+        )
+        if is_persisted_payload:
+            issues.extend(self._problem_solution_dependency_issues(bundle, current_state))
+
+        for solution in list(bundle.get("solutions") or []):
+            if not isinstance(solution, dict):
+                continue
+            solution_id = str(solution.get("solution_id") or "unknown")
+            solution_unit_id = str(solution.get("solution_unit_id") or "").strip()
+            expected_unit_source = str(solution.get("source_fingerprint") or "").strip()
+            if expected_unit_source:
+                current_unit = solution_units_by_id.get(solution_unit_id)
+                if current_unit is None:
+                    issues.append(f"solution_bundle:missing_solution_unit:{solution_unit_id or solution_id}")
+                elif expected_unit_source != unit_source_fingerprint(current_unit):
+                    issues.append(f"solution_bundle:stale_solution_unit:{solution_unit_id or solution_id}")
+            for fragment in list(solution.get("fragments") or []):
+                if not isinstance(fragment, dict):
+                    continue
+                fragment_id = str(fragment.get("fragment_id") or "unknown")
+                raw_path = str(fragment.get("crop_path") or "").strip()
+                if not raw_path:
+                    continue
+                path = Path(raw_path).expanduser()
+                if not path.is_file():
+                    issues.append(f"solution_bundle:missing_asset:{solution_id}:{fragment_id}")
+                    continue
+                expected_hash = str(fragment.get("sha256") or "").strip().lower()
+                if expected_hash.startswith("sha256:"):
+                    expected_hash = expected_hash.split(":", 1)[1]
+                if expected_hash:
+                    try:
+                        actual_hash = self._sha256_file(path)
+                    except OSError:
+                        issues.append(f"solution_bundle:unreadable_asset:{solution_id}:{fragment_id}")
+                        continue
+                    if actual_hash != expected_hash:
+                        issues.append(f"solution_bundle:stale_asset:{solution_id}:{fragment_id}")
+        return list(dict.fromkeys(issues))
 
     def load_server_artifacts(self) -> dict[str, Any]:
         if not self.server_artifacts_path.exists():
@@ -1175,6 +2711,10 @@ class InstanceStagingStore:
         return None
 
     def delete_record(self, record_id: str, *, rewrite_manifest: bool = True) -> int:
+        with self._record_write_lock():
+            return self._delete_record_unlocked(record_id, rewrite_manifest=rewrite_manifest)
+
+    def _delete_record_unlocked(self, record_id: str, *, rewrite_manifest: bool = True) -> int:
         try:
             candidates = self._record_path_candidates(record_id)
         except ValueError:
@@ -1216,10 +2756,37 @@ class InstanceStagingStore:
         rewrite_manifest: bool = True,
         existing_by_identity: dict[str, StagingProblemRecord] | None = None,
     ) -> StagingProblemRecord:
+        with self._record_write_lock():
+            return self._upsert_record_unlocked(
+                record,
+                rewrite_manifest=rewrite_manifest,
+                existing_by_identity=existing_by_identity,
+                preserve_current_problem_solution_artifacts=True,
+            )
+
+    def _upsert_record_unlocked(
+        self,
+        record: StagingProblemRecord,
+        *,
+        rewrite_manifest: bool = True,
+        existing_by_identity: dict[str, StagingProblemRecord] | None = None,
+        preserve_current_problem_solution_artifacts: bool = True,
+    ) -> StagingProblemRecord:
         existing_by_identity = existing_by_identity if existing_by_identity is not None else self.identity_map_for_records()
         record = self._prepare_record_for_write(record)
         record = self._coalesce_duplicate_identity(record, existing_by_identity)
         record = self._prepare_record_for_write(record)
+        if preserve_current_problem_solution_artifacts:
+            current = self.get_record(record.record_id)
+            if current is not None:
+                current_artifacts = dict(current.artifacts or {})
+                next_artifacts = dict(record.artifacts or {})
+                for key in self.managed_problem_solution_artifact_keys:
+                    if key in current_artifacts:
+                        next_artifacts[key] = copy.deepcopy(current_artifacts[key])
+                    else:
+                        next_artifacts.pop(key, None)
+                record.artifacts = next_artifacts
         self._write_record_file(record)
         if rewrite_manifest:
             self.rewrite_manifest()
@@ -1231,12 +2798,31 @@ class InstanceStagingStore:
         *,
         existing_by_identity: dict[str, StagingProblemRecord] | None = None,
     ) -> None:
+        with self._record_write_lock():
+            self._upsert_many_unlocked(records, existing_by_identity=existing_by_identity)
+
+    def _upsert_many_unlocked(
+        self,
+        records: list[StagingProblemRecord],
+        *,
+        existing_by_identity: dict[str, StagingProblemRecord] | None = None,
+    ) -> None:
         existing_by_identity = existing_by_identity if existing_by_identity is not None else self.identity_map_for_records()
         prepared_by_id: dict[str, StagingProblemRecord] = {}
         for record in records:
             record = self._prepare_record_for_write(record)
             record = self._coalesce_duplicate_identity(record, existing_by_identity)
             record = self._prepare_record_for_write(record)
+            current = self.get_record(record.record_id)
+            if current is not None:
+                current_artifacts = dict(current.artifacts or {})
+                next_artifacts = dict(record.artifacts or {})
+                for key in self.managed_problem_solution_artifact_keys:
+                    if key in current_artifacts:
+                        next_artifacts[key] = copy.deepcopy(current_artifacts[key])
+                    else:
+                        next_artifacts.pop(key, None)
+                record.artifacts = next_artifacts
             prepared_by_id[record.record_id] = record
         for record in prepared_by_id.values():
             self._write_record_file(record)
@@ -1468,6 +3054,46 @@ class InstanceStagingStore:
             blocking_issues.append(f"source_stale:{reason}")
         if StageStatus.normalize(record.status) != StageStatus.READY:
             blocking_issues.append("not_ready:human_review")
+        artifacts = dict(record.artifacts or {})
+        has_solution_bundle_ref = bool(
+            str(artifacts.get("problem_solution_bundle_id") or "").strip()
+            or str(artifacts.get("problem_solution_bundle_path") or "").strip()
+        )
+        problem_solution_state = self._load_problem_solution_state()
+        pending_candidate_ids = self._pending_problem_solution_candidate_ids(
+            problem_solution_state,
+            record.record_id,
+        )
+        blocking_issues.extend(
+            f"problem_solution:pending_candidate_review:{candidate_id}"
+            for candidate_id in pending_candidate_ids
+        )
+        problem_statuses = dict(problem_solution_state.get("problem_statuses") or {})
+        problem_solution_review = copy.deepcopy(dict(problem_statuses.get(record.record_id) or {}))
+        structure = dict(getattr(self.context, "problem_solution_structure", {}) or {})
+        solution_status = str(structure.get("solution_status") or "").strip().lower()
+        opted_solution_statuses = {"identified", "external_source", "uncertain", "pending_review"}
+        if (
+            solution_status in opted_solution_statuses
+            and not has_solution_bundle_ref
+            and str(problem_solution_review.get("status") or "") != "solutions_absent_confirmed"
+        ):
+            blocking_issues.append("problem_solution:bundle_or_absence_review_required")
+        solution_bundle_summary: dict[str, Any] | None = None
+        if has_solution_bundle_ref:
+            solution_bundle = self.bundle_for_record(record.record_id)
+            if solution_bundle is None:
+                blocking_issues.append("solution_bundle:missing")
+            else:
+                blocking_issues.extend(self.problem_solution_bundle_issues(solution_bundle, record=record))
+                solution_bundle_summary = {
+                    "bundle_id": str(solution_bundle.get("bundle_id") or ""),
+                    "revision": int(solution_bundle.get("revision") or 0),
+                    "status": str(solution_bundle.get("status") or ""),
+                    "bundle_fingerprint": str(solution_bundle.get("bundle_fingerprint") or ""),
+                    "solutions_total": len(list(solution_bundle.get("solutions") or [])),
+                }
+        blocking_issues = list(dict.fromkeys(blocking_issues))
         return {
             "schema_version": self.candidate_schema_version,
             "created_at": utc_now_text(),
@@ -1489,6 +3115,8 @@ class InstanceStagingStore:
                 "review": dict(record.review or {}),
                 "training_examples_total": len(record.training_examples or []),
                 "audit": dict(record.audit or {}),
+                "problem_solution_bundle": solution_bundle_summary,
+                "problem_solution_review": problem_solution_review,
             },
             "policy": {
                 "staging_only": True,

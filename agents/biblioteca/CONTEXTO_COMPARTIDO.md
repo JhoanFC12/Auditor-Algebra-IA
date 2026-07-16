@@ -4,6 +4,7 @@ version: 1.0
 active_agents:
   - euler_library_factory_coordinator_v1
   - gottfried_leibniz_v1
+  - ingrid_daubechies_v1
 default_mode: dry_run
 ---
 
@@ -20,7 +21,7 @@ Estos agentes trabajan exclusivamente con la biblioteca matematica y sus proceso
   - `library_pdf_organizer_v1` para organizacion documental;
   - `book_structural_analyzer_v1` para analisis estructural del libro.
 - No existe un tercer agente Organizador.
-- La definicion contractual de Ingrid Daubechies como revisora de segmentacion esta autorizada desde el 2026-07-14. Esto no activa su ejecucion, su chat ni escrituras sobre staging.
+- Ingrid Daubechies tiene un piloto activo limitado a revisar y corregir una copia versionada del dataset del detector `v7_401`. No puede modificar el dataset fuente ni operar todavia sobre instancias productivas.
 - OCR, Golden, Normalizador, clasificacion semantica, entrenamiento y promocion de modelos permanecen diferidos.
 - El cierre actual es `euler_gottfried_validado`; no equivale a `completo_bd`.
 
