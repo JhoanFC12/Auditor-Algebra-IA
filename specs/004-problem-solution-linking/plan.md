@@ -158,6 +158,7 @@ Delivered:
 - true cross-problem reassignment with regenerated-evidence preservation;
 - solution-unit change invalidation and record-writer serialization around recoverable review transactions;
 - bundle IDs, solution totals and blocking evidence in API and UI responses.
+- portable Euler-Gottfried-Ingrid operating contracts with separate Ingrid dataset/instance capabilities, immutable human-gate references and synchronized Obsidian supersession notes.
 
 Validation:
 
@@ -175,6 +176,7 @@ Validation:
 - High-scoring links are proposals only; every first-version link still requires a human decision.
 - A problem without a confirmed bundle requires either global `confirmed_absent` or an explicit per-problem human absence decision.
 - External solucionarios are supported only after a human supplies and confirms their document reference.
+- The existing `/api/pages/boxes` correction route does not expose `expected_revision`; Ingrid can only propose instance box reviews, and the controlled pilot keeps their application human-operated and serialized until a guarded adapter is implemented.
 - This run used test doubles for PostgreSQL failure and rollback scenarios; it did not write to a production database.
 
 ## Next Controlled Pilot

@@ -1,0 +1,337 @@
+﻿{
+  "schema_version": "filename_classification_report_v1",
+  "apply": false,
+  "catalog_total": 29706,
+  "classified": 1021,
+  "outside_excluded": 2419,
+  "doubtful": 10827,
+  "by_course": {
+    "Fisica": 104,
+    "Geometria": 105,
+    "Aritmetica": 97,
+    "Trigonometria": 402,
+    "Razonamiento matematico": 139,
+    "Algebra": 76,
+    "Quimica": 98
+  },
+  "by_reason": {
+    "outside:code_dd": 537,
+    "outside:code_if": 472,
+    "code:Trigonometria": 390,
+    "outside:code_f": 316,
+    "outside:code_hi": 245,
+    "outside:code_h": 206,
+    "outside:ingles": 140,
+    "outside:code_in": 124,
+    "outside:code_i": 107,
+    "code:Razonamiento matematico": 102,
+    "outside:code_rv": 101,
+    "code:Quimica": 97,
+    "code:Aritmetica": 91,
+    "code:Geometria": 91,
+    "code:Algebra": 66,
+    "outside:code_ec": 56,
+    "code:Fisica": 55,
+    "keyword:fisica": 49,
+    "outside:code_le": 39,
+    "keyword:razonamiento_matematico": 37,
+    "outside:code_hp": 28,
+    "outside:code_li": 28,
+    "keyword:geometria": 14,
+    "keyword:trigonometria": 12,
+    "keyword:algebra": 10,
+    "outside:comunicacion": 9,
+    "outside:code_ps": 8,
+    "keyword:aritmetica": 6,
+    "outside:code_ci": 3,
+    "keyword:quimica": 1
+  },
+  "samples": {
+    "keyword:fisica": [
+      "01 Análisis dimensional.pdf",
+      "02 MRU - MRUV - MVCL.pdf",
+      "07 Cantidad de movimiento - Centro de masa.pdf",
+      "1. ANÁLISIS DIMENSIONAL.pdf",
+      "10 Temperatura - Calor.pdf",
+      "12 - DILATACIÓN TÉRMICA 1.0.pdf",
+      "12 - DILATACIÓN TÉRMICA.pdf",
+      "14 Electromagnetismo.pdf"
+    ],
+    "keyword:geometria": [
+      "01 Línea recta y ángulos.pdf",
+      "01 Línea recta y ángulos.pdf",
+      "06 Relaciones métricas.pdf",
+      "08 Relaciones métricas.pdf",
+      "08 Relaciones métricas.pdf",
+      "09 Relaciones Métricas.pdf",
+      "19.Relaciones métricas I.pdf",
+      "20.Relaciones métricas II.pdf"
+    ],
+    "keyword:aritmetica": [
+      "02 Tanto por ciento - Regla de mezclas.pdf",
+      "08.Tanto por ciento I.pdf",
+      "09 Regla del tanto por ciento.pdf",
+      "09.Regla de tanto por ciento II y Regla de mezcla I.pdf",
+      "Regla del Tanto por Ciento - teoría.pdf",
+      "Tanto por ciento.pdf"
+    ],
+    "keyword:trigonometria": [
+      "02.Sistema de medidas angulares.pdf",
+      "17 TRIGO - RODO.pdf",
+      "Copia de 0. TRIGO FÓRMULAS.pdf",
+      "TRIGO 10 SOL.pdf",
+      "TRIGO 11 SOL.pdf",
+      "TRIGO 13 SOL.pdf",
+      "TRIGO 14 SOL.pdf",
+      "TRIGO 15 SOL.pdf"
+    ],
+    "keyword:razonamiento_matematico": [
+      "06 Operaciones matemáticas.pdf",
+      "1.Aptitud Mate_motivación_semana 10_FE.pdf",
+      "1.Aptitud Mate_motivación_semana 11_FE.pdf",
+      "1.Aptitud Mate_motivación_semana 12_FE.pdf",
+      "1.Aptitud Mate_motivación_semana 15_FE.pdf",
+      "1.Aptitud Mate_motivación_semana 18_FE.pdf",
+      "1.Aptitud Mate_motivación_semana 19_FE.pdf",
+      "1.Aptitud Mate_motivación_semana 20_FE.pdf"
+    ],
+    "keyword:algebra": [
+      "14 Sistema de ecuaciones.pdf",
+      "27 Sistema de ecuaciones lineales.pdf",
+      "37.Sistema de Ecuaciones Lineales.pdf",
+      "37.Sistema de Ecuaciones Lineales.pdf",
+      "38.Sistema de Ecuaciones Lineales II y No Lineales.pdf",
+      "38.Sistema de Ecuaciones Lineales II y No Lineales.pdf",
+      "CC - ECUACIONES DE PRIMER GRADO, SISTEMAS DE ECUACIONES, PROBLEMAS.pdf",
+      "CC - PPT - ECUACIONES DE PRIMER GRADO, SISTEMAS DE ECUACIONES.pdf"
+    ],
+    "code:Aritmetica": [
+      "A_BCiencias_Sem10_Diri.pdf",
+      "A_BCiencias_Sem10_Dom.pdf",
+      "A_BCiencias_Sem11_Diri.pdf",
+      "A_BCiencias_Sem11_Dom.pdf",
+      "A_BCiencias_Sem12_Diri.pdf",
+      "A_BCiencias_Sem12_Dom.pdf",
+      "A_BCiencias_Sem13_Diri.pdf",
+      "A_BCiencias_Sem13_Dom.pdf"
+    ],
+    "outside:code_hi": [
+      "ACV-HI-TS026-Primer Militarismo.pdf",
+      "ACV-HI-TS026-Primer Militarismo.pdf",
+      "ACV-HI-TS026-Primer Militarismo.pdf",
+      "ACV-HI-TS027-PRIMER MILITARISMO - PROSPERIDAD FALAZ.pdf",
+      "ACV-HI-TS027-PRIMER MILITARISMO - PROSPERIDAD FALAZ.pdf",
+      "ACV-HI-TS027-PRIMER MILITARISMO - PROSPERIDAD FALAZ.pdf",
+      "ACV-HI-TS028-GUERRA DEL SALITRE.pdf",
+      "ACV-HI-TS028-GUERRA DEL SALITRE.pdf"
+    ],
+    "outside:code_dd": [
+      "ACV-TS001-DD - SuperAcademy.pdf",
+      "ACV-TS001-DD.pdf",
+      "ACV-TS001-DD.pdf",
+      "ACV-TS002-DD-GEODESIA.pptx - SuperAcademy.pdf",
+      "ACV-TS002-DD-GEODESIA.pptx.pdf",
+      "ACV-TS002-DD-GEODESIA.pptx.pdf",
+      "ACV-TS003-DD-CARTOGRAFIA I - SuperAcademy.pdf",
+      "ACV-TS003-DD-CARTOGRAFIA I.pdf"
+    ],
+    "outside:code_if": [
+      "ACV-TS001-IF - SuperAcademy.pdf",
+      "ACV-TS001-IF.pdf",
+      "ACV-TS001-IF.pdf",
+      "ACV-TS003-IF-Periodo cosmológico - SuperAcademy.pdf",
+      "ACV-TS003-IF-Periodo cosmológico.pdf",
+      "ACV-TS003-IF-Periodo cosmológico.pdf",
+      "ACV-TS004-IF- - SuperAcademy.pdf",
+      "ACV-TS004-IF-.pdf"
+    ],
+    "code:Algebra": [
+      "AUN-AL-TS001.pdf",
+      "AUN-AL-TS002.pdf",
+      "AUN-AL-TS003.pdf",
+      "AUN-AL-TS004.pdf",
+      "AUN-AL-TS005.pdf",
+      "AUN-AL-TS006.pdf",
+      "AUN-AL-TS007.pdf",
+      "AUN-AL-TS008.pdf"
+    ],
+    "outside:code_ec": [
+      "AUN-EC-TS001.pdf",
+      "AUN-EC-TS002.pdf",
+      "AUN-EC-TS003.pdf",
+      "AUN-EC-TS004.pdf",
+      "AUN-EC-TS005.pdf",
+      "AUN-EC-TS006.pdf",
+      "AUN-EC-TS007.pdf",
+      "AUN-EC-TS008.pdf"
+    ],
+    "code:Fisica": [
+      "AUN-FI-TS001.pdf",
+      "AUN-FI-TS002.pdf",
+      "AUN-FI-TS003.pdf",
+      "AUN-FI-TS004.pdf",
+      "AUN-FI-TS005.pdf",
+      "AUN-FI-TS006.pdf",
+      "AUN-FI-TS007.pdf",
+      "AUN-FI-TS008.pdf"
+    ],
+    "code:Geometria": [
+      "AUN-GE-TS001.pdf",
+      "AUN-GE-TS002.pdf",
+      "AUN-GE-TS003.pdf",
+      "AUN-GE-TS004.pdf",
+      "AUN-GE-TS005.pdf",
+      "AUN-GE-TS006.pdf",
+      "AUN-GE-TS007.pdf",
+      "AUN-GE-TS008.pdf"
+    ],
+    "outside:code_hp": [
+      "AUN-HP-TS001.pdf",
+      "AUN-HP-TS002.pdf",
+      "AUN-HP-TS003.pdf",
+      "AUN-HP-TS004.pdf",
+      "AUN-HP-TS005.pdf",
+      "AUN-HP-TS006.pdf",
+      "AUN-HP-TS007.pdf",
+      "AUN-HP-TS008.pdf"
+    ],
+    "outside:code_le": [
+      "AUN-LE-TS001.pdf",
+      "AUN-LE-TS002.pdf",
+      "AUN-LE-TS003.pdf",
+      "AUN-LE-TS004.pdf",
+      "AUN-LE-TS005.pdf",
+      "AUN-LE-TS006.pdf",
+      "AUN-LE-TS007.pdf",
+      "AUN-LE-TS008.pdf"
+    ],
+    "outside:code_li": [
+      "AUN-LI-TS019.pdf",
+      "AUN-LI-TS022.pdf",
+      "AUN-LI-TS023.pdf",
+      "AUN-LI-TS024.pdf",
+      "AUN-LI-TS025.pdf",
+      "AUN-LI-TS026.pdf",
+      "AUN-LI-TS029.pdf",
+      "AUN-LI-TS030.pdf"
+    ],
+    "outside:code_ps": [
+      "AUN-PS-TS001.pdf",
+      "AUN-PS-TS002.pdf",
+      "AUN-PS-TS003.pdf",
+      "AUN-PS-TS004.pdf",
+      "AUN-PS-TS005.pdf",
+      "AUN-PS-TS006.pdf",
+      "AUN-PS-TS007.pdf",
+      "SUN-PS-TS007.pdf"
+    ],
+    "code:Quimica": [
+      "AUN-QU-TS001.pdf",
+      "AUN-QU-TS002.pdf",
+      "AUN-QU-TS003.pdf",
+      "AUN-QU-TS004.pdf",
+      "AUN-QU-TS005.pdf",
+      "AUN-QU-TS006.pdf",
+      "AUN-QU-TS007.pdf",
+      "AUN-QU-TS008.pdf"
+    ],
+    "code:Razonamiento matematico": [
+      "AUN-RM-TS001.pdf",
+      "AUN-RM-TS002.pdf",
+      "AUN-RM-TS003.pdf",
+      "AUN-RM-TS004.pdf",
+      "AUN-RM-TS005.pdf",
+      "AUN-RM-TS006.pdf",
+      "AUN-RM-TS007.pdf",
+      "AUN-RM-TS008.pdf"
+    ],
+    "outside:code_rv": [
+      "AUN-RV-TS001.pdf",
+      "AUN-RV-TS002.pdf",
+      "AUN-RV-TS003.pdf",
+      "AUN-RV-TS004.pdf",
+      "AUN-RV-TS005.pdf",
+      "AUN-RV-TS006.pdf",
+      "AUN-RV-TS007.pdf",
+      "AUN-RV-TS008.pdf"
+    ],
+    "code:Trigonometria": [
+      "AUN-TR-TS001.pdf",
+      "AUN-TR-TS002.pdf",
+      "AUN-TR-TS003.pdf",
+      "AUN-TR-TS004.pdf",
+      "AUN-TR-TS005.pdf",
+      "AUN-TR-TS006.pdf",
+      "AUN-TR-TS007.pdf",
+      "AUN-TR-TS008.pdf"
+    ],
+    "outside:code_h": [
+      "AUNI12-H-I-Teoría.pdf",
+      "H_AUNI_Dir_Sem01 - SuperAcademy.pdf",
+      "H_AUNI_Dir_Sem01.pdf",
+      "H_AUNI_Dir_Sem02 - SuperAcademy.pdf",
+      "H_AUNI_Dir_Sem02.pdf",
+      "H_AUNI_Dir_Sem03 - SuperAcademy.pdf",
+      "H_AUNI_Dir_Sem03.pdf",
+      "H_AUNI_Dir_Sem04 - SuperAcademy.pdf"
+    ],
+    "outside:ingles": [
+      "BANCO DE CONTENIDO DIGITAL - INGLES - MÉTODO SMIF COMPLETO.pdf",
+      "BANCO DE CONTENIDO DIGITAL - INGLES - MÉTODO SMIF COMPLETO.pdf",
+      "BANCO DE CONTENIDO DIGITAL - INGLES.pdf",
+      "BANCO DE CONTENIDO DIGITAL - INGLES.pdf",
+      "BP INGLÉS  UNCP 2022.pdf",
+      "INGLES-TAREA DOMICILIARIA SEMANA 39.pdf",
+      "INGLES-TAREA DOMICILIARIA SEMANA 39.pdf",
+      "INGLES.pdf"
+    ],
+    "outside:comunicacion": [
+      "banco de preguntas de comunicación de 2010 a 2024 (1).pdf",
+      "CLASIFICACION DE LA COMUNICACION TEORIA.pdf",
+      "COMUNICACION 11 SOL.pdf",
+      "COMUNICACION 15 SOL.pdf",
+      "COMUNICACION 6 SOL.pdf",
+      "COMUNICACION 7 SOL.pdf",
+      "COMUNICACION 8 SOL.pdf",
+      "COMUNICACION 9 SOL.pdf"
+    ],
+    "outside:code_f": [
+      "F_AUNI_Dir_Sem01 - SuperAcademy.pdf",
+      "F_AUNI_Dir_Sem01.pdf",
+      "F_AUNI_Dir_Sem02 - SuperAcademy.pdf",
+      "F_AUNI_Dir_Sem02.pdf",
+      "F_AUNI_Dir_Sem03 - SuperAcademy.pdf",
+      "F_AUNI_Dir_Sem03.pdf",
+      "F_AUNI_Dir_Sem04 - SuperAcademy.pdf",
+      "F_AUNI_Dir_Sem04.pdf"
+    ],
+    "keyword:quimica": [
+      "Grupos Funcionales .pdf"
+    ],
+    "outside:code_i": [
+      "I_AUNI_Dir_Sem01 - SuperAcademy.pdf",
+      "I_AUNI_Dir_Sem01.pdf",
+      "I_AUNI_Dir_Sem02 - SuperAcademy.pdf",
+      "I_AUNI_Dir_Sem02.pdf",
+      "I_AUNI_Dir_Sem03 - SuperAcademy.pdf",
+      "I_AUNI_Dir_Sem03.pdf",
+      "I_AUNI_Dir_Sem04 - SuperAcademy.pdf",
+      "I_AUNI_Dir_Sem04.pdf"
+    ],
+    "outside:code_in": [
+      "IN_IUNI_Dir_Sem01.pdf",
+      "IN_IUNI_Dir_Sem01.pdf",
+      "IN_IUNI_Dir_Sem01.pdf",
+      "IN_IUNI_Dir_Sem02.pdf",
+      "IN_IUNI_Dir_Sem02.pdf",
+      "IN_IUNI_Dir_Sem02.pdf",
+      "IN_IUNI_Dir_Sem03.pdf",
+      "IN_IUNI_Dir_Sem03.pdf"
+    ],
+    "outside:code_ci": [
+      "Sem18_Ci_INTUNI.pdf",
+      "Sem19_Ci_INTUNI.pdf",
+      "Sem20_Ci_INTUNI.pdf"
+    ]
+  }
+}

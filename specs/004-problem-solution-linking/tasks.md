@@ -110,6 +110,12 @@
 - [X] T037 Close final audit findings for evidence invalidation, true reassignment, external sources, concurrent record writers and multipage roles
 - [X] T038 Re-run the 267-test focused/regression suite and record the independent no-P0/P1 audit result
 
+## Phase 8: Agent Contract Synchronization
+
+- [X] T039 Publish the portable Euler-Gottfried-Ingrid problem-solution contract and synchronize the three operational profiles
+- [X] T040 Add a canonical Obsidian adenda and superseding notes to historical Biblioteca contracts without erasing prior decisions
+- [X] T041 Validate capability IDs, assignment schemas, state vocabularies, human gates and Markdown integrity across the synchronized contracts
+
 ---
 
 ## Dependencies & Execution Order
@@ -122,6 +128,7 @@
 - US3 depends on confirmed bundles from US2.
 - US4 depends on the persisted linker and bundle paths from US2/US3.
 - Final validation depends on all desired stories.
+- Phase 8 depends on the implemented contracts from US1-US4 and does not authorize new runtime or canonical writes.
 
 ### Parallel Opportunities
 
@@ -138,6 +145,7 @@
 3. Deliver US2 as a staging-only review workflow.
 4. Enable US3 only after confirmed-bundle validation passes.
 5. Close provenance/invalidation in US4 before declaring the feature ready for a real-book pilot.
+6. Synchronize Euler, Gottfried and Ingrid only after their handoffs and human gates match the implemented contracts.
 
 ## MVP Scope
 

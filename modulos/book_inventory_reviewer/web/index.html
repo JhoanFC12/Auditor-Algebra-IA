@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Clasificador de libros</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <p class="eyebrow">INVENTARIO PREUNIVERSITARIO</p>
+        <h1>Clasificador de libros</h1>
+      </div>
+      <div class="header-actions">
+        <span id="progressLabel" class="progress-label">Cargando...</span>
+        <button id="exportButton" class="button primary">Exportar carpetas</button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <aside class="catalog-panel">
+        <section class="filters">
+          <label>
+            Buscar
+            <input id="searchInput" type="search" placeholder="Titulo, curso o ID Drive" autocomplete="off" />
+          </label>
+          <div class="filter-row">
+            <label>
+              Curso
+              <select id="courseFilter"></select>
+            </label>
+            <label>
+              Estado
+              <select id="stateFilter">
+                <option value="pendiente">Pendientes</option>
+                <option value="todos">Todos</option>
+                <option value="confirmado">Confirmados</option>
+                <option value="reasignado">Reasignados</option>
+                <option value="excluido">Excluidos</option>
+              </select>
+            </label>
+          </div>
+        </section>
+        <div id="courseCounts" class="course-counts"></div>
+        <div class="list-heading">
+          <strong id="visibleLabel">0 libros</strong>
+          <span>Selecciona para revisar</span>
+        </div>
+        <div id="bookList" class="book-list" role="listbox"></div>
+        <nav class="pagination" aria-label="Paginacion del inventario">
+          <button id="previousPageButton" class="icon-button" title="Pagina anterior" aria-label="Pagina anterior">&#8592;</button>
+          <span id="pageLabel">Pagina 1 de 1</span>
+          <button id="nextPageButton" class="icon-button" title="Pagina siguiente" aria-label="Pagina siguiente">&#8594;</button>
+        </nav>
+      </aside>
+
+      <section class="viewer-panel">
+        <div class="viewer-toolbar">
+          <button id="previousButton" class="icon-button" title="Libro anterior" aria-label="Libro anterior">←</button>
+          <div class="viewer-title">
+            <strong id="viewerPosition">0 de 0</strong>
+            <span id="viewerBookTitle">Selecciona un libro</span>
+          </div>
+          <button id="nextButton" class="icon-button" title="Libro siguiente" aria-label="Libro siguiente">→</button>
+          <a id="openDriveLink" class="button secondary disabled" target="_blank" rel="noopener">Abrir en Drive</a>
+        </div>
+        <div id="viewerEmpty" class="viewer-empty">
+          <strong>El visor está listo</strong>
+          <span>Selecciona un libro del listado para abrir su PDF.</span>
+        </div>
+        <iframe id="pdfFrame" class="pdf-frame" title="Vista previa del PDF" allow="autoplay"></iframe>
+      </section>
+
+      <aside class="inspector-panel">
+        <div class="inspector-heading">
+          <p class="eyebrow">CLASIFICACIÓN</p>
+          <h2 id="inspectorTitle">Sin selección</h2>
+          <span id="statusBadge" class="status-badge pending">Pendiente</span>
+        </div>
+
+        <form id="reviewForm">
+          <label>
+            Curso confirmado
+            <select id="confirmedCourse"></select>
+          </label>
+          <label>
+            Tipo de material
+            <select id="materialType"></select>
+          </label>
+          <fieldset>
+            <legend>¿Tiene problemas de opción múltiple?</legend>
+            <div class="segmented-control">
+              <label><input type="radio" name="multipleChoice" value="si" /><span>Sí</span></label>
+              <label><input type="radio" name="multipleChoice" value="no" /><span>No</span></label>
+              <label><input type="radio" name="multipleChoice" value="por_verificar" checked /><span>Revisar</span></label>
+            </div>
+          </fieldset>
+          <label>
+            Notas
+            <textarea id="notesInput" rows="4" placeholder="Autor, editorial, observaciones..."></textarea>
+          </label>
+          <div class="metadata">
+            <div><span>Curso propuesto</span><strong id="originalCourse">-</strong></div>
+            <div><span>Ámbito</span><strong id="courseScope">-</strong></div>
+            <div><span>ID Drive</span><strong id="driveId">-</strong></div>
+          </div>
+          <div class="review-actions">
+            <button id="excludeButton" type="button" class="button danger">Excluir</button>
+            <button id="saveButton" type="submit" class="button primary">Confirmar y seguir</button>
+          </div>
+        </form>
+        <div id="message" class="message" aria-live="polite"></div>
+      </aside>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

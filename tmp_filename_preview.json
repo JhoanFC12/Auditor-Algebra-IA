@@ -1,0 +1,323 @@
+﻿{
+  "schema_version": "filename_classification_report_v1",
+  "apply": false,
+  "catalog_total": 29706,
+  "classified": 5282,
+  "outside_excluded": 3322,
+  "doubtful": 14267,
+  "by_course": {
+    "Aritmetica": 827,
+    "Algebra": 532,
+    "Geometria": 959,
+    "Fisica": 587,
+    "Geometria del espacio": 7,
+    "Quimica": 773,
+    "Razonamiento matematico": 1138,
+    "Geometria analitica": 14,
+    "Trigonometria": 445
+  },
+  "by_reason": {
+    "code:Razonamiento matematico": 1124,
+    "code:Geometria": 830,
+    "outside:code_rv": 828,
+    "code:Aritmetica": 752,
+    "code:Quimica": 746,
+    "outside:geografia": 537,
+    "outside:code_le": 493,
+    "code:Fisica": 451,
+    "code:Trigonometria": 445,
+    "outside:code_ec": 440,
+    "code:Algebra": 436,
+    "outside:code_hp": 261,
+    "outside:code_li": 213,
+    "outside:code_c": 181,
+    "keyword:fisica": 136,
+    "keyword:geometria": 129,
+    "outside:civica": 127,
+    "outside:razonamiento_verbal": 109,
+    "keyword:algebra": 96,
+    "outside:code_ps": 78,
+    "keyword:aritmetica": 75,
+    "outside:code_ci": 44,
+    "keyword:quimica": 27,
+    "keyword:razonamiento_matematico": 14,
+    "keyword:geometria_analitica": 14,
+    "outside:biologia": 10,
+    "keyword:geometria_espacio": 7,
+    "outside:lenguaje": 1
+  },
+  "samples": {
+    "outside:civica": [
+      " ABC CIVICA RESÚMENES LLONTOP.pdf",
+      " CIVICA resumenes Estef.pdf",
+      " CIVICA 🤗🔥.pdf",
+      " cívica apuntes.pdf",
+      "6. CÍVICA.pdf",
+      "6. CÍVICA.pdf",
+      "6. CÍVICA.pdf",
+      "6. CÍVICA.pdf"
+    ],
+    "outside:geografia": [
+      " geografía apuntes .pdf",
+      " GEOGRAFÍA ️️️🤗.pdf",
+      " LAMINAS DE GEOGRAFÍA.pdf",
+      "01.Relación de la geografía con las carreras de ingeniería.pdf",
+      "12.Geodinámica interna.pdf",
+      "13.Geodinámica externa.pdf",
+      "41.Geografía mundial.pdf",
+      "5. Geografia_2_La atmosfera- tiempo y clima - cambio climatico y contaminacion.pdf"
+    ],
+    "keyword:aritmetica": [
+      "01 Razones y proporciones - Promedios.pdf",
+      "02.Razones y proporciones I.pdf",
+      "03.Razones y proporciones II.pdf",
+      "04.Promedios I.pdf",
+      "05.Promedios II.pdf",
+      "08 Teoría de la divisibilidad.pdf",
+      "10 MCD y MCM.pdf",
+      "26.Teoría de divisibilidad I.pdf"
+    ],
+    "keyword:algebra": [
+      "010 INECUACIONES 1ER Y 2DO - TEORIA.pdf",
+      "02 El polinomio - Productos notables.pdf",
+      "02 Polinomios.pdf",
+      "02 Productos notables.pdf",
+      "03 Polinomios.pdf",
+      "03 Productos notables.pdf",
+      "03.Productos Notables I.pdf",
+      "04 División de polinomios.pdf"
+    ],
+    "keyword:geometria": [
+      "02 Triángulos.pdf",
+      "02 Triángulos.pdf",
+      "02 Triángulos.pdf",
+      "02 Triángulos.pdf",
+      "03 Congruencia de triángulos.pdf",
+      "03 Polígonos - Cuadriláteros.pdf",
+      "03 Polígonos.pdf",
+      "03 Polígonos.pdf"
+    ],
+    "keyword:fisica": [
+      "03 Cinemática I - MRU - MRUV.pdf",
+      "03.Cinemática I.pdf",
+      "04 Cinemática II - MVCL - MPCL.pdf",
+      "04 Estática.pdf",
+      "04.Cinemática II.pdf",
+      "05 Dinámica - Rozamiento.pdf",
+      "05.Cinemática III.pdf",
+      "06.Cinemática IV.pdf"
+    ],
+    "keyword:geometria_espacio": [
+      "09 Poliedros.pdf",
+      "31.Poliedros y poliedros regulares I.pdf",
+      "32.Poliedros Regulares II.pdf",
+      "Poliedros regulares.pdf",
+      "POLIEDROS.pdf",
+      "SCV-TS018-GE-POLIEDROS I.pdf",
+      "SCV-TS019-GE-POLIEDROS II.pdf"
+    ],
+    "keyword:quimica": [
+      "11.1 Estequiometría I Calculos químicos repaso.pdf",
+      "13 Ácidos y bases.pdf",
+      "17 ESTEQUIOMETRÍA.pdf",
+      "18 ESTEQUIOMETRÍA II -  SOLUCIONES.pdf",
+      "20 ÁCIDO Y BASE.pdf",
+      "26.Estequiometría I.pdf",
+      "27.Estequiometría II.pdf",
+      "8.Enlace químico repaso.pdf"
+    ],
+    "keyword:razonamiento_matematico": [
+      "12 Conteo de figuras.pdf",
+      "2.aptitud matemática_taller_semana1_FE.pdf",
+      "3.aptitud matemática_claseteórica_A_semana1_FE.pdf",
+      "3.aptitud matemática_claseteóricaB_semana_1_FE.pdf",
+      "35.Conteo de figuras I.pdf",
+      "36.Conteo de figuras II.pdf",
+      "ACV-TS034-RM-conteo de figuras I.pdf",
+      "ACV-TS034-RM-conteo de figuras I.pdf"
+    ],
+    "keyword:geometria_analitica": [
+      "15 Circunferencia - Parábola.pdf",
+      "16 Circunferencia y parábola.pdf",
+      "16 Elipse - Hipérbola.pdf",
+      "17 Elipse e hipérbola.pdf",
+      "3 Circunferencia y parábola.pdf",
+      "37.Secciones cónicas I.pdf",
+      "38.Secciones cónicas II.pdf",
+      "39.Secciones cónicas III.pdf"
+    ],
+    "code:Aritmetica": [
+      "A_AUNI_Dir_Sem01 - SuperAcademy.pdf",
+      "A_AUNI_Dir_Sem01.pdf",
+      "A_AUNI_Dir_Sem02 - SuperAcademy.pdf",
+      "A_AUNI_Dir_Sem02.pdf",
+      "A_AUNI_Dir_Sem03 - SuperAcademy.pdf",
+      "A_AUNI_Dir_Sem03.pdf",
+      "A_AUNI_Dir_Sem04 - SuperAcademy.pdf",
+      "A_AUNI_Dir_Sem04.pdf"
+    ],
+    "outside:biologia": [
+      "ABC ECOLOGÍA.pdf",
+      "ABC GENÉTICA (1).pdf",
+      "Ecologia general y del Peru.pdf",
+      "ecologia-del-peru_compress.pdf",
+      "Ecología IV - clase.pdf",
+      "Ecología-pre-2010.pdf",
+      "GENÉTICA II.pdf",
+      "GENÉTICA.pdf"
+    ],
+    "code:Algebra": [
+      "ACV-AL-TS021-Funciones II.pdf",
+      "ACV-AL-TS021-Funciones II.pdf",
+      "ACV-AL-TS021-Funciones II.pdf",
+      "ACV-AL-TS022-Gráfica de Funciones notables I.pdf",
+      "ACV-AL-TS022-Gráfica de Funciones notables I.pdf",
+      "ACV-AL-TS022-Gráfica de Funciones notables I.pdf",
+      "ACV-AL-TS023-GRÁFICA DE FUNCIONES NOTABLES II.pdf",
+      "ACV-AL-TS023-GRÁFICA DE FUNCIONES NOTABLES II.pdf"
+    ],
+    "code:Fisica": [
+      "ACV-FI-TS023-Fenómenos Térmicos I.pdf",
+      "ACV-FI-TS023-Fenómenos Térmicos I.pdf",
+      "ACV-FI-TS023-Fenómenos Térmicos I.pdf",
+      "ACV-FI-TS024-Fenómenos Térmicos 2.pdf",
+      "ACV-FI-TS024-Fenómenos Térmicos 2.pdf",
+      "ACV-FI-TS024-Fenómenos Térmicos 2.pdf",
+      "ACV-FI-TS030.pdf",
+      "ACV-FI-TS030.pdf"
+    ],
+    "code:Geometria": [
+      "ACV-GE-TS021-Relaciones métricas II.pdf",
+      "ACV-GE-TS021-Relaciones métricas II.pdf",
+      "ACV-GE-TS021-Relaciones métricas II.pdf",
+      "ACV-GE-TS037.pdf",
+      "ACV-GE-TS037.pdf",
+      "ACV-GE-TS037.pdf",
+      "ACV-TS001-GE - SuperAcademy.pdf",
+      "ACV-TS001-GE.pdf"
+    ],
+    "outside:code_hp": [
+      "ACV-HP-TS022-Revolución francesa.pdf",
+      "ACV-HP-TS022-Revolución francesa.pdf",
+      "ACV-HP-TS022-Revolución francesa.pdf",
+      "ACV-HP-TS023-Revolución Industrial.pdf",
+      "ACV-HP-TS023-Revolución Industrial.pdf",
+      "ACV-HP-TS023-Revolución Industrial.pdf",
+      "ACV-HP-TS024-Corrientes libertadoras I.pdf",
+      "ACV-HP-TS024-Corrientes libertadoras I.pdf"
+    ],
+    "outside:code_li": [
+      "ACV-LI-TS021-Medievalismo europeo.pdf",
+      "ACV-LI-TS021-Medievalismo europeo.pdf",
+      "ACV-TS001-LI-Clasicismo griego.pdf",
+      "ACV-TS002-LI-Medievalismo europeo.pdf",
+      "ACV-TS003-LI-Realismo europeo.pdf",
+      "ACV-TS004-LI-Narrativa contemporánea.pdf",
+      "ACV-TS005-LI-Lírica del Siglo de Oro español.pdf",
+      "ACV-TS006-LI-Teatro del Siglo de Oro.pdf"
+    ],
+    "code:Quimica": [
+      "ACV-QU-TS021-Estado gaseoso II.pdf",
+      "ACV-QU-TS021-Estado gaseoso II.pdf",
+      "ACV-QU-TS021-Estado gaseoso II.pdf",
+      "ACV-QU-TS027-SISTEMAS DISPERSOS.pdf",
+      "ACV-QU-TS027-SISTEMAS DISPERSOS.pdf",
+      "ACV-QU-TS027-SISTEMAS DISPERSOS.pdf",
+      "ACV-QU-TS028-SOLUCIONES I.pdf",
+      "ACV-QU-TS028-SOLUCIONES I.pdf"
+    ],
+    "code:Razonamiento matematico": [
+      "ACV-RM-TS021-Operaciones matemáticas II.pdf",
+      "ACV-RM-TS021-Operaciones matemáticas II.pdf",
+      "ACV-RM-TS021-Operaciones matemáticas II.pdf",
+      "ACV-RM-TS022-OPERACIONES MATEMÁTICAS III.pdf",
+      "ACV-RM-TS022-OPERACIONES MATEMÁTICAS III.pdf",
+      "ACV-RM-TS022-OPERACIONES MATEMÁTICAS III.pdf",
+      "ACV-RM-TS023-OPERACIONES MATEMÁTICAS IV.pdf",
+      "ACV-RM-TS023-OPERACIONES MATEMÁTICAS IV.pdf"
+    ],
+    "code:Trigonometria": [
+      "ACV-TR-TS030.pdf",
+      "ACV-TR-TS030.pdf",
+      "ACV-TR-TS031.pdf",
+      "ACV-TR-TS031.pdf",
+      "ACV-TR-TS031.pdf",
+      "ACV-TR-TS032.pdf",
+      "ACV-TR-TS032.pdf",
+      "ACV-TR-TS032.pdf"
+    ],
+    "outside:code_ec": [
+      "ACV-TS001-EC - SuperAcademy.pdf",
+      "ACV-TS001-EC.pdf",
+      "ACV-TS001-EC.pdf",
+      "ACV-TS003-EC-NECESIDADES HUMANAS - SuperAcademy.pdf",
+      "ACV-TS003-EC-NECESIDADES HUMANAS.pdf",
+      "ACV-TS003-EC-NECESIDADES HUMANAS.pdf",
+      "ACV-TS004-EC-BIENES Y SERVICIOS - SuperAcademy.pdf",
+      "ACV-TS004-EC-BIENES Y SERVICIOS.pdf"
+    ],
+    "outside:code_le": [
+      "ACV-TS001-LE - SuperAcademy.pdf",
+      "ACV-TS001-LE.pdf",
+      "ACV-TS002-LE-La sílaba - SuperAcademy.pdf",
+      "ACV-TS002-LE-La sílaba.pdf",
+      "ACV-TS003-LE-Acentuación general - SuperAcademy.pdf",
+      "ACV-TS003-LE-Acentuación general.pdf",
+      "ACV-TS004-LE-Acentuación especial - SuperAcademy.pdf",
+      "ACV-TS004-LE-Acentuación especial.pdf"
+    ],
+    "outside:code_ps": [
+      "ACV-TS001-PS - SuperAcademy.pdf",
+      "ACV-TS001-PS.pdf",
+      "ACV-TS001-PS.pdf",
+      "ACV-TS002-PS-SOCIALIZACIÓN Y FACTORES DEL COMPORTAMIENTO SOCIAL - SuperAcademy.pdf",
+      "ACV-TS002-PS-SOCIALIZACIÓN Y FACTORES DEL COMPORTAMIENTO SOCIAL.pdf",
+      "ACV-TS002-PS-SOCIALIZACIÓN Y FACTORES DEL COMPORTAMIENTO SOCIAL.pdf",
+      "ACV-TS003-PS-PROCESOS COGNITIVOS I - SuperAcademy.pdf",
+      "ACV-TS003-PS-PROCESOS COGNITIVOS I.pdf"
+    ],
+    "outside:code_rv": [
+      "ACV-TS001-RV - SuperAcademy.pdf",
+      "ACV-TS001-RV.pdf",
+      "ACV-TS001-RV.pdf",
+      "ACV-TS002-RV-DEFINICIONES - SuperAcademy.pdf",
+      "ACV-TS002-RV-DEFINICIONES.pdf",
+      "ACV-TS003-RV-SINONIMIA CONTEXTUAL (1) - SuperAcademy.pdf",
+      "ACV-TS003-RV-SINONIMIA CONTEXTUAL (1).pdf",
+      "ACV-TS003-RV-SINONIMIA CONTEXTUAL (1).pdf"
+    ],
+    "outside:razonamiento_verbal": [
+      "BANCO DE CONTENIDO DIGITAL - RAZONAMIENTO VERBAL - MÉTODO SMIF COMPLETO.pdf",
+      "BANCO DE CONTENIDO DIGITAL - RAZONAMIENTO VERBAL - MÉTODO SMIF COMPLETO.pdf",
+      "BANCO DE CONTENIDO DIGITAL - RAZONAMIENTO VERBAL.pdf",
+      "BANCO DE CONTENIDO DIGITAL - RAZONAMIENTO VERBAL.pdf",
+      "Banco de preguntas - Razonamiento Verbal (claves).pdf",
+      "Libro pt. 1 - Razonamiento Verbal.pdf",
+      "Libro-Preparate-del-Pronabec-Segunda-Edicion-Razonamiento-Verbal.pdf",
+      "Libro-Pronabec-Razonamiento-Verbal.pdf"
+    ],
+    "outside:code_c": [
+      "C_AUNI_Dir_Sem01 - SuperAcademy.pdf",
+      "C_AUNI_Dir_Sem01.pdf",
+      "C_AUNI_Dir_Sem02 - SuperAcademy.pdf",
+      "C_AUNI_Dir_Sem02.pdf",
+      "C_AUNI_Dir_Sem03 - SuperAcademy.pdf",
+      "C_AUNI_Dir_Sem03.pdf",
+      "C_AUNI_Dir_Sem04 - SuperAcademy.pdf",
+      "C_AUNI_Dir_Sem04.pdf"
+    ],
+    "outside:code_ci": [
+      "CI_ACV_Dir_Sem35.pdf",
+      "CI_ACV_Dir_Sem35.pdf",
+      "CI_ACV_Dir_Sem36.pdf",
+      "CI_ACV_Dir_Sem36.pdf",
+      "CI_ACV_Dir_Sem36.pdf",
+      "CI_ACV_Dir_Sem37.pdf",
+      "CI_ACV_Dir_Sem37.pdf",
+      "CI_ACV_Dir_Sem37.pdf"
+    ],
+    "outside:lenguaje": [
+      "Manual de Ortografía - Lumbreras.pdf"
+    ]
+  }
+}

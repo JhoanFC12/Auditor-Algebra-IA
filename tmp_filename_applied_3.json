@@ -1,0 +1,118 @@
+﻿{
+  "schema_version": "filename_classification_report_v1",
+  "apply": true,
+  "catalog_total": 29706,
+  "classified": 374,
+  "outside_excluded": 203,
+  "doubtful": 10250,
+  "by_course": {
+    "Razonamiento matematico": 341,
+    "Algebra": 9,
+    "Quimica": 6,
+    "Aritmetica": 15,
+    "Fisica": 3
+  },
+  "by_reason": {
+    "keyword:razonamiento_matematico": 341,
+    "outside:verbal": 160,
+    "outside:geografia_tema": 19,
+    "keyword:aritmetica": 15,
+    "outside:historia_tema": 13,
+    "keyword:algebra": 9,
+    "outside:filosofia_tema": 8,
+    "keyword:quimica": 6,
+    "outside:civica_tema": 3,
+    "keyword:fisica": 3
+  },
+  "samples": {
+    "keyword:razonamiento_matematico": [
+      " Puntos Cardinales - RM.pdf",
+      " RM (propedéutica para las ciencias)",
+      " Rotación y traslación de figuras - RM.pdf",
+      "1 Semana Básico Ciencias - RM.pdf",
+      "1.aptitudmatematica_motivación_semana 5_FE.pdf",
+      "1.aptitudmatemática_motivación_semana 2_FE.pdf",
+      "1.aptitudmatemática_motivación_semana 3_FE.pdf",
+      "1.aptitudmatemática_motivación_semana 4_FE.pdf"
+    ],
+    "keyword:algebra": [
+      "01 Leyes de exponentes - Ecuaciones exponenciales.pdf",
+      "01 Leyes de exponentes.pdf",
+      "01 Leyes de exponentes.pdf",
+      "02.Leyes de exponentes.pdf",
+      "ECUACIONES EXPONENCIALES EJERCICIOS (1).pdf",
+      "ECUACIONES EXPONENCIALES EJERCICIOS.pdf",
+      "LEYES DE EXPONENTES EJERCICIOS IIIII.pdf",
+      "Leyes de exponentes.pdf"
+    ],
+    "keyword:quimica": [
+      "02 MATERIA,  CONFIGURACIÓN ELECTRÓNICA Y TABLA PERIÓDICA_.pdf",
+      "04 Tabla periódica - Propiedades.pdf",
+      "06 TABLA PERIÓDICA.pdf",
+      "07 TABLA PERIÓDICA - II.pdf",
+      "07.Tabla periódica moderna.pdf",
+      "tabla periódica .pdf"
+    ],
+    "outside:geografia_tema": [
+      "03.Cartografía I.pdf",
+      "04.Cartografía II.pdf",
+      "05.Cartografía III.pdf",
+      "4. Cartografía II (ADUNI).pptx.pdf",
+      "BIOMAS DEL MUNDO - WIKIGEO.pdf",
+      "CARTOGRAFIA pptx.pdf",
+      "cartografía  2 abril 2014.pdf",
+      "cartografía 1 abril 2016.pdf"
+    ],
+    "outside:historia_tema": [
+      "03.Comunidad primitiva en el mundo.pdf",
+      "04.Comunidad primitiva en el Perú.pdf",
+      "1. CIENCIA HISTORICA-1.pdf",
+      "16.Incas II política y aportes culturales.pdf",
+      "19.Invasión al Tahuantinsuyo.pdf",
+      "El movimiento nacional Inca del siglo XVIII - John H Rowe.pdf",
+      "Formativo, Desarrollos Regionales, Horizonte Medio, Tahuantinsuyo (Incas).pdf",
+      "Incas .pdf"
+    ],
+    "outside:verbal": [
+      "03.Sinonimia y sinonimia contextual.pdf",
+      "Aptitud Verbal part 1 PREUNAC.pdf",
+      "Frase Nominal, Frase Verbal, Adverbios, Preposición, Conjunciones.pdf",
+      "FRASE VERBAL.pdf",
+      "H. VERBAL COMPLETO CEPRE SM 2016-I.pdf",
+      "VERBAL SEM 1.pdf",
+      "VERBAL SEM 1.pdf",
+      "VERBAL SEM 1.pdf"
+    ],
+    "keyword:aritmetica": [
+      "06 Relaciones binarias - Teoría de la numeración.pdf",
+      "19.Teoría de numeración I.pdf",
+      "20.Teoría de numeración II.pdf",
+      "Copia de Ejercicios Propuestos -Numeración.pdf",
+      "Copia de NUMERACION U.pdf",
+      "Ejercicios Propuestos -Numeración.pdf",
+      "NUMERACION 5 TEORIA (1).pdf",
+      "NUMERACION 5 TEORIA.pdf"
+    ],
+    "outside:filosofia_tema": [
+      "06.Periodo ontológico I.pdf",
+      "07.Periodo ontológico II.pdf",
+      "29.Axiología el valor.pdf",
+      "40.Silogismo categórico.pdf",
+      "41.Reglas del silogismo categórico.pdf",
+      "Axiología I.pdf",
+      "AXIOLOGÍA.pdf",
+      "ETAPA COSMOLÓGICA.pdf"
+    ],
+    "outside:civica_tema": [
+      "35.Derechos Humanos y Mecanismos de Protección de Derechos.pdf",
+      "Derechos Humanos - Características, clasificacion y derechos fundamentales.pdf",
+      "Derechos humanos .pdf"
+    ],
+    "keyword:fisica": [
+      "9. MCU.pdf",
+      "Movimiento Armónico Simple.pdf",
+      "Rapidez, velocidad y aceleración en el MCU.pdf"
+    ]
+  },
+  "backup": "E:\\Github\\Auditor-IA\\.cache\\book_catalog\\repository_inventory\\curated_math_books\\review_decisions.before-filename-20260716-152840.json"
+}

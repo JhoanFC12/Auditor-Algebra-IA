@@ -1,14 +1,14 @@
 ---
 context_id: library_agents_shared_context_v1
-version: 1.0
+version: 1.2
 active_agents:
   - euler_library_factory_coordinator_v1
   - gottfried_leibniz_v1
   - ingrid_daubechies_v1
-default_mode: dry_run
+default_mode: supervised_staging
 ---
 
-# Contexto compartido de Euler y Gottfried
+# Contexto compartido de Euler, Gottfried e Ingrid
 
 ## Limite de dominio
 
@@ -17,13 +17,17 @@ Estos agentes trabajan exclusivamente con la biblioteca matematica y sus proceso
 ## Alcance activo
 
 - Euler coordina el lote, las asignaciones, los gates, los bloqueos y el cierre.
-- Gottfried es un solo agente con dos capacidades:
+- Gottfried es un solo agente con tres capacidades:
   - `library_pdf_organizer_v1` para organizacion documental;
-  - `book_structural_analyzer_v1` para analisis estructural del libro.
+  - `book_structural_analyzer_v1` para analisis estructural del libro;
+  - `book_problem_solution_mapper_v1` para mapear paginas, conjuntos y estructura problema-solucion.
 - No existe un tercer agente Organizador.
-- Ingrid Daubechies tiene un piloto activo limitado a revisar y corregir una copia versionada del dataset del detector `v7_401`. No puede modificar el dataset fuente ni operar todavia sobre instancias productivas.
-- OCR, Golden, Normalizador, clasificacion semantica, entrenamiento y promocion de modelos permanecen diferidos.
-- El cierre actual es `euler_gottfried_validado`; no equivale a `completo_bd`.
+- Ingrid Daubechies tiene dos capacidades separadas: revision del dataset versionado `v7_401` y segmentacion problema-solucion de una instancia existente en staging.
+- El modo dataset conserva la fuente inmutable y las clases `problem`, `problem_number` y `answer_block`.
+- El modo instancia requiere una asignacion explicita, un mapa confirmado de Gottfried y un gate humano; no crea una clase YOLO `solution`.
+- OCR semantico de soluciones, Golden matematico, Normalizador de soluciones, clasificacion semantica y entrenamiento/promocion de modelos permanecen diferidos.
+- El cierre `problem_solution_reviewed` no equivale a `complete_bd`. La promocion real exige autorizacion humana, commit tecnico y auditoria posterior.
+- El contrato comun del flujo es `agents/biblioteca/CONTRATO_PROBLEMA_SOLUCION.md`.
 
 ## Reglas documentales confirmadas
 
@@ -45,11 +49,33 @@ Los subtemas matematicos no se infieren libremente. Se clasificaran posteriormen
 
 Los examenes y concursos pueden catalogarse, pero permanecen bloqueados para extraccion durante esta fase.
 
+## Flujo activo problema-solucion
+
+```text
+Euler asigna libro, instancia y conjunto
+-> Gottfried propone estructura y paginas
+-> humano confirma el mapa
+-> Ingrid segmenta solo las paginas autorizadas en staging
+-> humano confirma boxes y unidades
+-> servicio enlazador propone correspondencias
+-> humano confirma, reasigna, rechaza o marca huerfano
+-> Euler audita la vista previa
+-> humano autoriza una promocion controlada, si corresponde
+```
+
+Gottfried no dibuja boxes ni decide enlaces individuales. Ingrid no modifica la estructura editorial, no confirma enlaces canonicos y no escribe directamente en la BD. Las correcciones de boxes y las decisiones de enlace permanecen en registros separados.
+
+Una pagina puede pertenecer simultaneamente a las selecciones de problemas y soluciones. Una solucion multipagina solo es valida con `single` o con la secuencia completa `begin -> middle* -> end`.
+
+Los cambios de PDF, mapa, conjunto, paginas, boxes, crops, hashes, versiones o relacion documental invalidan los derivados afectados. El historial humano se conserva y toda mutacion exige una revision esperada vigente.
+
 ## Seguridad
 
-- Modo predeterminado: lectura y `dry_run`.
+- La coordinacion y el analisis empiezan en lectura y `dry_run`; solo las escrituras de staging delimitadas por una asignacion explicita y su gate humano pueden usar `supervised_staging`.
 - Ningun agente borra, sobrescribe o altera PDFs o datos canonicos.
 - Una propuesta no constituye aprobacion.
 - Una aprobacion de lote no autoriza implicitamente movimientos, fusiones o renombrados.
+- Una aprobacion de mapa no aprueba boxes; una aprobacion de boxes no aprueba enlaces; una aprobacion de enlaces no aprueba la promocion.
+- Ingrid nunca mezcla una asignacion de dataset con una asignacion de instancia.
 - Los errores se aislan por archivo, pagina, rango u operacion; las unidades independientes pueden continuar.
 - Codex puede auditar, pero la confirmacion final pertenece al humano.

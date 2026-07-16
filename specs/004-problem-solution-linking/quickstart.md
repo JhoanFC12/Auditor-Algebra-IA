@@ -76,3 +76,11 @@ Validated on 2026-07-15 from `E:\Github\Auditor-IA`:
 - Concurrent record writers, true cross-problem reassignment, evidence invalidation, external-source enforcement and mandatory multipage roles have focused regression coverage.
 - A final independent audit ran 213 focused tests and found no remaining P0/P1 issue in those five hardening areas.
 - The tracebacks printed by two tests are intentional assertions that internal paths are hidden from HTTP clients; the suite result is `OK`.
+
+Agent-contract synchronization validated on 2026-07-16:
+
+- the same 267-test focused/regression command passed in 74.420 seconds;
+- repeated Gottfried/Ingrid YAML contracts match the portable contract byte for byte;
+- capability IDs, state vocabularies, gate references, Markdown fences and relative links passed consistency checks;
+- an independent read-only contract audit returned `PASS`;
+- no model training, database write, `.env` change or deployment was performed.
