@@ -1,6 +1,6 @@
 ---
 contract_id: library_problem_solution_agent_contract_v1
-version: 1.1
+version: 1.2
 status: active_staging_pilot
 approved_on: 2026-07-16
 agents:
@@ -45,7 +45,10 @@ Este contrato debe interpretarse junto con:
 2. `specs/004-problem-solution-linking/data-model.md`;
 3. `specs/004-problem-solution-linking/contracts/page-selection-v2.md`;
 4. `specs/004-problem-solution-linking/contracts/problem-solution-linking-api.md`;
-5. `specs/004-problem-solution-linking/contracts/promotion-bundle.md`.
+5. `specs/004-problem-solution-linking/contracts/promotion-bundle.md`;
+6. `specs/004-problem-solution-linking/contracts/structural-page-analysis-v2.md`;
+7. `specs/004-problem-solution-linking/contracts/problem-solution-map-v2.md`;
+8. `specs/004-problem-solution-linking/contracts/ingrid-provisional-traceability-v1.md`.
 
 Si un perfil antiguo contradice este contrato solamente respecto del flujo problema-solucion, prevalece este contrato por ser la decision humana mas reciente. Las contradicciones sobre cualquier otro tema se muestran al humano y no se resuelven por inferencia.
 
@@ -54,8 +57,8 @@ Si un perfil antiguo contradice este contrato solamente respecto del flujo probl
 | Participante | Responsabilidad | No le corresponde |
 |---|---|---|
 | Euler | seleccionar la instancia, emitir asignaciones, verificar dependencias, abrir gates y auditar el cierre | analizar paginas, dibujar boxes, confirmar enlaces o escribir directamente en BD |
-| Gottfried | identificar la estructura editorial, conjuntos de ejercicios y rangos de problemas/soluciones con evidencia | segmentar boxes, resolver problemas o decidir enlaces individuales |
-| Ingrid | revisar visualmente las paginas autorizadas y producir boxes/unidades de solucion trazables en staging | cambiar la estructura de Gottfried, confirmar enlaces canonicos, entrenar o promover a BD |
+| Gottfried | analizar cada pagina, identificar estructura editorial, evaluar elegibilidad y, cuando Euler lo autorice, proponer mapa y unidades provisionales | segmentar boxes precisos, activar a Ingrid, resolver problemas o decidir enlaces individuales |
+| Ingrid | revisar visualmente las paginas autorizadas y producir boxes/unidades precisas con trazabilidad a las unidades provisionales | usar regiones `coarse` como boxes, cambiar la estructura de Gottfried, confirmar enlaces canonicos, entrenar o promover a BD |
 | Enlazador | generar propuestas deterministas y evidencia de correspondencia | convertir una puntuacion en verdad canonica |
 | Humano | aprobar mapas, boxes, enlaces, relaciones externas y promociones | ningun agente puede sustituirlo |
 | Promotor controlado | validar y escribir el paquete aprobado de forma atomica e idempotente | promover propuestas pendientes o evidencia obsoleta |
@@ -102,8 +105,11 @@ El ID heredado `problem_segmentation_reviewer_v1` queda deprecado porque no dist
 
 ```text
 Euler selecciona libro, instancia y conjunto
--> Gottfried propone mapa estructural y rangos
--> H-PS1: humano confirma estructura, paginas y relacion documental
+-> Gottfried entrega analisis estructural completo y elegibilidad
+-> Euler autoriza `generate_map: true` para el scope elegible
+-> Gottfried propone mapa, rangos y unidades provisionales
+-> Gottfried materializa una sesion visual por mapa/revision y Euler la audita en Problem Detector Lab
+-> H-PS1: humano congela revision, estructura, paginas, roles, unidades y relacion documental
 -> Euler asigna a Ingrid el modo instance_staging
 -> Ingrid revisa paginas y propone boxes/unidades
 -> H-PS2: humano aprueba o corrige boxes
@@ -118,9 +124,76 @@ Euler selecciona libro, instancia y conjunto
 
 Ninguna salida de un paso autoriza automaticamente el siguiente. Un gate parcial se limita al libro, instancia, conjunto, pagina, box, enlace u operacion identificados.
 
+### 5.1 Extension contractual V2 por pagina
+
+Toda nueva ejecucion de analisis usa `book_page_structural_analysis_v2`. Cada
+pagina conserva:
+
+- `content_roles` editoriales y multietiqueta;
+- `audit_roles` normalizados mediante `page_role_mapping_v1`;
+- `page_sections` como regiones rectangulares aproximadas `coarse` en `0..1`;
+- `page_statistics` estimadas, con confianza, evidencia e intervalos;
+- controles `problem_partition_ok`, `solution_count_valid` y
+  `statistics_consistent`.
+
+La conversion contractual minima es `worked_example -> theory`,
+`solved_problem -> problem + solution` y `answer_key -> solution`. La regla
+`problem_units = proposed_problems + solved_problems` es invariante;
+`worked_examples` nunca se suma a `problem_units` y una solucion no constituye
+un problema adicional.
+
+Las regiones de Gottfried no son boxes finales y declaran siempre
+`precision: coarse` y `usable_as_final_box: false`. Solo Ingrid produce boxes
+precisos despues de H-PS1.
+
+### 5.2 Elegibilidad, autoridad y trazabilidad V2
+
+Gottfried ejecuta siempre el analisis completo y despues emite
+`gottfried_map_eligibility_v1` con `eligible_full`, `eligible_partial`,
+`pending_review` o `not_eligible`. Gottfried determina `can_generate_map` y
+recomienda `should_generate_now`; no puede autoautorizar `generate_map` ni
+activar a Ingrid.
+
+Euler puede emitir `gottfried_problem_solution_mapping_assignment_v2` con
+`generate_map: true` solo para una elegibilidad `eligible_full` o
+`eligible_partial` cuya huella coincida. `activate_ingrid: true` solo puede
+existir en la asignacion posterior de Euler cuando el mapa esta
+`handoff_ready`, H-PS1 esta aprobado y scope, revision y huella son exactos.
+
+El mapa V2 asigna IDs provisionales `Pnnn` y `Snnn`, estables solo dentro de
+`map_id + map_revision + exercise_set_id`. Ingrid conserva
+`source_provisional_unit_ids` y declara `exact`, `split`, `merge`,
+`reclassify`, `boundary_adjustment`, `rejected` o `newly_discovered`. Las
+relaciones admiten uno a uno, uno a muchos y muchos a uno, pero no convierten
+un ID provisional en canonico. Una revision nueva invalida solo los scopes
+afectados; cualquier reutilizacion exige verificar compatibilidad.
+
+### 5.3 Auditoria visual obligatoria antes de H-PS1
+
+Cada `gottfried_problem_solution_map_v2` en `mapping_requires_human` debe
+materializarse como una sesion independiente
+`problem_detector_visual_audit_session_v1` antes de solicitar H-PS1. La sesion
+fija literalmente `map_id`, `map_revision`, `scope`, paginas, referencias P/S/R,
+hash del mapa, hash del PDF, `scope_fingerprint`, `context_fingerprint` y su
+propia huella.
+
+Problem Detector Lab revalida los artefactos vivos y muestra paginas completas,
+regiones `coarse`, unidades P/S, numeros editoriales, relaciones R lado a lado,
+confianza, evidencia e incertidumbres. Si un elemento obligatorio falta o no
+coincide, el estado es `visual_audit_blocked` y Euler no abre H-PS1.
+
+La sesion y sus endpoints son de solo lectura. Las marcas de interfaz viven
+solo en el navegador y no aprueban H-PS1, no activan a Ingrid, no crean boxes o
+crops, no modifican mapas/PDFs y no escriben en app, staging canonico o BD. Una
+nueva revision crea una sesion nueva y conserva la anterior.
+
 ## 6. Contrato de Gottfried
 
 ### 6.1 Entrada
+
+El esquema siguiente se conserva para leer asignaciones V1 ya emitidas. Toda
+nueva autorizacion usa `gottfried_problem_solution_mapping_assignment_v2`,
+definida en `contracts/problem-solution-map-v2.md`.
 
 ```yaml
 schema_version: gottfried_problem_solution_mapping_assignment_v1
@@ -165,6 +238,10 @@ Gottfried:
 Gottfried no dibuja boxes, no cuenta problemas como dato canonico, no enlaza ejercicios individuales y no confirma por si mismo que una solucion externa pertenece al libro.
 
 ### 6.3 Salida
+
+El esquema siguiente se conserva para compatibilidad de lectura. Toda salida
+nueva usa `gottfried_problem_solution_map_v2` y referencia el manifiesto por
+pagina, la elegibilidad y las unidades provisionales.
 
 ```yaml
 schema_version: gottfried_problem_solution_map_v1
@@ -221,6 +298,8 @@ Reglas:
 ### 6.4 Estados de Gottfried
 
 ```text
+structural_analysis_complete
+eligibility_evaluated
 mapping_requested
 mapping_in_progress
 mapping_requires_human
@@ -235,12 +314,19 @@ mapping_blocked
 
 ### 7.1 Entrada
 
+Para nuevas ejecuciones, la asignacion debe citar
+`gottfried_problem_solution_map_v2`, su `page_role_manifest_ref`, las unidades
+provisionales y el `scope_fingerprint` congelados por H-PS1. Las asignaciones
+V1 solo se aceptan para reabrir artefactos historicos y no satisfacen por si
+solas la trazabilidad V2.
+
 ```yaml
 schema_version: ingrid_instance_segmentation_assignment_v1
 assignment_id: ""
 agent_id: ingrid_daubechies_v1
 capability_id: instance_problem_solution_segmenter_v1
 mode: instance_staging
+activate_ingrid: true
 scope:
   book_code: ""
   book_id: null
@@ -252,7 +338,9 @@ structure_snapshot:
   map_id: ""
   map_revision: 0
   context_fingerprint: ""
+  scope_fingerprint: ""
   map_status: handoff_ready
+  page_role_mapping_version: page_role_mapping_v1
   structure_mode: separate_sections|interleaved|hybrid
   solution_status: identified|external_source
   problem_selected_pages: []
@@ -262,7 +350,7 @@ h_ps1_gate_ref:
   request_id: ""
   stage: problem_solution_structure
   artifact_ref:
-    schema_version: gottfried_problem_solution_map_v1
+    schema_version: gottfried_problem_solution_map_v2
     artifact_id: ""
     context_fingerprint: ""
     expected_revision: 0
@@ -274,14 +362,23 @@ h_ps1_gate_ref:
   status: approved
 document_relation: null
 source_pages: []
+provisional_units: []
 problem_units: []
 detector_proposals: []
 human_comments: []
 ```
 
-Son obligatorios `book_code`, `instance_type` y `exercise_set_id`; no existen comodines vacios. El mapa debe estar `handoff_ready` y los rangos confirmados. `h_ps1_gate_ref` debe apuntar al mismo `map_id`, `map_revision` y huella, con decision humana `approve`. El `expected_revision` superior pertenece al workspace problema-solucion; no se confunde con la revision del mapa. Si `solution_status` es `external_source`, `document_relation` debe estar confirmada y contener una referencia estable.
+Son obligatorios `activate_ingrid: true`, `book_code`, `instance_type`, `exercise_set_id`, `scope_fingerprint`, `page_role_mapping_v1` y las unidades provisionales; no existen comodines vacios. El mapa debe estar `handoff_ready` y los rangos confirmados. `h_ps1_gate_ref` debe apuntar al mismo `map_id`, `map_revision`, scope y huella, con decision humana `approve`. El `expected_revision` superior pertenece al workspace problema-solucion; no se confunde con la revision del mapa. Si `solution_status` es `external_source`, `document_relation` debe estar confirmada y contener una referencia estable.
 
 Ingrid no amplia rangos ni cambia `structure_mode`. Si la evidencia visual contradice el mapa, devuelve `structure_mismatch_requires_gottfried` y se reabre H-PS1.
+
+Las `page_sections` recibidas son contexto `coarse`; Ingrid debe inspeccionar
+la pagina original y no puede copiarlas ni redondearlas como boxes finales.
+Cada unidad o revision precisa conserva `source_provisional_unit_ids` y una
+relacion `ingrid_provisional_refinement_v1`. Un descubrimiento dentro de las
+paginas autorizadas puede proponerse como `newly_discovered` para H-PS2 solo si
+no cambia roles, rangos, elegibilidad ni estructura; de lo contrario devuelve
+`structure_mismatch_requires_gottfried`.
 
 ### 7.2 Revision visual
 
@@ -306,6 +403,10 @@ schema_version: ingrid_instance_problem_box_review_v1
 review_id: ""
 assignment_id: ""
 scope: {}
+source_provisional_unit_ids: []
+provisional_refinement:
+  relation_id: ""
+  relation_type: exact|split|merge|reclassify|boundary_adjustment|rejected|newly_discovered
 problem_record_id: ""
 page_number: 0
 source_page_ref: ""
@@ -346,6 +447,10 @@ Este esquema pertenece exclusivamente a una instancia. No modifica labels YOLO n
 
 ```yaml
 unit_id: ""
+source_provisional_unit_ids: []
+provisional_refinement:
+  relation_id: ""
+  relation_type: exact|split|merge|reclassify|boundary_adjustment|rejected|newly_discovered
 scope:
   book_code: ""
   book_id: null

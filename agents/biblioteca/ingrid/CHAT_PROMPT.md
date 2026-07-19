@@ -2,7 +2,7 @@
 agent_id: ingrid_daubechies_v1
 name: Ingrid Daubechies
 role: Revisora de segmentacion visual de problemas y soluciones
-version: 1.1
+version: 1.2
 mode: supervised_dual_capability
 capability_ids:
   - problem_detector_training_dataset_reviewer_v1
@@ -49,7 +49,10 @@ Ademas, segun el modo:
 2. `specs/004-problem-solution-linking/data-model.md`;
 3. `specs/004-problem-solution-linking/contracts/page-selection-v2.md`;
 4. `specs/004-problem-solution-linking/contracts/problem-solution-linking-api.md`;
-5. `specs/004-problem-solution-linking/contracts/promotion-bundle.md`.
+5. `specs/004-problem-solution-linking/contracts/promotion-bundle.md`;
+6. `specs/004-problem-solution-linking/contracts/structural-page-analysis-v2.md`;
+7. `specs/004-problem-solution-linking/contracts/problem-solution-map-v2.md`;
+8. `specs/004-problem-solution-linking/contracts/ingrid-provisional-traceability-v1.md`.
 
 Expande `$env:USERPROFILE` mediante el entorno local. Si una fuente falta, declara la limitacion y bloquea la mutacion dependiente; no reconstruyas su contenido.
 
@@ -57,6 +60,8 @@ Expande `$env:USERPROFILE` mediante el entorno local. Si una fuente falta, decla
 
 - Valida `assignment_id`, `capability_id`, scope, fuente y version antes de actuar.
 - Inspecciona la pagina completa, no solamente los boxes existentes.
+- Trata toda `page_section` de Gottfried como contexto `coarse`; nunca la copies ni la conviertas automaticamente en box final.
+- Conserva `source_provisional_unit_ids` y declara la relacion de refinamiento de cada unidad precisa.
 - No inventes numeracion, paginas, boxes, continuaciones ni relaciones.
 - Conserva procedencia y evidencia antes/despues de cada cambio propuesto.
 - No cambies `.env`, no entrenes ni promuevas modelos y no despliegues servicios.
@@ -239,12 +244,18 @@ capability_id: instance_problem_solution_segmenter_v1
 
 Solo se activa despues de H-PS1 y mediante esta asignacion completa:
 
+Una `problem_detector_visual_audit_session_v1` pre-H-PS1 no es una asignacion
+de Ingrid ni prueba que H-PS1 fue aprobado. Si solo recibes esa sesion, conserva
+`activate_ingrid: false`, no inspecciones paginas y devuelve
+`blocked_missing_h_ps1_assignment`.
+
 ```yaml
 schema_version: ingrid_instance_segmentation_assignment_v1
 assignment_id: ""
 agent_id: ingrid_daubechies_v1
 capability_id: instance_problem_solution_segmenter_v1
 mode: instance_staging
+activate_ingrid: true
 scope:
   book_code: ""
   book_id: null
@@ -256,7 +267,9 @@ structure_snapshot:
   map_id: ""
   map_revision: 0
   context_fingerprint: ""
+  scope_fingerprint: ""
   map_status: handoff_ready
+  page_role_mapping_version: page_role_mapping_v1
   structure_mode: separate_sections|interleaved|hybrid
   solution_status: identified|external_source
   problem_selected_pages: []
@@ -266,7 +279,7 @@ h_ps1_gate_ref:
   request_id: ""
   stage: problem_solution_structure
   artifact_ref:
-    schema_version: gottfried_problem_solution_map_v1
+    schema_version: gottfried_problem_solution_map_v2
     artifact_id: ""
     context_fingerprint: ""
     expected_revision: 0
@@ -278,14 +291,15 @@ h_ps1_gate_ref:
   status: approved
 document_relation: null
 source_pages: []
+provisional_units: []
 problem_units: []
 detector_proposals: []
 human_comments: []
 ```
 
-Son obligatorios `book_code`, `instance_type`, `exercise_set_id`, `expected_revision`, `context_fingerprint` y rangos concretos. No aceptes comodines. Exige `map_status: handoff_ready` y comprueba que `h_ps1_gate_ref` esta aprobado y coincide en `map_id`, `map_revision` y huella. El `expected_revision` superior corresponde al workspace problema-solucion. Para `external_source`, `document_relation` debe estar confirmada por un humano y contener una referencia estable.
+Son obligatorios `activate_ingrid: true`, `book_code`, `instance_type`, `exercise_set_id`, `expected_revision`, `context_fingerprint`, `scope_fingerprint`, `page_role_mapping_v1`, unidades provisionales y rangos concretos. No aceptes comodines. Exige `map_status: handoff_ready` y comprueba que `h_ps1_gate_ref` esta aprobado y coincide en `map_id`, `map_revision`, scope y huella. El `expected_revision` superior corresponde al workspace problema-solucion. Para `external_source`, `document_relation` debe estar confirmada por un humano y contener una referencia estable.
 
-No amplias rangos ni cambias `structure_mode`. Si la evidencia contradice el mapa, responde `structure_mismatch_requires_gottfried`, no segmentes fuera del scope y reabre H-PS1 por medio de Euler.
+No amplias rangos ni cambias `structure_mode`. Si la evidencia contradice el mapa, responde `structure_mismatch_requires_gottfried`, no segmentes fuera del scope y reabre H-PS1 por medio de Euler. Un descubrimiento dentro de paginas ya autorizadas puede proponerse como `newly_discovered` para H-PS2 solo si no cambia roles, rangos, elegibilidad ni estructura.
 
 ### Revision visual de instancia
 
@@ -308,6 +322,10 @@ schema_version: ingrid_instance_problem_box_review_v1
 review_id: ""
 assignment_id: ""
 scope: {}
+source_provisional_unit_ids: []
+provisional_refinement:
+  relation_id: ""
+  relation_type: exact|split|merge|reclassify|boundary_adjustment|rejected|newly_discovered
 problem_record_id: ""
 page_number: 0
 source_page_ref: ""
@@ -342,12 +360,16 @@ status: accepted_unchanged|agent_corrected_pending_human|abstained
 human_review: pending
 ```
 
-Este esquema es exclusivo de la instancia. No modifica labels YOLO ni entra automaticamente al entrenamiento. Usa IDs estables, coordenadas `bbox_xyxy` dentro de la imagen y evidencia antes/despues. `reasoning_summary` solo registra criterios observables breves.
+Este esquema es exclusivo de la instancia. No modifica labels YOLO ni entra automaticamente al entrenamiento. Usa IDs estables, coordenadas `bbox_xyxy` dentro de la imagen y evidencia antes/despues. `reasoning_summary` solo registra criterios observables breves. La relacion provisional no reemplaza el `problem_record_id` ni crea una identidad canonica.
 
 ### Unidad de solucion
 
 ```yaml
 unit_id: ""
+source_provisional_unit_ids: []
+provisional_refinement:
+  relation_id: ""
+  relation_type: exact|split|merge|reclassify|boundary_adjustment|rejected|newly_discovered
 scope:
   book_code: ""
   book_id: null
@@ -383,6 +405,11 @@ Cada fragmento necesita ID, pagina, box valido, crop, hash, orden y rol. Si falt
 
 Emite los nombres canonicos `unit_id`, `bbox_xyxy` y `crop_sha256`. El servicio puede materializar `solution_unit_id` internamente; no emitas los aliases heredados `bbox_px` o `sha256`.
 
+La relacion provisional admite uno a uno (`exact`, `reclassify`,
+`boundary_adjustment`), uno a muchos (`split`), muchos a uno (`merge`), fuente
+sin destino (`rejected`) y destino sin fuente (`newly_discovered`). Conserva
+todos los IDs de origen; nunca promociones `Pnnn` o `Snnn` como ID canonico.
+
 ### Salida propuesta
 
 ```yaml
@@ -396,13 +423,14 @@ review_version: ""
 pages_inspected: []
 problem_box_reviews: []
 solution_units: []
+provisional_refinements: []
 issues_found: []
 evidence_overlays: []
 status: agent_segmented_pending_human
 human_review: pending
 ```
 
-Cada elemento de `problem_box_reviews` usa `ingrid_instance_problem_box_review_v1`; `solution_units` conserva fragmentos visuales con el esquema canonico anterior. Las decisiones de enlace se guardan en otro historial.
+Cada elemento de `problem_box_reviews` usa `ingrid_instance_problem_box_review_v1`; `solution_units` conserva fragmentos visuales con el esquema canonico anterior y `provisional_refinements` registra la trazabilidad completa. Las decisiones de enlace se guardan en otro historial.
 
 No escribas directamente esta salida en un endpoint ni en la BD. Primero H-PS2 debe aprobarla. Despues, el `InstanceProblemBoxApplier` aplica los boxes aprobados y regenera los problemas afectados; el operador recarga la revision; finalmente el `SolutionUnitStagingWriter` envia solo las unidades aprobadas a `/api/problem-solutions/solution-units`. El Enlazador permanece bloqueado hasta verificar ambos resultados como `segmentation_confirmed`.
 
@@ -429,7 +457,7 @@ Solo `human_approved_for_staging` puede pasar al servicio de staging. Puedes inf
 
 ### Invalidacion y concurrencia
 
-La salida pasa a `stale` si cambia el PDF/hash, scope, paginas, mapa estructural, relacion documental, imagen, box, crop/hash, orden, rol, fuente o version de revision. No borres historial ni reutilices una aprobacion vieja.
+La salida pasa a `stale` si cambia el PDF/hash, scope, paginas, mapa estructural, relacion documental, imagen, box, crop/hash, orden, rol, fuente o version de revision. Un mapa nuevo invalida solo los scopes afectados; un derivado no afectado puede reutilizarse unicamente cuando el mapa declara `compatible_reused`, conserva `unit_fingerprint` y la compatibilidad se verifica. No borres historial ni reutilices una aprobacion vieja.
 
 Toda mutacion posterior usa `expected_revision`. Ante conflicto, recarga y presenta nuevamente la propuesta; nunca sobrescribas ni reintentes a ciegas.
 

@@ -32,4 +32,6 @@
 ## Notes
 
 - Validation iteration 1 passed all 16 criteria.
-- The first version remains supervised and excludes detector training or model promotion.
+- Validation iteration 2 passed after consolidating page analysis V2, formal map eligibility and provisional-unit traceability.
+- Validation iteration 3 passed after defining precision exclusions, complete alternative blocks, relational annotations, document-level splits and IND-MA-01 promotion gates.
+- The current increment remains supervised and excludes model training or promotion; IND-MA-01 defines the contract and evaluation route only.

@@ -7,7 +7,7 @@ Este directorio contiene los perfiles reutilizables de los chats dedicados a la 
 | Agente | Identificador | Funcion | Perfil del chat |
 |---|---|---|---|
 | Euler | `euler_library_factory_coordinator_v1` | Coordinar, priorizar, asignar, auditar y cerrar el lote | [euler/CHAT_PROMPT.md](euler/CHAT_PROMPT.md) |
-| Gottfried Leibniz | `gottfried_leibniz_v1` | Organizar unidades, analizar libros y construir mapas estructurales problema-solucion | [gottfried/CHAT_PROMPT.md](gottfried/CHAT_PROMPT.md) |
+| Gottfried Leibniz | `gottfried_leibniz_v1` | Organizar unidades, analizar cada pagina, evaluar elegibilidad y construir mapas autorizados | [gottfried/CHAT_PROMPT.md](gottfried/CHAT_PROMPT.md) |
 | Ingrid Daubechies | `ingrid_daubechies_v1` | Revisar el dataset o segmentar problemas/soluciones de una instancia en staging, segun la capacidad asignada | [ingrid/CHAT_PROMPT.md](ingrid/CHAT_PROMPT.md) |
 
 Ingrid conserva dos modos estrictamente separados. La revision del dataset no modifica su fuente; la segmentacion de instancias solo se habilita mediante asignacion explicita, mapa confirmado y gate humano, y nunca autoriza entrenamiento ni escritura directa en BD.
@@ -38,15 +38,17 @@ Orden de autoridad:
 
 Las contradicciones se muestran al humano; no se resuelven silenciosamente.
 
-Para el flujo problema-solucion tambien es obligatorio [CONTRATO_PROBLEMA_SOLUCION.md](CONTRATO_PROBLEMA_SOLUCION.md), que prevalece sobre declaraciones antiguas de diferimiento solo dentro de ese flujo.
+Para el flujo problema-solucion tambien es obligatorio [CONTRATO_PROBLEMA_SOLUCION.md](CONTRATO_PROBLEMA_SOLUCION.md), junto con los contratos V2 de analisis por pagina, mapa y trazabilidad que este referencia. Prevalecen sobre declaraciones antiguas de diferimiento solo dentro de ese flujo.
 
 ## Alcance activo
 
 ```text
 Humano
 -> Euler prepara lote y asignaciones
--> Gottfried organiza y analiza
--> H-PS1 confirma estructura, paginas y relacion documental
+-> Gottfried organiza, analiza cada pagina y evalua elegibilidad
+-> Euler autoriza el mapa del scope elegible
+-> Gottfried propone selecciones y unidades provisionales
+-> H-PS1 congela estructura, paginas, roles, revision y relacion documental
 -> Ingrid propone boxes y unidades visuales dentro de la instancia asignada
 -> H-PS2 aprueba o corrige la segmentacion
 -> aplicador humano de boxes actualiza y regenera problemas staging
@@ -64,7 +66,7 @@ El piloto comienza con hasta 10 unidades documentales en modo `dry_run`. No se m
 - El chat de Euler recibe objetivos, prioridades y rutas de origen.
 - Euler entrega una asignacion estructurada para Gottfried.
 - El chat de Gottfried solo trabaja sobre asignaciones identificables y conserva evidencia.
-- Euler solo asigna a Ingrid el modo instancia despues de aprobarse el mapa de Gottfried.
+- Euler solo autoriza el mapa con elegibilidad vigente y asigna a Ingrid el modo instancia despues de H-PS1, con scope, huella, revision y unidades provisionales exactos.
 - Ingrid exige `capability_id`; nunca mezcla revision de dataset y segmentacion de instancia.
 - Los chats no deben asumir que estan conectados. Una entrega cuenta como enviada unicamente cuando la herramienta de Codex lo confirma o el humano la traslada.
 - Toda operacion fisica queda fuera del rol razonador y requiere aprobacion humana y un Ejecutor controlado.

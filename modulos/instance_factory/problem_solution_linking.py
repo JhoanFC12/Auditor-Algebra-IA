@@ -8,6 +8,9 @@ from bisect import bisect_left
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from .annotation_contracts import ANNOTATION_SCHEMA_VERSION
+from .annotation_quality import evaluate_embedded_precision_annotation
+
 
 CANDIDATE_LINK_SCHEMA_VERSION = "problem_solution_candidate_link_v1"
 PROMOTION_BUNDLE_SCHEMA_VERSION = "problem_solution_promotion_bundle_v1"
@@ -228,6 +231,22 @@ def _scope_compatible(problem: Mapping[str, Any], solution: Mapping[str, Any]) -
 
 def _scope_signature(unit: Mapping[str, Any]) -> tuple[str, str, str]:
     return _scope_values(unit)
+
+
+def precision_gate_for_unit(unit: Mapping[str, Any]) -> dict[str, Any]:
+    """Evaluate an embedded V2 precision package without changing legacy V1 units."""
+
+    raw = _mapping(unit)
+    opted_in = (
+        _text(raw.get("annotation_schema_version")) == ANNOTATION_SCHEMA_VERSION
+        or isinstance(raw.get("precision_annotation"), Mapping)
+    )
+    result = evaluate_embedded_precision_annotation(raw)
+    if not opted_in:
+        result = copy.deepcopy(result)
+        result["issues"] = []
+        result["summary"] = {**_mapping(result.get("summary")), "blocking_issue_count": 0}
+    return result
 
 
 def _same_set(problem: Mapping[str, Any], solution: Mapping[str, Any]) -> bool:
@@ -786,6 +805,12 @@ def build_problem_solution_bundle(
 
     problem = _mapping(problem_unit)
     problem_id = _unit_id(problem, fallback_prefix="problem")
+    problem_precision = precision_gate_for_unit(problem)
+    if (
+        _text(problem.get("annotation_schema_version")) == ANNOTATION_SCHEMA_VERSION
+        or isinstance(problem.get("precision_annotation"), Mapping)
+    ) and not bool(problem_precision.get("h_ps2_ready")):
+        raise ValueError(f"Precision H-PS2 bloqueada para problema {problem_id}: {';'.join(problem_precision.get('issues') or [])}")
     problem_scope = _scope_signature(problem)
     missing_problem_scope = [key for key, value in zip(_SCOPE_KEYS, problem_scope) if not value]
     if missing_problem_scope:
@@ -804,6 +829,16 @@ def build_problem_solution_bundle(
         solution_id = _text(solution_ref.get("unit_id"))
         unit = solutions_by_id.get(solution_id)
         if unit is not None:
+            precision_validation = precision_gate_for_unit(unit)
+            precision_opt_in = (
+                _text(unit.get("annotation_schema_version")) == ANNOTATION_SCHEMA_VERSION
+                or isinstance(unit.get("precision_annotation"), Mapping)
+            )
+            if precision_opt_in and not bool(precision_validation.get("h_ps2_ready")):
+                raise ValueError(
+                    f"Precision H-PS2 bloqueada para solucion {solution_id}: "
+                    + ";".join(str(item) for item in list(precision_validation.get("issues") or []))
+                )
             unit_fragments = list(unit.get("fragments") or [])
             continuation_complete = unit.get("continuation_complete")
             if continuation_complete is False or (len(unit_fragments) > 1 and continuation_complete is not True):
@@ -870,6 +905,7 @@ def build_problem_solution_bundle(
                     "exercise_set_id": problem_scope[2],
                 },
                 "provenance": copy.deepcopy(_mapping(unit.get("provenance"))),
+                "precision_validation": copy.deepcopy(precision_gate_for_unit(unit)),
             }
         )
 
@@ -987,6 +1023,16 @@ def validate_solution_unit(
         issues.append(f"{prefix}:missing_source_version")
     if not review_version:
         issues.append(f"{prefix}:missing_review_version")
+
+    precision_opt_in = (
+        _text(raw.get("annotation_schema_version")) == ANNOTATION_SCHEMA_VERSION
+        or isinstance(raw.get("precision_annotation"), Mapping)
+    )
+    if precision_opt_in:
+        precision_validation = precision_gate_for_unit(raw)
+        if not bool(precision_validation.get("h_ps2_ready")):
+            for issue in list(precision_validation.get("issues") or ["precision_annotation:invalid"]):
+                issues.append(f"{prefix}:precision_gate:{issue}")
 
     fragments = raw.get("fragments")
     if not isinstance(fragments, list) or not fragments:

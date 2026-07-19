@@ -14,12 +14,14 @@ from modulos.instance_factory.problem_solution_linking import (
     group_solution_fragments,
     problem_source_fingerprint,
     project_problem_units,
+    precision_gate_for_unit,
     retarget_candidate_problem,
     review_candidate_link,
     validate_confirmed_bundle,
     validate_solution_unit,
     visual_solution_payloads,
 )
+from tests.test_precision_annotation_contract import approved_precision_package
 
 
 class ProblemSolutionLinkingTests(unittest.TestCase):
@@ -564,6 +566,106 @@ class ProblemSolutionLinkingTests(unittest.TestCase):
         )
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0]["solution_ref"]["unit_id"], "s10")
+
+    @staticmethod
+    def _reviewed_solution_with_precision(precision: dict) -> dict:
+        return {
+            "solution_unit_id": "s1",
+            "unit_id": "s1",
+            "book_code": "book",
+            "instance_type": "practice",
+            "exercise_set_id": "set",
+            "number": 1,
+            "page_number": 10,
+            "continuation_complete": True,
+            "fragments": [
+                {
+                    "fragment_id": "fragment-1",
+                    "page_number": 10,
+                    "bbox_xyxy": [10, 20, 300, 500],
+                    "crop_path": "solution.png",
+                    "crop_sha256": "a" * 64,
+                    "fragment_role": "single",
+                }
+            ],
+            "provenance": {"source_version": "detector-v2", "review_version": "h-ps2-v1"},
+            "annotation_schema_version": "supervised_relational_annotation_v1",
+            "precision_annotation": precision,
+        }
+
+    def test_v2_solution_validation_exposes_precision_gate_and_legacy_remains_readable(self) -> None:
+        valid_solution = self._reviewed_solution_with_precision(approved_precision_package())
+        invalid_precision = approved_precision_package()
+        invalid_precision["regions"][3]["content_members"]["alternative_labels"] = ["D"]
+        invalid_solution = self._reviewed_solution_with_precision(invalid_precision)
+        legacy_solution = copy.deepcopy(valid_solution)
+        legacy_solution.pop("annotation_schema_version")
+        legacy_solution.pop("precision_annotation")
+
+        self.assertTrue(precision_gate_for_unit(valid_solution)["h_ps2_ready"])
+        self.assertEqual(validate_solution_unit(valid_solution), [])
+        invalid_issues = validate_solution_unit(invalid_solution)
+        self.assertTrue(any("precision_gate:unit:P001:alternative_coverage_missing:E" in issue for issue in invalid_issues))
+        self.assertEqual(validate_solution_unit(legacy_solution), [])
+        self.assertFalse(precision_gate_for_unit(legacy_solution)["applicable"])
+
+    def test_bundle_blocks_invalid_opt_in_precision_and_records_valid_gate(self) -> None:
+        problem = {
+            "unit_id": "p1",
+            "record_id": "p1",
+            "book_code": "book",
+            "instance_type": "practice",
+            "exercise_set_id": "set",
+            "number": 1,
+            "source_fingerprint": "sha256:problem",
+        }
+        invalid_precision = approved_precision_package()
+        invalid_precision["regions"][-1]["geometry_quality"]["checks"]["foreign_content_excluded"] = "fail"
+        invalid_solution = self._reviewed_solution_with_precision(invalid_precision)
+        candidate = generate_candidate_links(
+            [problem],
+            [invalid_solution],
+            pattern="separate_sections",
+            source_mapping_confirmed=True,
+            structure={"section_pair_confirmed": True},
+        )[0]
+        reviewed = review_candidate_link(
+            candidate,
+            action="confirm",
+            problem_unit_id="p1",
+            reviewer="human",
+            reviewed_at="2026-07-17T11:00:00-05:00",
+        )
+
+        with self.assertRaisesRegex(ValueError, "Precision H-PS2 bloqueada"):
+            build_problem_solution_bundle(
+                problem_unit=problem,
+                solution_units=[invalid_solution],
+                reviewed_links=[reviewed],
+            )
+
+        valid_solution = self._reviewed_solution_with_precision(approved_precision_package())
+        candidate = generate_candidate_links(
+            [problem],
+            [valid_solution],
+            pattern="separate_sections",
+            source_mapping_confirmed=True,
+            structure={"section_pair_confirmed": True},
+        )[0]
+        reviewed = review_candidate_link(
+            candidate,
+            action="confirm",
+            problem_unit_id="p1",
+            reviewer="human",
+            reviewed_at="2026-07-17T11:01:00-05:00",
+        )
+        bundle = build_problem_solution_bundle(
+            problem_unit=problem,
+            solution_units=[valid_solution],
+            reviewed_links=[reviewed],
+        )
+
+        self.assertTrue(bundle["solutions"][0]["precision_validation"]["h_ps2_ready"])
 
 
 if __name__ == "__main__":

@@ -7,13 +7,17 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <header class="topbar">
-      <div>
+    <header class="topbar app-topbar">
+      <div class="brand-block">
         <p class="eyebrow">Auditor-IA</p>
         <h1>Problem Detector Lab</h1>
         <p id="datasetPath" class="muted">Cargando dataset...</p>
       </div>
-      <div class="top-actions">
+      <nav class="product-tabs" aria-label="Entornos de trabajo">
+        <button id="datasetViewTab" class="product-tab active" data-view="dataset">Dataset del detector</button>
+        <button id="libraryAuditTab" class="product-tab" data-view="library-audit">Auditoría Biblioteca</button>
+      </nav>
+      <div id="datasetTopActions" class="top-actions">
         <label class="dataset-picker">
           <span>Dataset</span>
           <select id="datasetSelect"></select>
@@ -23,9 +27,31 @@
         <button id="saveBtn" class="primary">Guardar labels</button>
         <button id="approveBtn" class="approve">Aprobar comparacion</button>
       </div>
+      <div id="auditTopMeta" class="audit-top-meta" hidden>
+        <div class="audit-title-meta">
+          <strong id="auditHeaderTitle">Biblioteca</strong>
+          <span id="auditHeaderScope" class="muted">Selecciona una instancia</span>
+        </div>
+        <span id="auditHps1Badge" class="gate-badge approved">H-PS1 aprobado</span>
+        <span id="auditHps2Badge" class="gate-badge pending">H-PS2 pendiente</span>
+      </div>
     </header>
 
-    <main class="layout">
+    <section id="auditWorkflowRail" class="workflow-rail" hidden aria-label="Flujo de auditoría">
+      <span class="workflow-step complete">Análisis completo</span>
+      <i></i>
+      <span class="workflow-step complete">Elegibilidad</span>
+      <i></i>
+      <span id="auditWorkflowMapStep" class="workflow-step complete">Mapa V2</span>
+      <i></i>
+      <span id="auditWorkflowHps1Step" class="workflow-step approved">H-PS1 aprobado</span>
+      <i></i>
+      <span id="auditWorkflowIngridStep" class="workflow-step active">Ingrid activa</span>
+      <i></i>
+      <span class="workflow-step pending">H-PS2 pendiente</span>
+    </section>
+
+    <main id="datasetView" class="layout">
       <aside class="sidebar">
         <section class="panel">
           <h2>Muestras</h2>
@@ -153,6 +179,250 @@
           <pre id="statusLog">Listo.</pre>
         </details>
       </aside>
+    </main>
+
+    <main id="libraryAuditView" class="library-audit-view" hidden>
+      <section class="audit-workspace-grid">
+        <aside class="panel audit-sidebar">
+          <header class="audit-panel-heading">
+            <div>
+              <span class="section-kicker">Alcance aprobado</span>
+              <h2>Páginas e instancia</h2>
+            </div>
+            <span id="auditInstanceCount" class="section-count">0</span>
+          </header>
+          <label class="audit-field">
+            <span>Etapa de auditoría</span>
+            <select id="auditStageSelect">
+              <option value="pre_h_ps1">Pre-H-PS1 · mapa de Gottfried</option>
+              <option value="post_h_ps1">Post-H-PS1 · precisión de Ingrid</option>
+            </select>
+          </label>
+          <label id="auditSessionField" class="audit-field">
+            <span>Sesión visual</span>
+            <select id="auditSessionSelect"></select>
+          </label>
+          <label id="auditBookField" class="audit-field" hidden>
+            <span>Libro</span>
+            <select id="auditBookSelect"></select>
+          </label>
+          <label id="auditInstanceField" class="audit-field" hidden>
+            <span>Instancia</span>
+            <select id="auditInstanceSelect"></select>
+          </label>
+          <label class="audit-field">
+            <span>Composición de página</span>
+            <select id="auditPageFilter">
+              <option value="">Todas las páginas</option>
+              <option value="theory">Con teoría</option>
+              <option value="problem">Con problemas</option>
+              <option value="solution">Con soluciones</option>
+              <option value="mixed">Roles mixtos</option>
+              <option value="with_boxes">Con boxes de Ingrid</option>
+              <option value="pending_traceability">Sin trazabilidad V2</option>
+              <option value="precision_blocked">Bloqueadas para H-PS2</option>
+            </select>
+          </label>
+
+          <section class="audit-mini-section">
+            <div class="audit-section-title">
+              <strong>Elegibilidad</strong>
+              <span id="auditEligibilitySource" class="micro-label">—</span>
+            </div>
+            <div id="auditEligibilityChips" class="eligibility-chips"></div>
+          </section>
+
+          <section class="audit-mini-section">
+            <strong>Composición</strong>
+            <div class="composition-grid">
+              <span><b id="auditTheoryCount">0</b><small>Teoría</small></span>
+              <span><b id="auditProblemCount">0</b><small>Problemas</small></span>
+              <span><b id="auditSolutionCount">0</b><small>Soluciones</small></span>
+              <span><b id="auditMixedCount">0</b><small>Mixtas</small></span>
+            </div>
+          </section>
+
+          <div class="audit-section-title page-list-heading">
+            <strong id="auditPageListTitle">Páginas autorizadas</strong>
+            <span id="auditPageCount" class="micro-label">0</span>
+          </div>
+          <div id="auditPageList" class="audit-page-list" aria-live="polite"></div>
+
+          <section id="auditRelationSection" class="audit-mini-section">
+            <div class="audit-section-title">
+              <strong>Relaciones P ↔ S</strong>
+              <span id="auditRelationCount" class="micro-label">0</span>
+            </div>
+            <div id="auditRelationList" class="audit-relation-list" aria-live="polite"></div>
+          </section>
+        </aside>
+
+        <section class="panel audit-center">
+          <header class="audit-page-toolbar">
+            <div>
+              <span class="section-kicker">Gottfried + Ingrid</span>
+              <strong id="auditPageTitle">Sin página seleccionada</strong>
+            </div>
+            <div class="audit-page-controls">
+              <button id="auditPrevPageBtn" class="icon-button" aria-label="Página anterior">‹</button>
+              <label class="page-number-input"><input id="auditPageInput" type="number" min="1" value="1" /><span id="auditPageTotal">de 0</span></label>
+              <button id="auditNextPageBtn" class="icon-button" aria-label="Página siguiente">›</button>
+              <span class="toolbar-divider"></span>
+              <button id="auditZoomOutBtn" class="icon-button" aria-label="Alejar">−</button>
+              <span id="auditZoomLabel" class="zoom-label">100%</span>
+              <button id="auditZoomInBtn" class="icon-button" aria-label="Acercar">+</button>
+              <button id="auditFitBtn" class="secondary compact-button">Ajustar</button>
+            </div>
+          </header>
+          <div class="audit-legend" aria-label="Leyenda de capas">
+            <span><i class="legend-line coarse"></i>Gottfried · región coarse 0..1</span>
+            <span><i class="legend-line problem"></i>Ingrid · problema px</span>
+            <span><i class="legend-line number"></i>Ingrid · número px</span>
+            <span><i class="legend-line solution"></i>Ingrid · solución px</span>
+          </div>
+          <section id="auditRelationCompare" class="audit-relation-compare">
+            <header class="audit-relation-heading">
+              <div>
+                <span class="section-kicker">Relación provisional pre-H-PS1</span>
+                <strong id="auditRelationTitle">Selecciona una relación</strong>
+              </div>
+              <span id="auditRelationStatus" class="status-value">pending</span>
+            </header>
+            <div class="audit-relation-grid">
+              <article id="auditRelationProblemPane" class="audit-relation-pane problem-pane">
+                <p class="empty-detail">Problema provisional no seleccionado.</p>
+              </article>
+              <article id="auditRelationSolutionPane" class="audit-relation-pane solution-pane">
+                <p class="empty-detail">Solución provisional no seleccionada.</p>
+              </article>
+            </div>
+          </section>
+          <div class="audit-stage-shell">
+            <div id="auditPageStage" class="audit-page-stage">
+              <div id="auditEmptyState" class="audit-empty-state">
+                <strong>Cargando auditoría…</strong>
+                <span>La vista combina el análisis estructural y la segmentación precisa sin alterar el staging.</span>
+              </div>
+              <img id="auditPageImage" alt="Página del libro seleccionada" hidden />
+              <div id="auditOverlayLayer" class="audit-overlay-layer" aria-hidden="true"></div>
+            </div>
+          </div>
+          <footer class="audit-page-footnote">
+            <span id="auditPageSourceBadge" class="contract-badge">Contrato —</span>
+            <span id="auditPageFootnote">Las regiones coarse nunca se usan como boxes finales.</span>
+          </footer>
+        </section>
+
+        <aside class="panel audit-inspector">
+          <nav id="auditInspectorTabs" class="audit-inspector-tabs" aria-label="Detalle de auditoría">
+            <button data-audit-panel="session">Sesión</button>
+            <button class="active" data-audit-panel="summary">Resumen</button>
+            <button data-audit-panel="statistics">Estadísticas</button>
+            <button data-audit-panel="eligibility">Elegibilidad</button>
+            <button data-audit-panel="traceability">Trazabilidad</button>
+            <button data-audit-panel="precision">Precisión</button>
+          </nav>
+          <div class="audit-inspector-scroll">
+            <section class="audit-detail-panel" data-audit-panel-content="session">
+              <article class="audit-card">
+                <div class="audit-card-heading"><h3>Integridad de sesión</h3><span id="auditSessionIntegrityStatus" class="status-value">—</span></div>
+                <div id="auditSessionHashes" class="hash-detail"></div>
+              </article>
+              <article class="audit-card">
+                <h3>Relación activa</h3>
+                <div id="auditRelationDetail" class="traceability-detail"></div>
+              </article>
+            </section>
+            <section class="audit-detail-panel active" data-audit-panel-content="summary">
+              <article class="audit-card">
+                <h3>1. Roles de página</h3>
+                <div class="audit-key-value"><span>content_roles</span><div id="auditContentRoles" class="role-chip-list"></div></div>
+                <div class="audit-key-value"><span>audit_roles</span><div id="auditRoles" class="role-chip-list"></div></div>
+                <div class="audit-key-value"><span>mapping_version</span><strong id="auditMappingVersion">—</strong></div>
+                <div class="audit-key-value"><span>confianza</span><strong id="auditConfidence">—</strong></div>
+              </article>
+              <article class="audit-card">
+                <h3>2. Capas visuales</h3>
+                <div id="auditLayerSummary" class="layer-summary"></div>
+              </article>
+              <article class="audit-card">
+                <div class="audit-card-heading"><h3>3. Elegibilidad del mapa</h3><span id="auditSummaryEligibilityStatus" class="status-value">—</span></div>
+                <div id="auditSummaryEligibility" class="eligibility-detail"></div>
+              </article>
+              <article class="audit-card">
+                <h3>4. Trazabilidad provisional</h3>
+                <div id="auditSummaryTraceability" class="traceability-detail"></div>
+              </article>
+              <article id="auditUncertaintyCard" class="audit-card warning-card" hidden>
+                <h3>Incertidumbres</h3>
+                <div id="auditUncertainties"></div>
+              </article>
+            </section>
+
+            <section class="audit-detail-panel" data-audit-panel-content="statistics">
+              <article class="audit-card">
+                <h3>Estadísticas estructurales</h3>
+                <div id="auditStructuralStatistics" class="statistics-table"></div>
+                <p class="card-note">Estimaciones de Gottfried, no canónicas.</p>
+              </article>
+              <article class="audit-card">
+                <h3>Observación precisa de Ingrid</h3>
+                <div id="auditObservedStatistics" class="statistics-table"></div>
+                <p class="card-note">Boxes y unidades visibles en esta página; no sustituyen las estadísticas V2.</p>
+              </article>
+            </section>
+
+            <section class="audit-detail-panel" data-audit-panel-content="eligibility">
+              <article class="audit-card">
+                <div class="audit-card-heading"><h3>Elegibilidad del mapa</h3><span id="auditEligibilityStatus" class="status-value">—</span></div>
+                <div id="auditEligibilityDetail" class="eligibility-detail"></div>
+              </article>
+              <article class="audit-card">
+                <h3>Gates humanos</h3>
+                <div id="auditGateDetail" class="gate-detail"></div>
+              </article>
+            </section>
+
+            <section class="audit-detail-panel" data-audit-panel-content="traceability">
+              <article class="audit-card">
+                <h3>Trazabilidad provisional</h3>
+                <div id="auditTraceabilityDetail" class="traceability-detail"></div>
+                <p class="traceability-warning">Los IDs provisionales no son IDs canónicos.</p>
+              </article>
+              <article class="audit-card">
+                <h3>Incidencias de Ingrid</h3>
+                <div id="auditIssueDetail" class="issue-detail"></div>
+              </article>
+            </section>
+
+            <section class="audit-detail-panel" data-audit-panel-content="precision">
+              <article class="audit-card precision-card">
+                <div class="audit-card-heading"><h3>Gate técnico H-PS2</h3><span id="auditPrecisionStatus" class="status-value">—</span></div>
+                <div id="auditPrecisionQuality" class="precision-quality"></div>
+                <p class="card-note">Las advertencias geométricas requieren revisión; los controles fail o uncertain bloquean H-PS2.</p>
+              </article>
+              <article class="audit-card">
+                <h3>Bloqueos y advertencias</h3>
+                <div id="auditPrecisionIssues" class="precision-issues"></div>
+              </article>
+            </section>
+          </div>
+        </aside>
+      </section>
+
+      <section class="panel audit-decision-bar">
+        <div class="audit-decision-heading">
+          <div><strong id="auditDecisionTitle">Revisión visual pre-H-PS1</strong><span id="auditDecisionScope"> · relación —</span></div>
+          <span class="read-only-pill">Vista de auditoría · sin escritura</span>
+        </div>
+        <div class="audit-decision-actions">
+          <button id="auditApprovePageBtn" class="approve">Marcar relación conforme</button>
+          <button id="auditCorrectBoxBtn" class="secondary action-blue">Marcar relación incorrecta</button>
+          <button id="auditAbstainBtn" class="secondary">Relación dudosa</button>
+          <button id="auditReturnStructureBtn" class="danger">Devolver estructura a Gottfried</button>
+        </div>
+        <p id="auditDecisionNote" class="audit-decision-note">Estas marcas viven solo en esta sesión del navegador. No aprueban H-PS1, no activan a Ingrid y no escriben staging, app ni BD.</p>
+      </section>
     </main>
 
     <script src="/app.js"></script>
